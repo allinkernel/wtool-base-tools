@@ -69,7 +69,10 @@ C_DONE=$(printf '\033[32m已完成\033[0m')
 mkdir -p "$WS/declarative" "$WS/nowhere" "$WS/legacy" "$WS/outer/inner" \
          "$WS/ready/__output" "$WS/needsudo/provision"
 
-# 有 build.sh + install.sh 的项目（脚本内容无所谓：表格只问"在不在"）
+# 有 build.sh + install.sh → **必须**声明 kind="docker"（ADR-0045 / D49）：
+# `构建` 那一列现在是**类型先判**的 —— 根元素不写 kind 就是 source，`wtool build`
+# 会被门禁直接拒掉（"它不需要构建"），表格那一格也就该是"不支持"。
+# 这几个夹具存在的意义正是"一个有构建能力的项目"，所以类型要写对。
 mkbuildable() {   # <项目目录>
     mkdir -p "$1/scripts"
     printf '#!/bin/sh\n' > "$1/scripts/build.sh"
@@ -89,7 +92,7 @@ EOF
 mkbuildable "$WS/scripted"
 cat > "$WS/scripted/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" priority="20"/>
+<wtool schema="1" kind="docker" priority="20"/>
 EOF
 git -C "$WS/scripted" init -q 2>/dev/null || true
 
@@ -97,7 +100,7 @@ git -C "$WS/scripted" init -q 2>/dev/null || true
 mkbuildable "$WS/pending"
 cat > "$WS/pending/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" priority="25"/>
+<wtool schema="1" kind="docker" priority="25"/>
 EOF
 
 # 和 pending 一模一样，只多了 __output/x → install 该是"可执行"
@@ -105,7 +108,7 @@ mkbuildable "$WS/ready"
 printf 'built\n' > "$WS/ready/__output/x"
 cat > "$WS/ready/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" priority="28"/>
+<wtool schema="1" kind="docker" priority="28"/>
 EOF
 
 # 声明了系统层的项目：sudo 那格该是"可执行"，第 3/5 段该列出它
@@ -129,7 +132,7 @@ EOF
 # 老位置：build.sh 就放在项目根（不在 scripts/ 下）—— 引擎仍然认，表格也该认
 cat > "$WS/legacy/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" priority="40">
+<wtool schema="1" kind="docker" priority="40">
   <publish kind="none"/>
 </wtool>
 EOF
@@ -485,6 +488,65 @@ chk "伞项目管的子仓库**不**单独成行" \
     "$(printf '%s\n' "$TAB11_1" | awk '$2 == "umbrella/assets" {print $2}')" ""
 chk "发布标记补全出来的项目也不成行" \
     "$(printf '%s\n' "$TAB11_1" | awk '$2 == "ghost" {print $2}')" ""
+
+echo "== 12. ★项目类型（根元素 kind）是能力列的第一层判据（ADR-0045 / D49）=="
+# 这一节守的是"看板与门禁同一判据"：列里那一格亮不亮，先看**类型**，
+# 再看项目里有没有那个文件 —— `kind=source` 的项目放一个 `scripts/build.sh`
+# 不能让"构建"亮起来（否则"表里说可执行、敲下去被门禁拒"）。
+# 第 1 节那几个夹具（scripted / pending / ready / legacy）已经声明了 kind="docker"，
+# 所以它们仍然亮着"构建" —— 那几条断言本身也证明了"声明对了就照旧"。
+WS12="$T/ws12"; S12="$T/state12"
+mkdir -p "$WS12/src/scripts" "$WS12/src/build" "$WS12/dock/scripts" "$WS12/dock/build" \
+         "$WS12/musl/build"
+# ① source：**故意**放上 build.sh 和 layers.tsv（文件在那儿，类型说不要）
+printf '#!/bin/sh\ntrue\n' > "$WS12/src/scripts/build.sh"
+printf 'l1\t-\timg\tcmd\n' > "$WS12/src/build/layers.tsv"
+cat > "$WS12/src/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" priority="10"/>
+EOF
+# ② muslbin：有 layers.tsv 也不该有层（层只有 ③ 类有）
+printf 'l1\t-\timg\tcmd\n' > "$WS12/musl/build/layers.tsv"
+cat > "$WS12/musl/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" kind="muslbin" priority="20"/>
+EOF
+# ③ docker：同样是那几个文件，该亮
+printf '#!/bin/sh\ntrue\n' > "$WS12/dock/scripts/build.sh"
+printf 'l1\t-\timg\tcmd\n' > "$WS12/dock/build/layers.tsv"
+cat > "$WS12/dock/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" kind="docker" priority="30"/>
+EOF
+tbl12() { WTOOL_SUDO=yes env -u WTOOL_ROOT python3 "$PY" table --root "$WS12" --state "$S12" "$@"; }
+cell12() { tbl12 --color=always | awk -v id="$1" -v c="$2" '$2 == id {print $(2 * c); exit}'; }
+
+chk "★source 有 build.sh + layers.tsv，构建那格仍然是 不支持（类型先判）" \
+    "$(cell12 src 3)" "$C_NONE"
+chk "★source 有 layers.tsv，解容器层那格是 不支持" \
+    "$(cell12 src 11)" "$C_NONE"
+chk "★source 的 发布包 那格是 不支持（非离线族只 ③ 类有）" \
+    "$(cell12 src 9)" "$C_NONE"
+chk "★source 的 做gz包 那格是 不支持" \
+    "$(cell12 src 8)" "$C_NONE"
+chk "muslbin 有 layers.tsv，构建那格还是 不支持" \
+    "$(cell12 musl 3)" "$C_NONE"
+chk "muslbin 的解容器层也是 不支持（层只有 ③ 类有）" \
+    "$(cell12 musl 11)" "$C_NONE"
+chk "docker 有 build.sh → 构建那格 可执行（黄）" \
+    "$(cell12 dock 3)" "$C_CAN"
+chk "docker 有 layers.tsv → 解容器层那格 待产出（蓝，还没层）" \
+    "$(cell12 dock 11)" "$C_TODO"
+chk "docker 的 发布包 那格 可执行（黄）" \
+    "$(cell12 dock 9)" "$C_CAN"
+chk "docker 的 推容器层 那格 待产出（有层清单、还没层）" \
+    "$(cell12 dock 12)" "$C_TODO"
+chk "docker 的 拉容器层 那格 可执行（黄）" \
+    "$(cell12 dock 13)" "$C_CAN"
+# 汇总行也得跟着走：source/musl 不该被算进"待构建"
+_sum12=$(tbl12 --summary 2>&1)
+chk "★汇总的「待构建」只数 ③ 类（这里正好是 dock 一个）" "1" \
+    "$(printf '%s\n' "$_sum12" | sed -n 's/.*待构建 \([0-9][0-9]*\).*/\1/p')"
 
 echo
 printf 'table_test: PASS %d  FAIL %d\n' "$pass" "$fail"

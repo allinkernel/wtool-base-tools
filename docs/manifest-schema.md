@@ -84,8 +84,44 @@
 | 属性 | 必填 | 默认 | 说明 |
 |---|---|---|---|
 | `schema` | ✅ | — | 清单格式版本。当前只支持 `1`；未知值会被拒绝 |
+| `kind` | 否 | `source` | **项目类型**：`source` / `muslbin` / `docker`。决定这个项目支持哪些命令（见下节）。**别的值报错**，不会静默降级成 `source` |
 | `id` | ❌ **已删除** | — | **不要写**。项目身份**就是它相对工作区根的路径**（ADR-0037）。还写着 `id` 的清单会**直接报错**，删掉这个属性即可 |
 | `priority` | 否 | `100` | 越小越早加载；`<zshrc>`/`<bashrc>` 不写 `priority` 时继承它 |
+
+### 项目类型 `<wtool kind>` —— 它决定哪些命令对这个项目有意义
+
+```xml
+<wtool schema="1" kind="source"  priority="50">   <!-- ① 纯源码（默认，可省略不写） -->
+<wtool schema="1" kind="muslbin" priority="60">   <!-- ② musl 静态二进制 -->
+<wtool schema="1" kind="docker"  priority="20">   <!-- ③ docker 跨发行版构建 -->
+```
+
+| 取值 | 项目长什么样 | 内容从哪来 | 发哪个离线包 |
+|---|---|---|---|
+| `source`（**默认**） | 配置 / 脚本，**源码即产物** | 仓库源码本身 | `source-offline.zip` |
+| `muslbin` | 上游 release 的 x86_64-musl 静态二进制 | `download-release`（读 `<muslbin url=…>`） | `release-offline.zip` |
+| `docker` | 要按发行版编（每个发行版一套容器层） | `build` → `__layer/` → `__output/` | `release-offline.zip`（开发机另有 `release.zip`） |
+
+**它决定哪些命令对这个项目有意义** —— 完整矩阵与"不适用"的行为契约见
+[`spec.md`](spec.md)（§1.5）。一句话：用不到的命令，引擎**直接回一句"不适用"并非 0 退出**，
+**不会**假装去找 `scripts/build.sh`，也不会静默成功。
+
+> 例：`kind="source"` 的项目敲 `wtool build terminal/tmux`
+> ```
+> wtool: 'terminal/tmux' 是 kind=source（纯源码项目），不支持 build —— 它不需要构建
+> ```
+> 退出码非 0。（① 类是"源码即产物"，配置/脚本**直接链源码路径**，不渲染、不进 `__output/`。）
+
+⚠️ **三个 `kind` 不是一个东西，别混**（这是最容易写错的一处）：
+
+| 写在哪 | 取值 | 回答什么问题 |
+|---|---|---|
+| **`<wtool kind=…>`（根元素）** | `source` / `muslbin` / `docker` | **这个项目属于哪一类** → 支持哪些命令 |
+| `<build kind=…>` | `local` / `docker` | **怎么构建** → `__output/` 的形状（ADR-025） |
+| `<publish kind=…>` | `source` / `none` | **怎么发布** → 推到自己仓还是别的仓、发不发 |
+
+`docker` 在前两行里都出现，但一个问的是"**项目类型**"，另一个问的是"**怎么编**"：
+一个 `kind="docker"`（根元素）的项目照样可以写 `<build kind="local"/>`（本地直接编）。
 
 ### 项目身份 = 路径（没有 `id` 这回事了）
 
@@ -334,6 +370,7 @@ error: 未知元素 <x-note>（.../wtool.xml）；wtool.xml 没有自定义元�
 | 有 `build.sh` 就必须有非空的 `__output/` | 拒绝（`--force` 降级为警告） |
 | `<publish kind=…>` 只能是 `source` / `none`；不能有 `script=` | 拒绝 |
 | `<build kind=…>` 只能是 `local` / `docker`；`min-cores` / `min-mem` / `min-disk` 必须是正整数 | 拒绝 |
+| `<wtool kind=…>`（**根元素**）只能是 `source` / `muslbin` / `docker`；写别的值 → 报错（项目**仍然留在看板上**，但被门禁的命令一律拒，绝不悄悄当成 `source`） | 报错 |
 | 旧标签 | 警告（能装，但提醒改成新标签） |
 
 ---
@@ -342,7 +379,7 @@ error: 未知元素 <x-note>（.../wtool.xml）；wtool.xml 没有自定义元�
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" priority="20">
+<wtool schema="1" kind="source" priority="20">   <!-- 根元素的 kind = 项目类型（默认 source） -->
 
   <!-- 先于其它项目被 source -->
   <zshrc  src="env.zsh"  priority="20"/>
@@ -368,6 +405,10 @@ error: 未知元素 <x-note>（.../wtool.xml）；wtool.xml 没有自定义元�
 下载和发布**不用脚本**：那是引擎的 `download-release` / `unpack-release`（取现成的包）和
 `pack-release` / `publish-release`（打包上传）。
 **文件存在即能力声明**：`scripts/` 下有没有那个文件，直接决定项目表里那一列亮不亮。
+
+⚠️ 但这只对**引擎允许这个项目类型用的**命令成立（ADR-0045 / D49）：根元素的 `kind` 是**第一层**
+判据 —— `kind="source"` 的项目里放一个 `scripts/build.sh` **不会**让 `wtool build` 变得可用
+（引擎回"不适用"并非 0 退出）。看板那一格也是按类型先判的。
 
 ---
 

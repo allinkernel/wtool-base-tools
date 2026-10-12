@@ -277,11 +277,24 @@ wt_all_projects() {   # <过滤条件>：build | download | install | publish | 
     if [ "$_ap_filter" = "sudo" ]; then
         _ap_sudo=$(python3 "$PY" sudo-list --root "$WTOOL_ROOT" | cut -f2)
     fi
+    # 受**项目类型门禁**管的过滤条件：适用名单由 py 一次给全（别在循环里逐个起进程）。
+    # 只有 `build` 需要接 —— `download` / `publish` 那两条是 KIND_GATE_DEFERRED
+    # （本轮放行，见 wtool_plan.py），等离线族落地那一轮照抄这一句即可。
+    #
+    # 为什么要接：`wtool build all` 走的就是这个过滤器。不按类型筛的话，
+    # 一个"kind=source 但目录里放着 scripts/build.sh"的项目会被 `all` 选中并**真跑**，
+    # 那就绕过了分发点的门禁、落回"去找 scripts/build.sh"的老路。
+    _ap_applicable=""
+    case $_ap_filter in
+        build) _ap_applicable=$(python3 "$PY" kind-caps --applicable \
+                                    --command build --root "$WTOOL_ROOT") ;;
+    esac
     python3 "$PY" publish-list --root "$WTOOL_ROOT" |
     while IFS='	' read -r _prio _pid _path _kind _script _tpl _to; do
         [ -n "${_pid:-}" ] || continue
         case $_ap_filter in
-            build)    wt_project_script "$_path" build.sh    >/dev/null 2>&1 || continue ;;
+            build)    wt_project_script "$_path" build.sh    >/dev/null 2>&1 || continue
+                      printf '%s\n' "$_ap_applicable" | grep -qxF -- "$_path" || continue ;;
             # 「能下载」= 项目里**提交了** scripts/release.json（ADR-026）
             download) [ -f "$_path/scripts/release.json" ] || continue ;;
             publish)  [ "$_kind" = "none" ] && continue ;;
@@ -4370,6 +4383,44 @@ cmd_unpack_layer() {
 }
 
 # --------------------------------------------------------------------------
+# 项目类型门禁（ADR-0045 / D49）：`wtool.xml` **根元素**的 kind 决定命令有没有意义。
+#
+# **唯一一处** —— 就在下面分发点那一行（`wt_kind_gate "$_cmd" "$@"`）。放这儿的理由：
+#   ① 所有命令都从这儿过 —— 加一条新命令漏不掉；
+#   ② 各 `cmd_*` 头部有十几个，而且 `cmd_move` / `cmd_bootstrap` 会**内部**再调
+#      `cmd_install`：门禁写在头部就分不清"用户敲的"和"引擎内部调的"；
+#   ③ 门禁必须跑在命令自己的参数解析**之前**：`wtool build <source 项目> --target=x`
+#      要回"不支持"，不是回"未知参数"，更不能落到"去找 scripts/build.sh"那条老路。
+#
+# 判据（哪个 kind 支持哪条命令）**只在 py 里**（KIND_COMMANDS）—— 这里一个 kind 名都不写，
+# 免得两边各有一份会漂。`kind-caps` 只读、不拿锁、不写盘，退出码就是答案：
+#   0 = 支持（或这条命令与类型无关）  3 = 不支持（原因它已经打在 stderr 上）
+wt_kind_gate() {
+    _kg_cmd=$1; shift
+    _kg_dirs=""
+    for _kg_a in "$@"; do
+        case $_kg_a in
+            -*) ;;        # 选项不是项目
+            all) ;;       # 「all」= 所有项目 / 整机 bundle：三类都参与，逐个去问没意义
+            *)  # 只把**真实存在的目录**交给 py；不存在的路径（还没铺开的解包目录、
+                # 拼错的路径）交给命令自己报错 —— 门禁不替它下结论
+                if [ -d "$WTOOL_ROOT/$_kg_a" ]; then
+                    _kg_dirs="$_kg_dirs $WTOOL_ROOT/$_kg_a"
+                elif [ -d "$_kg_a" ]; then
+                    _kg_dirs="$_kg_dirs $_kg_a"
+                fi ;;
+        esac
+    done
+    [ -n "$_kg_dirs" ] || return 0
+    _kg_args=""
+    for _kg_d in $_kg_dirs; do
+        _kg_args="$_kg_args --project $_kg_d"
+    done
+    # shellcheck disable=SC2086
+    python3 "$PY" kind-caps --command "$_kg_cmd" --root "$WTOOL_ROOT" $_kg_args
+}
+
+# --------------------------------------------------------------------------
 # 分发
 # --------------------------------------------------------------------------
 _cmd=${1:-}
@@ -4380,6 +4431,10 @@ _cmd=${1:-}
 for _a in "$@"; do
     [ "$_a" = "--dry-run" ] && WTOOL_DRY_RUN=1
 done
+
+# 项目类型门禁：**唯一一处**，见上面 `wt_kind_gate` 的注释。
+# 不支持 → 非 0 退出，**绝不**继续往下走到命令实现里去。
+wt_kind_gate "$_cmd" "$@" || exit $?
 
 case $_cmd in
     build)     cmd_build "$@" ;;

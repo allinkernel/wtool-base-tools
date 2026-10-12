@@ -456,6 +456,11 @@ newhome
 mkdir -p "$WTOOL_ROOT"
 
 mkbuildproj() {   # <相对路径> <build 标签行>
+    # ⚠️ 根元素的 `kind="docker"` 是 ADR-0045 / D49 之后**必须**的：`build` 这条命令
+    # 只有 ③ 类有，不声明类型（默认 source）会被分发点的门禁直接拒掉
+    # （"kind=source ... 不支持 build"），脚本一行都不会跑，本场景就测不到东西了。
+    # 而 `<build kind="local|docker">` 是**另一层**（怎么构建）—— 一个 kind="docker"
+    # 的项目照样可以写 `<build kind="local"/>`（见下面第 ③ 个用例）。
     _d=$(mkproj "$1")
     mkdir -p "$_d/scripts"
     cat > "$_d/scripts/build.sh" <<'BEOF'
@@ -468,7 +473,7 @@ BEOF
     printf '%s\n' "$2" > "$_d/buildline"
     {
         printf '<?xml version="1.0" encoding="UTF-8"?>\n'
-        printf '<wtool schema="1" priority="50">\n'
+        printf '<wtool schema="1" kind="docker" priority="50">\n'
         cat "$_d/buildline"
         printf '</wtool>\n'
     } > "$_d/wtool.xml"
@@ -962,7 +967,7 @@ echo "build $*" >> "$WTOOL_PROJECT_DIR/build-called.txt"
 EOF
 cat > "$P4/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" priority="50">
+<wtool schema="1" kind="docker" priority="50">
   <link home="~/.dry.conf" wtool="~/.wtool/.dry.conf" subproject="dry.conf"/>
 </wtool>
 EOF
@@ -1285,6 +1290,175 @@ _out=$("$WT" move moval/five moval/five 2>&1) || _rc=$?
 # 拒绝之后不能留下半成品：five 还得是装着的
 [ -f "$WTOOL_STATE/moval/five/meta.tsv" ] && ok "被拒绝的 move 没动到旧项目" \
     || bad "被拒绝的 move 把旧项目卸了"
+
+# --------------------------------------------------------------------------
+printf '\n== 场景 18：项目类型 kind + 命令门禁（ADR-0045 / D49）==\n'
+#   `wtool.xml` **根元素**的 kind 决定哪些命令对这个项目有意义（类型 × 命令矩阵）。
+#   门禁只有一处：`wtool.sh` 分发点那个 `wt_kind_gate`。这里守四件事：
+#     ① 未知 kind 要**报错**（不许悄悄当成 source）
+#     ② kind=source 敲 build → 非 0 + 固定文案 + **脚本一行都不许跑**（绝不许落到老路）
+#     ③ kind=muslbin：没有 build，但有 download-release
+#     ④ kind=docker：四条 gated 命令全通
+newhome
+mkdir -p "$WTOOL_ROOT"
+
+# 建一个项目：<相对路径> <根元素额外属性> [要不要 build.sh]
+_k18_mk() {
+    _d=$(mkproj "$1")
+    printf '#!/bin/sh\ntouch "$WTOOL_PROJECT_DIR/ran-anyway.txt"\n' > "$_d/build.sh"
+    mkdir -p "$_d/scripts"
+    printf '#!/bin/sh\ntouch "$WTOOL_PROJECT_DIR/ran-anyway.txt"\n' > "$_d/scripts/build.sh"
+    chmod +x "$_d/scripts/build.sh"
+    cat > "$_d/wtool.xml" <<XEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1"$2>
+</wtool>
+XEOF
+    echo "$_d"
+}
+
+# ---- ① 未知 kind：报错。既不能在 validate 里过，也不能被门禁当成 source ----
+# （`$KC` 就是那个只读规划器；本场景①②也用不着起 wtool.sh）
+KC="$boot/lib/wtool_plan.py"
+P18BAD=$(_k18_mk "kt/bad" ' kind="sourec"')
+_rc=0
+_out=$("$WT" validate "$P18BAD" 2>&1) || _rc=$?
+[ "$_rc" != 0 ] && ok "未知 kind 被 validate 拒绝" || bad "未知 kind 居然过了"
+case $_out in
+    *"不认识"*) ok "报错说清了 kind 不认识" ;;
+    *) bad "没说清 kind 不认识" "$_out" ;;
+esac
+# 报错文案还要点破"别和 <build kind> / <publish kind> 混"（三层同名是这轮最容易踩的）
+case $_out in
+    *"<build kind="*) ok "报错点破了与 <build kind> 的区别" ;;
+    *) bad "没提醒和 <build kind> 的区别" "$_out" ;;
+esac
+# 坏 kind 的项目**仍然留在看板上**（不许静默消失），只是被门禁拦
+_rc=0
+_out=$(python3 "$KC" table --root "$WTOOL_ROOT" --state "$WTOOL_STATE" \
+       --color never --brief 2>&1) || _rc=$?
+case $_out in
+    *kt/bad*) ok "坏 kind 的项目没从看板上消失" ;;
+    *) bad "坏 kind 的项目被静默丢掉了" "$_out" ;;
+esac
+# 门禁也得拦（它现读清单，报的是"清单有问题"而不是"它不需要构建"）
+_rc=0
+_out=$("$WT" build kt/bad 2>&1) || _rc=$?
+[ "$_rc" != 0 ] && ok "坏 kind 的项目 build 被拦" || bad "坏 kind 也能 build"
+case $_out in
+    *"wtool.xml 有问题"*) ok "拦的理由是清单有问题（不是拿默认值糊弄）" ;;
+    *) bad "没说清单有问题" "$_out" ;;
+esac
+
+# ---- ② source 敲 build：非 0 + 固定文案 + 脚本一行都不跑 ----
+P18SRC=$(_k18_mk "kt/src" '')
+rm -f "$P18SRC/ran-anyway.txt"
+_rc=0
+_out=$("$WT" build kt/src 2>&1) || _rc=$?
+[ "$_rc" != 0 ] && ok "kind=source 敲 build 退出码非 0" || bad "source 敲 build 居然成功"
+case $_out in
+    *"wtool: 'kt/src' 是 kind=source（纯源码项目），不支持 build —— 它不需要构建"*)
+        ok "文案逐字对（用户 2026-10-13 给的形状）" ;;
+    *) bad "文案不对" "$_out" ;;
+esac
+[ -e "$P18SRC/ran-anyway.txt" ] && bad "★被拒了还跑了 scripts/build.sh" \
+    || ok "★scripts/build.sh 一行都没跑（没落到老路上）"
+# 同一类：层命令也拦（层只有 ③ 类有）
+_rc=0
+_out=$("$WT" unpack-layer kt/src 2>&1) || _rc=$?
+[ "$_rc" != 0 ] && ok "kind=source 敲 unpack-layer 也被拦" || bad "source 能拆层"
+case $_out in
+    *没有容器层*) ok "层命令的拒绝理由说的是「没有容器层」" ;;
+    *) bad "层命令理由不对" "$_out" ;;
+esac
+# 与类型无关的命令不拦：install 对三类都成立（这里只验"门禁没把它拦掉"）
+_rc=0
+_out=$("$WT" build kt/src --dry-run 2>&1) || _rc=$?
+[ "$_rc" != 0 ] && ok "带 --dry-run 也一样拦（门禁在参数解析之前）" || bad "--dry-run 绕过了门禁"
+
+# ---- ③ muslbin：没有 build，但有 download-release（矩阵里 ② 多出来的那一路）----
+P18MUSL=$(_k18_mk "kt/musl" ' kind="muslbin"')
+_rc=0
+_out=$("$WT" build kt/musl 2>&1) || _rc=$?
+[ "$_rc" != 0 ] && ok "kind=muslbin 也没有 build" || bad "muslbin 能 build"
+case $_out in
+    *"kind=muslbin（musl 静态二进制项目）"*) ok "文案里的类型名是 muslbin" ;;
+    *) bad "类型名不对" "$_out" ;;
+esac
+# download-release：**不**受门禁拦（它读 scripts/release.json，没有就直说没东西可下）
+_rc=0
+_out=$("$WT" download-release kt/musl 2>&1) || _rc=$?
+case $_out in
+    *"是 kind=muslbin"*) bad "muslbin 的 download-release 被门禁拦了" "$_out" ;;
+    *) ok "muslbin 的 download-release 没被门禁拦（它自己报了没东西可下）" ;;
+esac
+
+# ---- ④ docker：矩阵里 ✅ 的那些命令一条都不许被拦 ----
+P18DOCK=$(_k18_mk "kt/dock" ' kind="docker"')
+for _c in build unpack-layer push-layer pull-layer; do
+    _rc=0
+    _out=$("$WT" "$_c" kt/dock --dry-run 2>&1) || _rc=$?
+    case $_out in
+        *"不支持 $_c"*) bad "kind=docker 的 $_c 被门禁拦了" "$_out" ;;
+        *) ok "kind=docker 的 $_c 过了门禁（rc=$_rc）" ;;
+    esac
+done
+
+# ---- ⑤ `all` 展开也必须按类型筛，否则 `build all` 能绕过门禁 ----
+# `wtool build all` 走 wt_all_projects 的 build 过滤器（判据原来是"目录里有没有
+# scripts/build.sh"）—— 不接类型的话，一个"kind=source 但放着 build.sh"的项目
+# 会被 all 选中并**真跑**，门禁就白设了。
+rm -f "$P18SRC/ran-anyway.txt"
+_rc=0
+_out=$("$WT" build all --dry-run 2>&1) || _rc=$?
+case $_out in
+    *"── kt/src"*) bad "★build all 选中了 kind=source 的项目（绕过门禁）" "$_out" ;;
+    *) ok "★build all 不选 kind=source 的项目（门禁管得住 all）" ;;
+esac
+case $_out in
+    *"── kt/dock"*) ok "build all 选中 kind=docker 的项目" ;;
+    *) bad "build all 没选中 docker 的项目" "$_out" ;;
+esac
+[ -e "$P18SRC/ran-anyway.txt" ] && bad "★被排除的项目还是跑了 build.sh" \
+    || ok "★被排除的项目一行脚本都没跑"
+
+# ---- ⑥ 只读接口 kind-caps：退出码就是答案，且**什么都不写** ----
+_rc=0; python3 "$KC" kind-caps --root "$WTOOL_ROOT" --project "$P18SRC" --command build \
+    >/dev/null 2>&1 || _rc=$?
+chk "kind-caps：source + build → 3" "$_rc" "3"
+_rc=0; python3 "$KC" kind-caps --root "$WTOOL_ROOT" --project "$P18MUSL" --command build \
+    >/dev/null 2>&1 || _rc=$?
+chk "kind-caps：muslbin + build → 3" "$_rc" "3"
+_rc=0; python3 "$KC" kind-caps --root "$WTOOL_ROOT" --project "$P18MUSL" --command download-release \
+    --quiet >/dev/null 2>&1 || _rc=$?
+chk "kind-caps：muslbin + download-release → 0" "$_rc" "0"
+_rc=0; python3 "$KC" kind-caps --root "$WTOOL_ROOT" --project "$P18DOCK" --command build \
+    --quiet >/dev/null 2>&1 || _rc=$?
+chk "kind-caps：docker + build → 0" "$_rc" "0"
+# 不在能力表里的命令（move）**任何类型都放行** —— 引擎不拿类型管它
+_rc=0; python3 "$KC" kind-caps --root "$WTOOL_ROOT" --project "$P18SRC" --command move \
+    --quiet >/dev/null 2>&1 || _rc=$?
+chk "kind-caps：move 与类型无关 → 0" "$_rc" "0"
+# 不是 wtool 项目的目录 / 不存在的目录：管不着，放行（让命令自己报）
+_rc=0; python3 "$KC" kind-caps --root "$WTOOL_ROOT" --project "$T/没有这个东西" --command build \
+    --quiet >/dev/null 2>&1 || _rc=$?
+chk "kind-caps：不存在的目录 → 0（管不着）" "$_rc" "0"
+# --matrix 是**整数只读**的：不问项目也能打整张表，且矩阵形状对得上
+_out=$(python3 "$KC" kind-caps --matrix 2>&1)
+case $_out in
+    *"kind=source"*"kind=muslbin"*"kind=docker"*) ok "--matrix 打了三种类型的表头" ;;
+    *) bad "--matrix 表头不对" "$_out" ;;
+esac
+chk "--matrix 里 build 一行只有 docker 是 ✅" "✅" \
+    "$(printf '%s\n' "$_out" | awk '$1 == "build" {print $4}')"
+chk "--matrix 里 download-release 一行 source 是 —" "—" \
+    "$(printf '%s\n' "$_out" | awk '$1 == "download-release" {print $2}')"
+# ★ 只读：跑完 kind-caps 之后，项目目录一个字节都没变
+_before18=$( { find "$P18SRC" "$P18MUSL" "$P18DOCK" -mindepth 1 2>/dev/null || true; } | sort)
+python3 "$KC" kind-caps --root "$WTOOL_ROOT" --project "$P18SRC" --command build >/dev/null 2>&1 || true
+python3 "$KC" kind-caps --matrix >/dev/null 2>&1 || true
+chk "★kind-caps 是只读的（项目目录没变）" "$_before18" \
+    "$( { find "$P18SRC" "$P18MUSL" "$P18DOCK" -mindepth 1 2>/dev/null || true; } | sort)"
 
 printf '\n----------------------------------------\n'
 printf 'contract_test: PASS %d  FAIL %d\n' "$pass" "$fail"

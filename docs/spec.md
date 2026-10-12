@@ -117,6 +117,62 @@ connection reset），pull 走 `skopeo`（它写 OCI 布局时会合并 `index.j
 
 `wtool init` 的 `--with-download` / `--with-publish` 同样取消（项目脚本只剩两种，见 §14）。
 
+### 1.5 项目类型决定命令：`wtool.xml` 根元素的 `kind`（ADR-0045 / D49）
+
+每个项目在 `wtool.xml` 的**根元素**上声明类型：`kind="source"`（**默认**，可省略）/
+`"muslbin"` / `"docker"`；写别的值 → **报错**（不静默降级成 `source`）。
+引擎读它就知道哪些命令对这个项目有意义。
+
+**类型 × 命令矩阵**（`✅` = 该类型需要且支持；`—` = **不适用**）：
+
+| 命令 | ① `source` | ② `muslbin` | ③ `docker` |
+|---|---|---|---|
+| `install` / `uninstall` / `check` / `status` | ✅ | ✅ | ✅ |
+| `pack-offline-release` / `publish-offline-release` | ✅ | ✅ | ✅ |
+| `download-release` / `unpack-release` | — | ✅ | ✅ |
+| `build` / `unpack-layer` / `push-layer` / `pull-layer` / `pack-release` / `publish-release` | — | — | ✅ |
+
+**"不适用"的行为契约**（门禁在 `wtool.sh` 的**分发点**，全引擎唯一一处）：
+
+1. **非 0 退出**，stderr 上一行，形状固定：
+   ```
+   wtool: 'terminal/tmux' 是 kind=source（纯源码项目），不支持 build —— 它不需要构建
+   ```
+2. **命令实现根本不进入**：不会去找 `scripts/build.sh`、不会建目录、不会记账 —— **一个字节都不写**。
+   也**不静默成功**（既不"没做什么就说完成"，也不"绕到旧路径上试一把"）。
+3. **看板与门禁同一判据**：裸跑 `wtool` 的能力表里，`构建` / `做gz包` / `发布包` / `下gz包` /
+   `解容器层` / `推容器层` / `拉容器层` 这些格子对不支持的 kind 显示 **`不支持`**（复用 `LBL_*`），
+   不会出现"表里说可执行、敲下去被拒"。
+4. **与类型无关的命令不拦**：`move` / `bootstrap` / `sudo-install` / `sudo-uninstall` / `doctor` /
+   `validate` / `init` / `status`（无参）这类**不在能力表里**的命令，门禁一律放行 ——
+   表里没有 = 引擎不拿类型管它。
+5. **只读查询接口**（给脚本用；`wtool` 不暴露成用户命令）：
+   ```
+   python3 lib/wtool_plan.py kind-caps --project <目录> --command <命令> [--root <工作区根>] [--quiet]
+   python3 lib/wtool_plan.py kind-caps --matrix        # 打整张矩阵
+   ```
+   退出码：`0` = 支持（**或管不着**：不是 wtool 项目 / 这条命令与类型无关）· `3` = 不支持（原因在
+   stderr）· `1` = 用法错。它**只读**：不拿锁、不写盘、连 `--home` / `--state` 都不要 ——
+   所以能在拿锁之前、在命令自己的参数解析之前跑。
+
+**判据只有一处**（`lib/wtool_plan.py` 的 `KIND_COMMANDS`）：shell 侧一个 kind 名都不写。
+
+> ⚠️ **过渡期（2026-10-13，D54/D62）**：矩阵里 ① 那一列标 `—` 的**四条发布族命令**
+> （`pack-release` / `publish-release` / `download-release` / `unpack-release`）的替代品
+> `pack-offline-release` / `publish-offline-release`（+ 断网机"解压自足包 → `cp -a` 合并"那条路）
+> **还没实现** —— 现在全拦下 = ① 项目**一个包都发不出、下不了**，所以这四条**先放行但出声**：
+> ```
+> wtool: 提醒：'terminal/tmux' 是 kind=source，按目标模型 pack-release 对它不适用
+>        （它没有产物包 —— 源码即产物，离线包走 pack-offline-release）；替代命令还没实现，本轮先放行。
+> ```
+> 看板那几格已按**目标语义**显示 `不支持`（`kind-caps --matrix` 会把"还没接入门禁"的四条列出来）。
+> 离线族落地后把 `KIND_GATE_DEFERRED` 清空即可，本节其余部分不用改。
+> **已生效的是 `build` / `unpack-layer` / `push-layer` / `pull-layer` 这四条**（工作区里没有任何
+> 项目声明过构建能力，所以门禁它们不拿走任何在用的东西）。
+
+> **别和另外两个 `kind` 混**：`<build kind="local|docker">`（怎么构建）与
+> `<publish kind="source|none">`（怎么发布）是**另一层**，见 [`manifest-schema.md`](manifest-schema.md)。
+
 ### 两个角色：声明链接 vs 稳定地址
 
 很多疑问都源于把这两者混为一谈：

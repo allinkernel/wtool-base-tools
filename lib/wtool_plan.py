@@ -40,6 +40,104 @@ DEFAULT_PRIORITY = 100
 BUILD_KINDS = ("local", "docker")
 
 # ---------------------------------------------------------------------------
+# 项目类型：`wtool.xml` **根元素**上的 kind=（ADR-0045 / D49）
+#
+# ⚠️ 三个同名属性回答三个不同的问题，别混（文档与报错文案里都要说清）：
+#     根元素  kind="source|muslbin|docker"   ← **项目类型**：决定这个项目支持哪些命令
+#     <build  kind="local|docker">           ← 怎么构建：`__output/` 的形状（ADR-025）
+#     <publish kind="source|none">           ← 怎么发布：推到哪个仓、发不发
+#   `docker` 在前两个里都出现，但一个是"这个项目属于哪一类"，一个是"怎么编"。
+#
+# 不写 = source（今天清单里绝大多数项目是这一类）。
+PROJECT_KINDS = ("source", "muslbin", "docker")
+DEFAULT_PROJECT_KIND = "source"
+
+# 类型 → 这条命令对它有没有意义（ADR-0045 设计书的「类型 × 命令矩阵」，
+# 见 harness/docs/adr/0045-wtool-redesign/pre_architecture.md §1.2）。
+#
+# **表里没有的命令 = 与类型无关**（move / bootstrap / sudo-* / doctor / validate /
+# init 这类），引擎不拿类型拦它们。
+# 判据只有这一处 —— shell 侧不复制这张表（分发点的 wt_kind_gate 每次现问 py）。
+KIND_COMMANDS = {
+    # ① 纯源码：源码即产物 → 装/卸/查 + 离线自足包
+    "source": ("install", "uninstall", "check", "status",
+               "pack-offline-release", "publish-offline-release"),
+    # ② musl 静态二进制：多了"从上游取二进制"那一路
+    "muslbin": ("install", "uninstall", "check", "status",
+                "pack-offline-release", "publish-offline-release",
+                "download-release", "unpack-release"),
+    # ③ docker 跨发行版构建：多了构建 / 层 / 非离线族的产物包
+    "docker": ("install", "uninstall", "check", "status",
+               "pack-offline-release", "publish-offline-release",
+               "download-release", "unpack-release",
+               "build", "unpack-layer", "push-layer", "pull-layer",
+               "pack-release", "publish-release"),
+}
+
+# 报错文案里的类型名（给用户看的中文）
+KIND_LABELS = {"source": "纯源码项目",
+               "muslbin": "musl 静态二进制项目",
+               "docker": "docker 跨发行版构建项目"}
+
+# ⚠️ **本轮还没接入门禁**的命令：目标语义（上表）里它们对 ① 不适用，但替代品
+# **一个都还没实现** —— `pack-offline-release` / `publish-offline-release`（D54 拆族；
+# D62 把它们排在**同一轮**引擎改动里，本轮只做"类型声明 + 门禁"这一片），
+# 断网机那条路（解压 `source-offline.zip` → `cp -a` 合并）也还没有。
+#
+# 现在就把这四条拦下的后果不是"收窄"而是"**无路可走**"：
+#   · 今天工作区里 9 个项目提交了 `scripts/release.json` —— `download-release` /
+#     `unpack-release` 是**在用的**能力；
+#   · 它们的替代品（离线自足包）还没落地，拦下 = ① 项目一个包都发不出、下不了。
+# 而 `build` / `*-layer` 不同：那几条今天只有 ③ 类有，工作区里**没有任何项目**
+# 声明过构建能力（实测：没有 `scripts/build.sh`、没有 `build/layers.tsv`），
+# 所以现在就门禁它们是纯粹的"把语义说清"，不拿走任何在用的东西。
+#
+# ⇒ 这四条**放行但出声**（`kind_caps` 打一行提醒，绝不静默成功）；
+#    看板照目标语义显示"不支持"（用户 2026-10-13 要求：看板不许留白、不许骗人）。
+# ⇒ 等 pack-offline-release 落地那一轮，把下面这个元组清空即可（一行）。
+KIND_GATE_DEFERRED = ("pack-release", "publish-release",
+                      "download-release", "unpack-release")
+
+
+def kind_supports(kind, command):
+    """这个项目类型支持这条命令吗。**唯一的判据**（看板与门禁都走它）。"""
+    return command in KIND_COMMANDS.get(kind or "", ())
+
+
+def kind_is_known(kind):
+    return kind in PROJECT_KINDS
+
+
+def kind_unsupported_reason(kind, command):
+    """报错的后半句：为什么这条命令对这个类型没意义。
+
+    不能只回"不支持" —— 用户会以为是自己的环境坏了（DESIGN.md §1.3）。
+    """
+    if command == "build":
+        return "它不需要构建"
+    if command in ("unpack-layer", "push-layer", "pull-layer"):
+        return "它没有容器层"
+    if command in ("pack-release", "publish-release"):
+        if kind == "source":
+            return "它没有产物包 —— 源码即产物，离线包走 pack-offline-release"
+        return "它不产产物包 —— 开发机直接 download-release 取上游"
+    if command in ("download-release", "unpack-release"):
+        return "它没有东西要下/要解 —— 源码即产物"
+    return "它用不到这条命令"
+
+
+def kind_refusal(project_id, kind, command):
+    """不支持时的整句报错（一行，打印到 stderr）。
+
+    文案形状由用户 2026-10-13 给定（ADR-0045）：
+      wtool: 'terminal/tmux' 是 kind=source（纯源码项目），不支持 build —— 它不需要构建
+    """
+    label = KIND_LABELS.get(kind, "未知类型")
+    return ("wtool: '%s' 是 kind=%s（%s），不支持 %s —— %s"
+            % (project_id, kind, label, command,
+               kind_unsupported_reason(kind, command)))
+
+# ---------------------------------------------------------------------------
 # 引擎自用目录：~/.wtool/wtool-work-dir/
 #
 # ~/.wtool/ 是影子 $HOME：里面只允许出现"真 $HOME 里也会有的路径"
@@ -218,6 +316,25 @@ def parse_manifest(path, project_root, errors, warnings=None):
             "删掉这个属性即可（%s）" % (raw_id, path))
         return None, []
 
+    # 项目类型（ADR-0045 / D49）：`wtool.xml` **根元素**上的 kind，默认 source。
+    #
+    # ⚠️ 这里**不 return**（和 schema/id 那两个"硬拒"不同）：值是错的确实要报错，
+    #    但项目还得留在看板上 —— 悄悄消失比报错危险得多（`scan_projects` 对
+    #    meta=None 是静默跳过的）。错值原样留在 meta 里，于是
+    #    `kind_supports()` 对一切命令都回 False：引擎承认"我不知道这个项目能干什么"，
+    #    任何被门禁的命令都会被拒并带上这条错（`kind-caps` 现读清单，报得出来）。
+    raw_kind = root.get("kind")
+    if raw_kind is None:
+        project_kind = DEFAULT_PROJECT_KIND
+    else:
+        project_kind = raw_kind.strip()
+        if not kind_is_known(project_kind):
+            errors.append(
+                "wtool.xml 的 kind=%r 不认识：当前只认 %s（默认 %s）。"
+                "⚠️ 这是**项目类型**（根元素），别和 <build kind=%s> / <publish kind=%s> 混了"
+                % (raw_kind, " / ".join(PROJECT_KINDS), DEFAULT_PROJECT_KIND,
+                   "|".join(BUILD_KINDS), "|".join(PUBLISH_KINDS)))
+
     default_prio = _int_attr(root, "priority", DEFAULT_PRIORITY, errors, "wtool")
     meta = {
         "schema": schema,
@@ -225,6 +342,9 @@ def parse_manifest(path, project_root, errors, warnings=None):
         "priority": default_prio,
         "manifest_path": path,
         "manifest_sha": sha256_text(text),
+        # 项目类型（根元素的 kind）：决定哪些命令对这个项目有意义。
+        # ⚠️ 不叫 "kind" —— 下面 meta["publish"]["kind"] 是**发布方式**，两回事。
+        "project_kind": project_kind,
         # 没写 <publish> 就等于 kind="source"：打包源码推到本项目自己 origin 的 release。
         # _declared 记"老清单显式写过 <publish>"，用来在能力判定里区分
         # "声明了不发布" 和 "压根没声明"。
@@ -1729,17 +1849,22 @@ def pipeline_states(path, pub, st):
 
     out = {}
 
-    if has_build:
+    # 构建这一格先过**项目类型**（ADR-0045 / D49）：`kind != docker` 的项目没有 build 这条
+    # 命令，`scripts/build.sh` 在不在都不该让它亮。否则汇总行会说"待构建 N"，
+    # 而用户去构建时被门禁拒掉 —— 自相矛盾。
+    errors, entries = [], []
+    wf = os.path.join(path, "wtool.xml")
+    if os.path.isfile(wf):
+        _m, entries = parse_manifest(wf, path, errors)
+    pkind = (_m or {}).get("project_kind") or DEFAULT_PROJECT_KIND
+
+    if has_build and kind_supports(pkind, "build"):
         out["build"] = LBL_DONE if built else LBL_CAN
     else:
         out["build"] = LBL_NONE
 
     # install：能力来自 wtool.xml 的 link/env，或项目自己的 scripts/install.sh
     has_script = _script("install.sh")
-    errors, entries = [], []
-    wf = os.path.join(path, "wtool.xml")
-    if os.path.isfile(wf):
-        _m, entries = parse_manifest(wf, path, errors)
     declarative = bool({e.kind for e in entries} & {"link", "env"})
 
     if not (has_script or declarative):
@@ -1929,6 +2054,10 @@ def command_states(path, pub, st, state_dir):
       layer            wtool unpack-layer / push-layer / pull-layer
 
     格子取值：不支持 / 可执行 / 待产出 / 已完成 / 未发布 / 未安装（都定义在 LBL_*）。
+
+    ⚠️ 项目类型（`wtool.xml` 根元素的 kind）是**第一层判据**（ADR-0045 / D49）：
+    这条命令对这个类型没意义 → 直接"不支持"，不看 `scripts/` 里有没有文件。
+    否则会出现"表里说可执行、敲下去被门禁拒掉"这种自相矛盾。
     """
     def _script(name):
         return (os.path.isfile(os.path.join(path, "scripts", name))
@@ -1939,10 +2068,16 @@ def command_states(path, pub, st, state_dir):
     acts = st.get("actions") or {}
     out = {}
 
+    # 项目类型：没写 wtool.xml 的（上游仓）当 source —— 和 parse_manifest 的默认值一致
+    pkind = (_meta or {}).get("project_kind") or DEFAULT_PROJECT_KIND
+
+    def _can(command):
+        return kind_supports(pkind, command)
+
     has_build = has_build_capability(path)
 
     # build
-    if not has_build:
+    if not has_build or not _can("build"):
         out["build"] = LBL_NONE
     elif "build" in acts:
         out["build"] = LBL_DONE
@@ -1988,16 +2123,20 @@ def command_states(path, pub, st, state_dir):
     else:
         out["sudo-uninstall"] = LBL_NOTINST
 
-    # pack-release：源码包谁都能打；有 build 能力的要等 __output/
-    if os.path.isfile(os.path.join(path, DIR_REL, "dist.json")):
+    # pack-release（非离线族，只 ③ 类）：源码包谁都能打；有 build 能力的要等 __output/
+    if not _can("pack-release"):
+        out["pack"] = LBL_NONE
+    elif os.path.isfile(os.path.join(path, DIR_REL, "dist.json")):
         out["pack"] = LBL_DONE
     elif has_build and not _has_output(path):
         out["pack"] = LBL_TODO
     else:
         out["pack"] = LBL_CAN
 
-    # publish-release：<publish kind="none"/> 的项目不发布
-    if (pub or {}).get("kind") == "none":
+    # publish-release：<publish kind="none"/> 的项目不发布；非 ③ 类的类型不适用
+    if not _can("publish-release"):
+        out["publish"] = LBL_NONE
+    elif (pub or {}).get("kind") == "none":
         out["publish"] = LBL_NONE
     elif st.get("published"):
         out["publish"] = LBL_DONE
@@ -2005,7 +2144,9 @@ def command_states(path, pub, st, state_dir):
         out["publish"] = LBL_CAN
 
     # download-release：要仓库里**提交了** scripts/release.json 才有东西可下
-    if not os.path.isfile(os.path.join(path, "scripts", "release.json")):
+    if not _can("download-release"):
+        out["download"] = LBL_NONE
+    elif not os.path.isfile(os.path.join(path, "scripts", "release.json")):
         out["download"] = (LBL_NONE if (pub or {}).get("kind") == "none"
                            else LBL_UNPUB)
     elif st.get("artifact_source") == "download":
@@ -2013,12 +2154,13 @@ def command_states(path, pub, st, state_dir):
     else:
         out["download"] = LBL_CAN
 
-    # layer-*：只有声明了 build/layers.tsv 的项目才有层。
+    # layer-*：只有声明了 build/layers.tsv 的项目才有层（也只有 ③ 类有这条命令）。
     # 三条命令**各占一列**（用户 2026-10-04：一列一命令，别把三条塞一列）：
     #   unpack-layer  把 __layer/ 里的层解成安装产物 → 有层就是"可执行"，解过是"已完成"
     #   push-layer    把层推到镜像仓库          → 有层才谈得上推
     #   pull-layer    从镜像仓库拉层            → 有层能力就行（拉下来会覆盖 __layer/）
-    _has_layers = os.path.isfile(os.path.join(path, "build", "layers.tsv"))
+    _has_layers = (_can("unpack-layer")
+                   and os.path.isfile(os.path.join(path, "build", "layers.tsv")))
     _n_layouts = _layer_layouts(path) if _has_layers else 0
     if not _has_layers:
         out["unpack-layer"] = out["push-layer"] = out["pull-layer"] = LBL_NONE
@@ -4085,6 +4227,138 @@ def read_dist(args):
     return 0
 
 
+def _kind_matrix_commands():
+    """矩阵里出现过的命令，按"第一条声明它的类型"排（就是给人看的顺序）。
+
+    从 `KIND_COMMANDS` **推**出来，不另立一张表 —— 加一条命令只改一处。
+    """
+    seen = []
+    for kind in PROJECT_KINDS:
+        for cmd in KIND_COMMANDS[kind]:
+            if cmd not in seen:
+                seen.append(cmd)
+    return seen
+
+
+def _print_kind_matrix():
+    """整张「类型 × 命令」矩阵（`kind-caps --matrix`）。只读，不问任何项目。"""
+    cmds = _kind_matrix_commands()
+    headers = ["命令"] + ["kind=%s" % k for k in PROJECT_KINDS]
+    rows = [[c] + ["✅" if kind_supports(k, c) else "—" for k in PROJECT_KINDS]
+            for c in cmds]
+    widths = [_width_of(h) for h in headers]
+    for r in rows:
+        for i in range(len(headers)):
+            widths[i] = max(widths[i], _width_of(r[i]))
+    print("  ".join(_cjk_pad(headers[i], widths[i]) for i in range(len(headers))))
+    print("  ".join("-" * widths[i] for i in range(len(headers))))
+    for r in rows:
+        print("  ".join(_cjk_pad(r[i], widths[i]) for i in range(len(headers))))
+    if KIND_GATE_DEFERRED:
+        print()
+        print("⚠️ 本轮**还没接入门禁**（目标语义是「不适用」，现在只提醒、不拦）：")
+        for _c in KIND_GATE_DEFERRED:
+            print("    %s" % _c)
+        print("   理由：替代品 pack-offline-release / publish-offline-release 还没实现（D54/D62），")
+        print("   现在拦下 = ① 项目一个包都发不出、下不了。看板那几格已按目标语义显示「不支持」。")
+
+
+def _width_of(text):
+    """矩阵格子的显示宽度：`✅` 在终端里占 2 格，而 `_width()` 只按 CJK 区间算。
+
+    在这里补上（不动共用的 `_width`），否则"能力表"在等宽字体里会歪。
+    """
+    return _width(text) + text.count("✅") + text.count("❌")
+
+
+def _cjk_pad(text, width):
+    return text + " " * (width - _width_of(text))
+
+
+def kind_caps(args):
+    """`kind-caps`：这条命令对这个项目的类型有没有意义。**只读**。
+
+    退出码是唯一的答案通道（shell 侧门禁只看它，见 wtool.sh 的 wt_kind_gate）：
+      0  支持 —— 或者**管不着**（不是 wtool 项目 / 这条命令与类型无关）
+      1  用法错误
+      3  不支持（原因已打印到 stderr）
+
+    为什么"管不着"也回 0：门禁在**分发点**跑，拿到的是用户敲的原始参数。
+    `wtool unpack-release /tmp/一个还没铺开的目录` 里那个目录压根不是 wtool 项目
+    （连 wtool.xml 都没有 —— 那正是 unpack-release 要干的活）。门禁不能替命令
+    回答"这目录不存在 / 不是项目"，只能放行，让命令自己报。
+    """
+    if args.matrix:
+        _print_kind_matrix()
+        return 0
+    if not args.command:
+        print("用法: kind-caps --command <命令> [--project <目录>]... "
+              "[--root <工作区根>] [--quiet] | --matrix", file=sys.stderr)
+        return 1
+
+    cmd = args.command.strip()
+    # 命令**压根不在能力表里** = 与项目类型无关（move / bootstrap / sudo-* / doctor…）：
+    # 引擎不拿类型拦它，直接放行。这一条是"哪些命令受门禁管"的唯一判据。
+    if cmd not in _kind_matrix_commands():
+        if args.applicable:
+            # 与类型无关的命令：所有项目都适用 —— 但没给 --root 就没法列
+            if not args.root:
+                print("用法: kind-caps --applicable --command <命令> --root <工作区根>",
+                      file=sys.stderr)
+                return 1
+            for _prio, _pid, _path, _pub in scan_projects(args.root, manifests_only=True):
+                print(_path)
+        return 0
+    if args.applicable:
+        # `all` 展开那份名单：**门禁放行的**项目（含 KIND_GATE_DEFERRED 那几条 ——
+        # 门禁放行 = 命令要碰它，那就得列进来）。
+        if not args.root:
+            print("用法: kind-caps --applicable --command <命令> --root <工作区根>",
+                  file=sys.stderr)
+            return 1
+        for _prio, _pid, _path, _pub in scan_projects(args.root, manifests_only=True):
+            _meta, _entries = _manifest_entries(_path)
+            _k = (_meta or {}).get("project_kind") or DEFAULT_PROJECT_KIND
+            if kind_supports(_k, cmd) or cmd in KIND_GATE_DEFERRED:
+                print(_path)
+        return 0
+    rc = 0
+    for _d in args.project:
+        d = os.path.abspath(_d)
+        if not os.path.isfile(os.path.join(d, "wtool.xml")):
+            continue                      # 不是 wtool 项目：管不着
+        errors = []
+        meta, _entries = parse_manifest(os.path.join(d, "wtool.xml"), d, errors)
+        if meta is None:
+            # 清单**根本没解析出来**（schema 错 / 还写着 id= / XML 坏了）：
+            # 这不是"kind 不支持"，不替命令下结论 —— 放行，让它自己报那条错。
+            continue
+        kind = meta.get("project_kind") or DEFAULT_PROJECT_KIND
+        if kind_supports(kind, cmd):
+            continue
+        pid = project_id_of(d, args.root or None)
+        if cmd in KIND_GATE_DEFERRED:
+            # 目标语义上不适用，但替代品（离线族）还没实现 → **放行但出声**，
+            # 绝不静默成功（见 KIND_GATE_DEFERRED 的注释）。
+            if not args.quiet:
+                print("wtool: 提醒：'%s' 是 kind=%s，按目标模型 %s 对它不适用（%s）；"
+                      "替代命令还没实现，本轮先放行。"
+                      % (pid, kind, cmd, kind_unsupported_reason(kind, cmd)),
+                      file=sys.stderr)
+            continue
+        if not args.quiet:
+            if not kind_is_known(kind):
+                # kind 写错了：说清是**清单的问题**，别拿"它不需要构建"糊弄人
+                print("wtool: '%s' 的 wtool.xml 有问题，没法判断它支持哪些命令：" % pid,
+                      file=sys.stderr)
+                for e in errors:
+                    print("  %s" % e, file=sys.stderr)
+            else:
+                print(kind_refusal(pid, kind, cmd), file=sys.stderr)
+        rc = 3
+    return rc
+
+
 def build_parser():
     p = argparse.ArgumentParser(prog="wtool_plan.py", add_help=True)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -4239,6 +4513,22 @@ def build_parser():
     tb.add_argument("--summary", action="store_true")
     # --brief：只打能力表 + 图例 + 汇总行（`wtool doctor` 和 bootstrap 末尾用）
     tb.add_argument("--brief", action="store_true")
+
+    # kind-caps：**只读**的类型能力查询（ADR-0045 / D49）。
+    # 刻意**不要** --home/--state/--scratch —— 它什么都读、什么都不写，
+    # 分发点的门禁在拿到锁之前就要问它（见 wtool.sh 的 wt_kind_gate）。
+    kc = sub.add_parser("kind-caps")
+    kc.add_argument("--command", default="")
+    # 可重复：`wtool build a b c` 一次问三个项目
+    kc.add_argument("--project", action="append", default=[])
+    kc.add_argument("--root", default="")
+    # --matrix：打印整张「类型 × 命令」矩阵（文档/测试用，不问任何项目）
+    kc.add_argument("--matrix", action="store_true")
+    # --quiet：只出退出码，不打字（脚本里判 "行不行" 用）
+    kc.add_argument("--quiet", action="store_true")
+    # --applicable：打印"这条命令**适用**的项目目录"（一行一个）——
+    # `wtool build all` 那种 `all` 展开要按类型筛（见 wtool.sh 的 wt_all_projects）
+    kc.add_argument("--applicable", action="store_true")
     return p
 
 
@@ -4348,6 +4638,8 @@ def main(argv):
             download_doc(args)
         elif args.cmd == "check":
             return do_check(args)
+        elif args.cmd == "kind-caps":
+            return kind_caps(args)
         elif args.cmd == "kill-plan":
             return kill_plan(args)
         elif args.cmd == "read-dist":

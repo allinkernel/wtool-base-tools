@@ -116,7 +116,7 @@ say "3f. 没有 docker 的机器上，声明 kind=docker 的项目必须在动�
 mkdir -p "$W/ws/editor/dockerdemo/scripts"
 cat > "$W/ws/editor/dockerdemo/wtool.xml" <<'XML'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" priority="50"><build kind="docker"/></wtool>
+<wtool schema="1" kind="docker" priority="50"><build kind="docker"/></wtool>
 XML
 printf '#!/bin/sh\ntouch "$WTOOL_PROJECT_DIR/ran-anyway.txt"\n' > "$W/ws/editor/dockerdemo/scripts/build.sh"
 chmod +x "$W/ws/editor/dockerdemo/scripts/build.sh"
