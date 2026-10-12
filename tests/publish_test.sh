@@ -102,7 +102,7 @@ WS1="$T/ws1"; ST1="$T/state1"; P1="$WS1/terminal/tmux"
 mkdir -p "$P1/__output/bin"
 cat > "$P1/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" priority="50">
+<wtool schema="1" kind="docker" priority="50">
   <env src="env.zsh" shells="zsh"/>
   <link src="tmux.conf" dest=".tmux.conf"/>
 </wtool>
@@ -206,6 +206,10 @@ fi
 
 echo "== 2. publish-release --dry-run：只说不做 =="
 : > "$T/gh.log"
+# ⚠️ 判据不是"文件在不在"：**pack-release 现在就会写这份文件**（`artifacts` 对照表
+#    属于打包那一侧的事实，ADR-0045 / D57），所以场景 1 跑完它本来就在。
+#    要守的是"**--dry-run 没改动它**"（发布那几段：tag / assets[] 不许被碰）。
+_rj2_before=$(sha256sum -- "$P1/scripts/release.json" 2>/dev/null | cut -d' ' -f1 || echo none)
 _rc=0
 wt "$T/bin" "$WS1" "$ST1" publish-release terminal/tmux --tag=v-1 --dry-run \
     > "$T/log2" 2>&1 || _rc=$?
@@ -214,11 +218,9 @@ grep -q '\[dry-run\]' "$T/log2" && ok "打了 [dry-run] 标记" \
     || { bad "没有 dry-run 标记"; sed 's/^/     /' "$T/log2"; }
 chk "dry-run 没有真的建/传 __release" \
     "$(grep -cE 'release (create|upload)' "$T/gh.log" || true)" "0"
-if [ -f "$P1/scripts/release.json" ]; then
-    bad "dry-run 不该写 scripts/release.json"
-else
-    ok "dry-run 没写 scripts/release.json"
-fi
+chk "dry-run 没动 scripts/release.json（逐字节不变）" \
+    "${_rj2_before:-none}" \
+    "$(sha256sum -- "$P1/scripts/release.json" 2>/dev/null | cut -d' ' -f1 || echo none)"
 # --dry-run 要**把资产名打出来**，而且那一串名字必须全是 ASCII（BL-56 / H27：
 # GitHub 把非 ASCII 名改写成 default.zip 且 gh 不报错，dry-run 是发布前唯一的核对时机）。
 # 行首那截标签本身是中文（`wtool:   - [dry-run] 资产（N 个）: `），所以只取
@@ -425,7 +427,7 @@ WS7="$T/ws7"; ST7="$T/state7"; P7="$WS7/nodist"
 mkdir -p "$P7/__release"
 cat > "$P7/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" priority="10">
+<wtool schema="1" kind="docker" priority="10">
   <publish to="fakeowner/nodist"/>
 </wtool>
 EOF
@@ -445,7 +447,7 @@ WS8="$T/ws8"; ST8="$T/state8"; P8="$WS8/dl"
 mkdir -p "$P8/__release"
 cat > "$P8/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" priority="10">
+<wtool schema="1" kind="docker" priority="10">
   <publish to="fakeowner/dl"/>
 </wtool>
 EOF
@@ -470,7 +472,7 @@ WS9="$T/ws9"; ST9="$T/state9"; P9="$WS9/racy"
 mkdir -p "$P9"
 cat > "$P9/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" priority="10">
+<wtool schema="1" kind="docker" priority="10">
   <publish to="fakeowner/racy"/>
 </wtool>
 EOF
@@ -539,7 +541,7 @@ WS10="$T/ws10"; ST10="$T/state10"; P10="$WS10/third"
 mkdir -p "$P10"
 cat > "$P10/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" priority="10">
+<wtool schema="1" kind="docker" priority="10">
   <publish to="neovim/neovim"/>
 </wtool>
 EOF
@@ -583,7 +585,7 @@ mkdir -p "$WS11/aaa-none" "$WS11/zzz-after" "$WS11/editor/astronvim_v5/nvim"
 # 声明为不发布
 cat > "$WS11/aaa-none/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" priority="10">
+<wtool schema="1" kind="docker" priority="10">
   <publish kind="none"/>
 </wtool>
 EOF
@@ -591,7 +593,7 @@ git_init "$WS11/aaa-none"
 # 排在后面的正常项目：验"前一条不会把后一条吞掉"
 cat > "$WS11/zzz-after/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" priority="20">
+<wtool schema="1" kind="docker" priority="20">
   <publish to="fakeowner/zzz"/>
 </wtool>
 EOF
@@ -601,7 +603,7 @@ git_init "$WS11/zzz-after"
 # 伞项目用 <sub kind="none"> 替它表态。
 cat > "$WS11/editor/astronvim_v5/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" priority="90">
+<wtool schema="1" kind="docker" priority="90">
   <publish kind="source">
     <sub path="nvim" kind="none"/>
   </publish>
@@ -657,13 +659,13 @@ WS13="$T/ws13"; ST13="$T/state13"
 mkdir -p "$WS13/k1" "$WS13/k2" "$WS13/legacy/scripts"
 cat > "$WS13/k1/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" priority="10">
+<wtool schema="1" kind="docker" priority="10">
   <publish kind="script" script="publish.sh"/>
 </wtool>
 EOF
 cat > "$WS13/k2/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" priority="10">
+<wtool schema="1" kind="docker" priority="10">
   <publish kind="source" script="publish.sh"/>
 </wtool>
 EOF
@@ -680,7 +682,7 @@ grep -q '已经取消' "$T/log13b" && ok "报出 script= 已经取消" \
 # 项目里就算留着 scripts/publish.sh，也没人再调它（文件存在不再等于能力声明）
 cat > "$WS13/legacy/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" priority="10">
+<wtool schema="1" kind="docker" priority="10">
   <publish to="fakeowner/legacy"/>
 </wtool>
 EOF
@@ -710,7 +712,7 @@ WS14="$T/ws14"; ST14="$T/state14"; P14="$WS14/dirty"
 mkdir -p "$P14"
 cat > "$P14/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" priority="10">
+<wtool schema="1" kind="docker" priority="10">
   <publish to="fakeowner/dirty"/>
 </wtool>
 EOF
@@ -756,7 +758,7 @@ ln -sf real.zsh "$P15/plugins/pp/alias.plugin.zsh"
 ln -sf /etc/hostname "$P15/abs-link"
 cat > "$P15/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" priority="10">
+<wtool schema="1" kind="docker" priority="10">
   <publish kind="source" to="fakeowner/lnk"/>
 </wtool>
 EOF
@@ -793,7 +795,7 @@ WS16="$T/ws16"; ST16="$T/state16"; P16="$WS16/alpha"; P16B="$WS16/beta"
 mkdir -p "$P16" "$P16B" "$WS16/wtool-base"
 cat > "$P16/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" priority="10">
+<wtool schema="1" kind="docker" priority="10">
   <publish to="fakeowner/alpha"/>
 </wtool>
 EOF
@@ -801,7 +803,7 @@ echo 'demo' > "$P16/demo.txt"
 git_init "$P16"
 cat > "$P16B/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" priority="20">
+<wtool schema="1" kind="docker" priority="20">
   <publish to="fakeowner/beta"/>
 </wtool>
 EOF
@@ -917,7 +919,7 @@ WS17="$T/ws17"; ST17="$T/state17"; P17="$WS17/nocommit"
 mkdir -p "$P17/__release"
 cat > "$P17/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" priority="10">
+<wtool schema="1" kind="docker" priority="10">
   <publish to="fakeowner/nocommit"/>
 </wtool>
 EOF
@@ -945,7 +947,7 @@ WS18="$T/ws18"; ST18="$T/state18"; P18="$WS18/alpha"
 mkdir -p "$P18" "$WS18/wtool-base"
 cat > "$P18/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" priority="10">
+<wtool schema="1" kind="docker" priority="10">
   <publish to="fakeowner/alpha"/>
 </wtool>
 EOF
@@ -1000,6 +1002,141 @@ grep -q 'v-alpha/source.zip' "$WS18/wtool-base/download.md" \
     && ok "★刷的是唯一的那个文档（download.md）" || bad "唯一那个没刷到"
 chk "★刷完仍只有一个文档带标记" \
     "$(grep -rl --include='*.md' -E '^<!-- >>> wtool:downloads >>> -->[[:space:]]*$' "$WS18" 2>/dev/null | wc -l | tr -d ' ')" "1"
+
+# --------------------------------------------------------------------------
+echo "== 19. publish-offline-release：离线族发到**另一个** release 页（ADR-0045 / D54 / D56）=="
+#   两族必须分开（用户 2026-10-13："确保语义上的区分"）：
+#     · 非离线族（release.zip + dist.json）→ publish-release，tag 不带 offline
+#     · 离线族（自足包 + 校验文件）      → publish-offline-release，tag 必须带 offline
+#   全程打桩 gh，绝不真发。
+WS19="$T/ws19"; ST19="$T/state19"; P19="$WS19/terminal/tmux"
+mkdir -p "$P19/__output/ubuntu_24.04/bin" "$P19/bin"
+cat > "$P19/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" kind="docker" priority="10">
+  <publish to="fakeowner/tmux"/>
+</wtool>
+EOF
+printf 'set -g mouse on\n' > "$P19/tmux.conf"
+printf 'export DEMO=1\n'   > "$P19/env.zsh"
+printf 'export DEMO=1\n'   > "$P19/env.bash"
+printf 'bin\n'             > "$P19/__output/ubuntu_24.04/bin/tmux"
+printf '#!/bin/sh\ntrue\n' > "$P19/scripts-build-placeholder"   # 让 . 目录别被 git 折叠
+mkdir -p "$P19/scripts"; printf '#!/bin/sh\ntrue\n' > "$P19/scripts/build.sh"
+git_init "$P19"
+git -C "$P19" remote add origin https://github.com/fakeowner/wtool-tmux.git
+
+# 两族各打一次：开发机那份（pack-release）+ 离线那份（pack-offline-release）
+_rc=0
+wt "$T/bin" "$WS19" "$ST19" pack-release terminal/tmux --tag=ds_dev-2026-10-13 \
+    > "$T/log19a" 2>&1 || _rc=$?
+chk "前置：pack-release 成功（开发机那一族）" "$_rc" "0"
+_rc=0
+wt "$T/bin" "$WS19" "$ST19" pack-offline-release terminal/tmux > "$T/log19b" 2>&1 || _rc=$?
+chk "前置：pack-offline-release 成功（离线那一族）" "$_rc" "0"
+[ -f "$P19/__release/dist.json" ] && [ -f "$P19/__release/release-offline.zip" ] \
+    && ok "前置：两族的产物同时在 __release/ 里" || bad "前置产物不全"
+
+# ★ 离线族只发自己那族的文件：release.zip / dist.json / source.zip 一个都不许传
+: > "$T/gh.log"
+_rc=0
+wt "$T/bin" "$WS19" "$ST19" publish-offline-release terminal/tmux > "$T/log19c" 2>&1 || _rc=$?
+chk "publish-offline-release 退出码 0" "$_rc" "0"
+_upload=$(grep 'release upload' "$T/gh.log" || true)
+case $_upload in
+    *release-offline.zip*) ok "上传了离线自足包" ;;
+    *) bad "没上传自足包" "$_upload" ;;
+esac
+case $_upload in
+    *release-offline.zip.sha256*) ok "校验文件也一起传（离线机要能自己验）" ;;
+    *) bad "没传 .sha256" "$_upload" ;;
+esac
+case $_upload in
+    *release.zip*|*dist.json*|*source.zip*)
+        bad "★开发机那一族的文件串到离线 release 页上了" "$_upload" ;;
+    *) ok "★开发机那一族（release.zip / dist.json / source.zip）一个都没传" ;;
+esac
+# ★ tag 必须明显带 offline，而且和开发机那个 tag **不同**
+_otag=$(grep -oE 'release (create|view) [^ ]+' "$T/gh.log" | awk '{print $3}' | head -1)
+case $_otag in
+    offline-*) ok "★离线族的 tag 明显带 offline：$_otag" ;;
+    *) bad "★离线 tag 不对" "$_otag" ;;
+esac
+[ "$_otag" != "ds_dev-2026-10-13" ] \
+    && ok "★和开发机那族的 tag 不是同一个（两个 release 页）" \
+    || bad "两族用了同一个 tag"
+# 开发机那族的 tag 一次都不许在离线发布里出现
+grep -q 'ds_dev-2026-10-13' "$T/gh.log" && bad "离线发布里出现了开发机的 tag" \
+    || ok "离线发布没碰开发机那个 tag/release 页"
+chk "release.json 记了 offlineTag" \
+    "$(J 'import json,sys;print(json.load(open(sys.argv[1]))["offlineTag"])' "$P19/scripts/release.json")" \
+    "$_otag"
+# 两族**共用一个 release.json**，非离线那一半必须原样留着（D53 / D56）：
+# 所以再走一次开发机那条发布（打桩 gh），看它会不会把 offlineTag 冲掉。
+_rc=0
+wt "$T/bin" "$WS19" "$ST19" publish-release terminal/tmux --tag=ds_dev-2026-10-13 --force \
+    > "$T/log19c2" 2>&1 || _rc=$?
+chk "开发机那一族的 publish-release 也成功" "$_rc" "0"
+chk "★发布开发机那一族之后，tag 写上了" \
+    "$(J 'import json,sys;print(json.load(open(sys.argv[1]))["tag"])' "$P19/scripts/release.json")" \
+    "ds_dev-2026-10-13"
+chk "★两族 tags 在同一个文件里各就各位（offlineTag 没被冲掉）" \
+    "$(J 'import json,sys;d=json.load(open(sys.argv[1]));print(d["tag"] + "|" + d["offlineTag"])' "$P19/scripts/release.json")" \
+    "ds_dev-2026-10-13|$_otag"
+chk "★assets[] 里没有离线族的包（那条链的 base_url 指向另一个 tag）" \
+    "$(J 'import json,sys;print(sum(1 for a in json.load(open(sys.argv[1]))["assets"] if "offline" in a["name"]))' "$P19/scripts/release.json")" \
+    "0"
+chk "对照表里两族资产的落点都写了" \
+    "$(J 'import json,sys;d=json.load(open(sys.argv[1]))["artifacts"];print(sum(1 for k in ("release.zip","release-offline.zip") if k in d))' "$P19/scripts/release.json")" \
+    "2"
+
+# ★ tag 不带 offline → 拒绝（D56 的硬要求，不是风格问题）
+: > "$T/gh.log"
+_rc=0
+wt "$T/bin" "$WS19" "$ST19" publish-offline-release terminal/tmux --tag=v1 > "$T/log19d" 2>&1 || _rc=$?
+chk "★不给 offline 的 tag → 非 0" "$_rc" "1"
+grep -q '必须明显带 offline' "$T/log19d" && ok "说清了为什么拒" || { bad "没说清"; sed 's/^/     /' "$T/log19d"; }
+chk "★拒绝之后一个 release 都没建/传" "$(grep -cE 'release (create|upload)' "$T/gh.log" || true)" "0"
+
+# ★ 没打包就发 → 拒绝并指路 pack-offline-release
+rm -rf "$P19/__release/release-offline.zip" "$P19/__release/release-offline.zip.sha256"
+_rc=0
+wt "$T/bin" "$WS19" "$ST19" publish-offline-release terminal/tmux > "$T/log19e" 2>&1 || _rc=$?
+chk "★没有自足包 → 非 0" "$_rc" "1"
+grep -q 'pack-offline-release' "$T/log19e" && ok "指了路：先 pack-offline-release" \
+    || { bad "没指路"; sed 's/^/     /' "$T/log19e"; }
+
+# ★ dry-run：只说不做（gh 一次都不调，release.json 不动）
+_before19=$(sha256sum -- "$P19/scripts/release.json" | cut -d' ' -f1)
+: > "$T/gh.log"
+_rc=0
+wt "$T/bin" "$WS19" "$ST19" pack-offline-release terminal/tmux > /dev/null 2>&1
+wt "$T/bin" "$WS19" "$ST19" publish-offline-release terminal/tmux --dry-run \
+    > "$T/log19f" 2>&1 || _rc=$?
+chk "dry-run 退出码 0" "$_rc" "0"
+chk "★dry-run 没有 create / upload（只发了 gh repo view 那种只读查询）" \
+    "$(grep -cE 'release (create|upload)' "$T/gh.log" || true)" "0"
+chk "★dry-run 没动 release.json" "$_before19" "$(sha256sum -- "$P19/scripts/release.json" | cut -d' ' -f1)"
+grep -q '资产（' "$T/log19f" && ok "dry-run 列出了要传的资产名" || bad "dry-run 没列资产名"
+
+# ★ 反过来也要守：**开发机那一族绝不许把离线族的包传到自己的页上**。
+#   两个族同时在 __release/ 里时最容易串（实测踩过：`find __release/ -type f`
+#   把 release-offline.zip / .offline 一起传到了开发机那个 tag 上）。
+: > "$T/gh.log"
+_rc=0
+wt "$T/bin" "$WS19" "$ST19" publish-release terminal/tmux --tag=ds_dev-2026-10-13 --force \
+    > "$T/log19g" 2>&1 || _rc=$?
+chk "开发机那一族的 publish-release 退出码 0" "$_rc" "0"
+_dup=$(grep 'release upload' "$T/gh.log" || true)
+case $_dup in
+    *release-offline.zip*|*release-offline.zip.sha256*|*check-hash.sh*|*.offline*)
+        bad "★离线族的文件被传到开发机那个 release 页上了" "$_dup" ;;
+    *) ok "★开发机那一族没传离线族的任何文件（两个页面不串）" ;;
+esac
+case $_dup in
+    *release.zip*) ok "开发机那一族照常传 release.zip" ;;
+    *) bad "开发机那一族没传 release.zip" "$_dup" ;;
+esac
 
 echo
 printf 'publish_test: PASS %d  FAIL %d\n' "$pass" "$fail"

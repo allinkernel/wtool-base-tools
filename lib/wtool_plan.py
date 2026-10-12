@@ -79,24 +79,20 @@ KIND_LABELS = {"source": "纯源码项目",
                "muslbin": "musl 静态二进制项目",
                "docker": "docker 跨发行版构建项目"}
 
-# ⚠️ **本轮还没接入门禁**的命令：目标语义（上表）里它们对 ① 不适用，但替代品
-# **一个都还没实现** —— `pack-offline-release` / `publish-offline-release`（D54 拆族；
-# D62 把它们排在**同一轮**引擎改动里，本轮只做"类型声明 + 门禁"这一片），
-# 断网机那条路（解压 `source-offline.zip` → `cp -a` 合并）也还没有。
+# ⚠️ **过渡开关**：还没接入门禁的命令（空元组 = 门禁完全按上表执行）。
 #
-# 现在就把这四条拦下的后果不是"收窄"而是"**无路可走**"：
-#   · 今天工作区里 9 个项目提交了 `scripts/release.json` —— `download-release` /
-#     `unpack-release` 是**在用的**能力；
-#   · 它们的替代品（离线自足包）还没落地，拦下 = ① 项目一个包都发不出、下不了。
-# 而 `build` / `*-layer` 不同：那几条今天只有 ③ 类有，工作区里**没有任何项目**
-# 声明过构建能力（实测：没有 `scripts/build.sh`、没有 `build/layers.tsv`），
-# 所以现在就门禁它们是纯粹的"把语义说清"，不拿走任何在用的东西。
+# 2026-10-13（ADR-0045 / D54 那一轮）**已清空** —— 四条逐条判过，不再需要过渡：
+#   · `pack-release` / `publish-release` → 替代品是离线族的 `pack-offline-release` /
+#     `publish-offline-release`，**本轮已实现**（① 源码即产物 → 产 `source-offline.zip`）；
+#   · `download-release` / `unpack-release` → ① 类**根本没有东西要下/要解**
+#     （源码即产物；断网机拿的是自足包，`unzip` + `cp -a` 合并，不用 wtool）。
+#   于是按上表执行：①② 被拦、③ 放行。拦下时 `kind_refusal()` 会指路
+#   （"离线包走 pack-offline-release"），不是一句"不支持"了事。
 #
-# ⇒ 这四条**放行但出声**（`kind_caps` 打一行提醒，绝不静默成功）；
-#    看板照目标语义显示"不支持"（用户 2026-10-13 要求：看板不许留白、不许骗人）。
-# ⇒ 等 pack-offline-release 落地那一轮，把下面这个元组清空即可（一行）。
-KIND_GATE_DEFERRED = ("pack-release", "publish-release",
-                      "download-release", "unpack-release")
+# 元组**保留着**（不是删掉）：将来若再出现"目标语义要拦、但替代品还没落地"的命令，
+# 往这里加一条即可 —— `kind_caps()` 会对它"放行但出声"（绝不静默成功），
+# 看板照目标语义显示"不支持"（用户 2026-10-13：看板不许留白、不许骗人）。
+KIND_GATE_DEFERRED = ()
 
 
 def kind_supports(kind, command):
@@ -136,6 +132,122 @@ def kind_refusal(project_id, kind, command):
     return ("wtool: '%s' 是 kind=%s（%s），不支持 %s —— %s"
             % (project_id, kind, label, command,
                kind_unsupported_reason(kind, command)))
+
+
+# ---------------------------------------------------------------------------
+# 离线族（ADR-0045 / D50 / D51 / D54 / D59）：自足包的名字、形状、校验文件
+#
+# 两条族分开的理由见 DESIGN §2.3.1/§2.3.2：**消费者不同**（开发机 vs 断网机），
+# **校验机制不同**（`dist.json` vs hash txt / `check-hash.sh`）。
+#
+# ‼️ **资产名一旦发布就改不了**（H27 / ADR-0040：非 ASCII 资产名会被 GitHub
+#    静默改写成 `default.zip`）→ 下面这张表就是资产名表，改它 = 改已发布的契约。
+# ---------------------------------------------------------------------------
+OFFLINE_ASSETS = {
+    "source": "source-offline.zip",        # ① 纯源码：源码即产物
+    "muslbin": "release-offline.zip",      # ② musl 静态二进制：产物 = 上游二进制 + <generate>
+    "docker": "release-offline.zip",       # ③ docker：产物 = __output/
+}
+# 安装器包是**特例**（D59）：它是"还没有 `.wtool` 的机器"的种子，
+# 所以名字固定、解开来是 **`.wtool/` 树**（不是 `wtool/` 树）。
+INSTALLER_ASSET = "wtool-base-tools.tar.gz"
+# 分卷时旁边那份**不依赖 wtool** 的校验脚本（D51）
+OFFLINE_CHECK_HASH = "check-hash.sh"
+
+
+def offline_asset_for(project_root, bootstrap_dir=""):
+    """这个项目的离线自足包叫什么（D50）。
+
+    安装器项目是特例（D59）：**引擎自己住的那个项目** → `wtool-base-tools.tar.gz`。
+    判据是"引擎就在它里面"（`wtool.sh` + `lib/wtool_plan.py` 都在，而且正在跑的
+    那一份就住在这儿），不是"目录叫什么" —— 目录改名（bootstrap → wtool-base-tools，
+    DESIGN §7）之后这条判据照样成立，不会悄悄产出一个形状不对的包。
+    """
+    root = os.path.abspath(project_root)
+    if not os.path.isfile(os.path.join(root, "wtool.sh")) \
+            or not os.path.isfile(os.path.join(root, "lib", "wtool_plan.py")):
+        return OFFLINE_ASSETS.get(_kind_of_project(root) or DEFAULT_PROJECT_KIND,
+                                  OFFLINE_ASSETS[DEFAULT_PROJECT_KIND])
+    if bootstrap_dir and not is_under(bootstrap_dir, root):
+        # 有 wtool.sh，但**不是**正在跑的这一份引擎（另一个项目的巧合）→ 按类型走
+        return OFFLINE_ASSETS.get(_kind_of_project(root) or DEFAULT_PROJECT_KIND,
+                                  OFFLINE_ASSETS[DEFAULT_PROJECT_KIND])
+    return INSTALLER_ASSET
+
+
+def _kind_of_project(project_root):
+    """项目类型（`wtool.xml` 根元素 kind=），读不出来回 None。"""
+    path = os.path.join(os.path.abspath(project_root), "wtool.xml")
+    if not os.path.isfile(path):
+        return None
+    errors = []
+    meta, _entries = parse_manifest(path, os.path.abspath(project_root), errors)
+    if meta is None:
+        return None
+    return meta.get("project_kind") or DEFAULT_PROJECT_KIND
+
+
+def is_offline_asset(name):
+    """这个名字属不属于离线族（自足包 / 它的 hash / check-hash.sh / 分卷）。
+
+    用途只有一个：**把两族的资产分开**（`publish-release` 别把离线包传到开发机那个
+    tag 上、`publish-offline-release` 别把 `release.zip` 传到离线 tag 上）。
+    """
+    if name == OFFLINE_CHECK_HASH:
+        return True
+    for asset in list(OFFLINE_ASSETS.values()) + [INSTALLER_ASSET]:
+        if name == asset or name == asset + ".sha256" or name.startswith(asset + ".part-"):
+            return True
+    return False
+
+
+def artifact_entries(asset, project_rel="", declare=(), has_release=False):
+    """`release.json` 的对照表里，这个资产解到哪（D57；**声明式，不许猜**）。
+
+    语义（`to` 的落点根见 `ARTIFACT_ROOT`，文档在 docs/spec.md）：
+      · `from`：归档内成员的 glob（相对归档根）；把**最后一个 `/` 之前的目录前缀**
+        剥掉，余下部分拼到 `to` 下面；
+      · `to`  ：成员落到哪个目录（相对该资产的**落点根**）。
+        `""`（空串）= **只校验、不铺开**（源码包在开发机上不是"要装的东西"）。
+    例：`from="__output/**"` + `to="__output"` → `__output/ubuntu_24.04/usr/bin/zsh`
+    落在 `<项目>/__output/ubuntu_24.04/usr/bin/zsh`。
+    """
+    if asset == "release.zip":
+        # 产物 + 声明面（wtool.xml / env.*）：只下 release.zip 的机器也要能 wtool install
+        out = [{"from": "__output/**", "to": "__output"}]
+        for name in declare:
+            out.append({"from": name, "to": "."})
+        return out
+    if asset == "source.zip":
+        # ADR-0039 那条路（没有产物的项目：源码就是产物）→ 铺回项目目录。
+        # 包内形状固定是 wtool/<打那时的项目相对路径>/…，所以这里连着路径一起声明。
+        #
+        # **有产物包时**（mode=both）标成 `""` = 只校验不铺开：开发机上本来就有源码，
+        # 再铺一遍会**覆盖**本地文件（实测过 tmux：包里的 tmux.conf 盖掉了工作区那份）。
+        # 这不是隐式规则 —— 它就写在对照表里。
+        if not project_rel:
+            return []
+        return [{"from": "wtool/%s/**" % project_rel.strip("/"),
+                 "to": "" if has_release else "."}]
+    if asset in (OFFLINE_ASSETS["source"], OFFLINE_ASSETS["muslbin"]):
+        # 自足包：顶层 wtool/<项目路径>/… → 并进 $WTOOL_HOME/wtool（断网机手工 cp -a）
+        return [{"from": "wtool/**", "to": "."}]
+    if asset == INSTALLER_ASSET:
+        # 安装器包：`.wtool/` 树 → 解到 $WTOOL_HOME（就是它自己那一层）
+        return [{"from": ".wtool/**", "to": ".wtool"}]
+    return []
+
+
+# 每个资产的**落点根** —— `unpack-release` 只认"根 = 项目目录"的那些。
+# 离线族的两个（自足包 / 安装器包）是断网机**手工** `unzip`/`tar` + `cp -a` 的活，
+# **不走 wtool**（D50 的不变式："解包与合并不需要 wtool"）。
+ARTIFACT_ROOT = {
+    "release.zip": "project",
+    "source.zip": "project",
+    OFFLINE_ASSETS["source"]: "home-wtool",
+    OFFLINE_ASSETS["muslbin"]: "home-wtool",
+    INSTALLER_ASSET: "home",
+}
 
 # ---------------------------------------------------------------------------
 # 引擎自用目录：~/.wtool/wtool-work-dir/
@@ -2123,7 +2235,8 @@ def command_states(path, pub, st, state_dir):
     else:
         out["sudo-uninstall"] = LBL_NOTINST
 
-    # pack-release（非离线族，只 ③ 类）：源码包谁都能打；有 build 能力的要等 __output/
+    # pack-release（**非离线族，只 ③ 类** —— ADR-0045 / D54）：① 的离线包走
+    # pack-offline-release（另一条命令，不在看板这一列里）；有 build 能力的要等 __output/
     if not _can("pack-release"):
         out["pack"] = LBL_NONE
     elif os.path.isfile(os.path.join(path, DIR_REL, "dist.json")):
@@ -3548,6 +3661,293 @@ def pack_plan(args):
             "declare": declare, "mode": mode}
 
 
+def offline_plan(args):
+    """**离线自足包**的清单（ADR-0045 / D50 / D54 / D59）。只算不写。
+
+    "自足"的判据是**离线机上 `wtool install` 工作需要什么**（用户原话）：
+
+      · ① `source`           → 它自己的**源码文件**（`tmux.conf`、`bin/*.sh`…）
+      · ② `muslbin` / ③ `docker` → `__output/` 的**产物**（含 `<generate>` 的生成物：
+        它们按 D40/D41 就落在 `__output/` 下，所以整棵 `__output/` 进来就够）
+      · 两类都还要 `wtool.xml` + `env.zsh` / `env.bash`（引擎靠前者知道 kind 与
+        要建哪些链，后者是命令的来源）
+
+    写 scratch（都是给 shell 读的"一个词/一张表"）：
+      offline.asset   包名（source-offline.zip / release-offline.zip / wtool-base-tools.tar.gz）
+      offline.shape   wtool | dotwtool    包内第一层是 wtool/ 还是 .wtool/（D59 特例）
+      offline.prefix  归档里加在文件前的前缀（含项目相对路径）
+      offline.link    安装器包用：`.wtool/install.sh` 那条**相对软链**指向包内哪个文件
+      offline.files   要打进包的文件（相对项目目录，已按 .gitignore 过滤）
+      declare.tsv     声明面（wtool.xml / env.zsh / env.bash）
+    """
+    root = os.path.abspath(args.project)
+    scratch = args.scratch
+    os.makedirs(scratch, exist_ok=True)
+
+    asset = offline_asset_for(root, args.bootstrap or "")
+    declare = [f for f in DECLARE_FILES if os.path.isfile(os.path.join(root, f))]
+    kind = _kind_of_project(root) or DEFAULT_PROJECT_KIND
+
+    # 包内第一层：`wtool/<项目相对路径>/`（解压即合并进 `$WTOOL_HOME/wtool`，
+    # DESIGN §2.3）。相对路径按**真实工作区路径**算（项目身份 = 路径，ADR-0037），
+    # 算不出来（项目在工作区外）退回目录名 —— 和 pack-release 同一条算法。
+    rel = os.path.relpath(root, os.path.abspath(args.root)) if args.root else os.path.basename(root)
+    if rel in (".", "/") or rel == ".." or rel.startswith(".." + os.sep):
+        rel = os.path.basename(root)
+    rel = rel.replace(os.sep, "/").strip("/")
+
+    if asset == INSTALLER_ASSET:
+        # 安装器包是**特例**（D59）：`.wtool/` 树 —— `.wtool/install.sh`（软链到
+        # 项目里那个真脚本）+ `.wtool/wtool/<项目>/…`（引擎本体）。
+        # ⚠️ `.wtool/install.sh` **必须是软链**，不能是拷贝：install.sh 靠解析自身
+        #    真实路径算 `proj`（= 项目目录），拷贝出来的那份会把 `.wtool` 当项目目录，
+        #    然后死在"找不到 wtool.sh"。
+        files = source_file_list(root)
+        shape = "dotwtool"
+        prefix = ".wtool/wtool/%s/" % rel
+        link = "wtool/%s/scripts/install.sh" % rel
+    elif kind == "source":
+        files = source_file_list(root)
+        shape = "wtool"
+        prefix = "wtool/%s/" % rel
+        link = ""
+    else:
+        files = release_file_list(root)
+        shape = "wtool"
+        prefix = "wtool/%s/" % rel
+        link = ""
+
+    # 声明面（`wtool.xml` / `env.*`）**必须在包里**：引擎靠前者知道 kind 与要建哪些链，
+    # 后者是命令的来源。① 类的源码表里本来就有它们；②③ 类只有 `__output/` ——
+    # 所以这里统一补一次（并去重）。
+    files = sorted(set(files) | set(declare))
+
+    with open(os.path.join(scratch, "offline.files"), "w",
+              encoding="utf-8", errors="surrogateescape") as fh:
+        fh.write("\n".join(files) + ("\n" if files else ""))
+    with open(os.path.join(scratch, "offline.tsv"), "w", encoding="utf-8") as fh:
+        for key, val in (("asset", asset), ("shape", shape), ("prefix", prefix),
+                         ("link", link), ("kind", kind), ("rel", rel)):
+            fh.write("%s\t%s\n" % (key, val))
+    with open(os.path.join(scratch, "declare.tsv"), "w", encoding="utf-8") as fh:
+        for name in declare:
+            fh.write("%s\t%s\n" % (name, name))
+    return {"root": root, "asset": asset, "shape": shape, "prefix": prefix,
+            "link": link, "files": files, "declare": declare, "kind": kind,
+            "rel": rel}
+
+
+def dev_assets(args):
+    """`publish-release` 要传的东西：`__release/` 里**非离线族**的文件（D54 / D56）。
+
+    和 `offline_assets` 是**互补**的两半，合起来才是这个目录里所有该发布的文件：
+
+      · 点开头的（`.source` / `.offline`）是引擎自己的来源标记 —— 两个族都不传；
+      · 离线族那些（自足包 / `.sha256` / `check-hash.sh` / `<包名>.part-*` /
+        安装器包）归**另一个 release 页** —— 串到开发机那一页上，用户就会在
+        两边的页面里都看到不该看到的包（D56 要防的正是这个）。
+
+    打印**完整路径**（`gh release upload` 直接吃），按 `LC_ALL=C` 的字节序排 ——
+    和以前那句 `find … | LC_ALL=C sort` 的输出一致。
+    """
+    rel = os.path.abspath(args.release_dir)
+    found = []
+    if os.path.isdir(rel):
+        for name in sorted(os.listdir(rel)):
+            if name.startswith("."):
+                continue
+            if is_offline_asset(name):
+                continue
+            fp = os.path.join(rel, name)
+            if os.path.isfile(fp):
+                found.append(fp)
+    for path in found:
+        print(path)
+    return 0 if found else 1
+
+
+def offline_assets(args):
+    """`publish-offline-release` 要传的东西：`__release/` 里**离线族**的那些文件。
+
+    判据只有一处（`is_offline_asset`）：自足包本身、它的 `.sha256`、分卷
+    （`<包名>.part-*`）、以及分卷时那份 `check-hash.sh`。**开发机那一族的
+    （`release.zip` / `dist.json` / `.source`…）一个都不传** —— 两族落在两个
+    release 页上（D56），传串了用户就会在两边的页面上都看到不该看到的包。
+    """
+    rel = os.path.abspath(args.release_dir)
+    found = []
+    if os.path.isdir(rel):
+        for name in sorted(os.listdir(rel)):
+            if name.startswith("."):
+                continue
+            if not is_offline_asset(name):
+                continue
+            if os.path.isfile(os.path.join(rel, name)):
+                found.append(name)
+    for name in found:
+        print(name)
+    return 0 if found else 1
+
+
+def unpack_plan(args):
+    """`unpack-release` 的**声明式**计划（ADR-0045 / D57 / Q1 + Q10）。
+
+    读两样东西，**一样都不许猜**：
+      · `<项目>/release.json`（**提交在仓库里**的那份）→ `artifacts`：
+        资产名 → `[{"from": 归档内 glob, "to": 落点目录}]`
+      · 下载目录里的 `dist.json`（有的话）→ 分卷表与每卷 / 整包的 sha256（D51 的例外：
+        ③ 的 `release.zip` 保留 dist.json 校验）
+
+    stdout 是 TSV（一行一个条目），shell 侧照它校验 + 解包：
+      entry <资产名> <from> <to> <落点根> <在不在> <sha256|-> <分卷逗号表> <role>
+      skip  <资产名> <为什么跳过>
+    stderr + 非 0 退出 = 计划算不出来（缺 release.json / 表里没写解到哪 / `to` 越界…）。
+    """
+    root = os.path.abspath(args.project)
+    pub = os.path.abspath(args.from_dir) if args.from_dir else os.path.join(root, DIR_REL)
+    rj = os.path.abspath(args.release_json) if args.release_json \
+        else os.path.join(root, "scripts", "release.json")
+
+    if not os.path.isfile(rj):
+        sys.stderr.write(
+            "没有 %s —— unpack-release 是**声明式**的：解到哪由这份对照表说了算，\n"
+            "  引擎不猜（ADR-0045 / D57）。它跟着仓库走，由 pack-release /\n"
+            "  pack-offline-release 生成（`artifacts` 段），发布时补上 tag。\n" % rj)
+        return 1
+    try:
+        with open(rj, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError) as exc:
+        sys.stderr.write("读不了 %s: %s\n" % (rj, exc))
+        return 1
+    table = doc.get("artifacts") or {}
+    if not isinstance(table, dict) or not table:
+        sys.stderr.write(
+            "%s 里没有 `artifacts` 对照表 —— unpack-release 不猜东西该解到哪。\n"
+            "  跑一次 wtool pack-release（或 pack-offline-release）会把它写上。\n" % rj)
+        return 1
+
+    # dist.json：分卷 + sha256（有就用，没有就只解不校验，并**说出来**）
+    dist = {}
+    dist_path = os.path.join(pub, "dist.json")
+    if os.path.isfile(dist_path):
+        try:
+            with open(dist_path, encoding="utf-8") as fh:
+                dist = json.load(fh)
+        except (OSError, ValueError) as exc:
+            sys.stderr.write("读不了 %s: %s\n" % (dist_path, exc))
+            return 1
+        if not dist.get("files") and dist.get("volumes"):
+            # 老格式（astronvim 自己的 publish.sh 写的那种：只有 volumes + compression，
+            # 没有 files 段）**不再支持**（ADR-023：彻底抛弃历史代码）。这里明确报错，
+            # 不做"猜着解一半" —— 那会留下一个看起来装好了、其实缺东西的 __output/。
+            sys.stderr.write(
+                "%s 是老格式（没有 files 段，只有 volumes + compression）——\n"
+                "  2026-09-28 起不再支持这种包（见 harness/docs/adr/0023）。\n"
+                "  两条路：①用当时的 wtool 版本解开它；②重发一版新包："
+                "wtool pack-release <项目>\n" % dist_path)
+            return 1
+
+    shas, roles, vols = {}, {}, {}
+    for f in dist.get("files", []):
+        shas[f.get("name", "")] = f.get("sha256") or "-"
+        roles[f.get("name", "")] = f.get("role") or ""
+    for v in dist.get("volumes", []):
+        vols.setdefault(v.get("of", ""), []).append(v)
+
+    rows = []
+    handled = set()
+    for asset in sorted(table):
+        entries = table.get(asset) or []
+        where = ARTIFACT_ROOT.get(asset, "project")
+        if where != "project":
+            # 离线族的两个（自足包 / 安装器包）：断网机**手工** unzip/tar + cp -a，
+            # 不经过 wtool（D50 的不变式）。这里说清"不是这条命令的活"。
+            rows.append(("skip", asset,
+                         "离线族的包（解开来是 wtool/ 或 .wtool/ 树）—— 断网机手工 "
+                         "unzip/tar + cp -a 合并，不用 unpack-release"))
+            continue
+        if not isinstance(entries, list) or not entries:
+            sys.stderr.write("release.json 的 artifacts.%s 是空的 —— 没法解（不猜）\n" % asset)
+            return 1
+        # 在不在？（分卷的话要求**每一卷都在**）
+        if asset in vols:
+            parts = [v.get("name", "") for v in vols[asset] if v.get("name")]
+            missing = [p for p in parts if not os.path.isfile(os.path.join(pub, p))]
+            present = bool(parts) and not missing
+        else:
+            parts = []
+            missing = [] if os.path.isfile(os.path.join(pub, asset)) else [asset]
+            present = not missing
+        handled.add(asset)
+        # 分卷：名字 + 每一卷的 sha256（校验是**逐卷**做的，所以这里都带上）
+        volspec = ",".join("%s:%s" % (v.get("name", ""), v.get("sha256") or "-")
+                           for v in vols.get(asset, []) if v.get("name")) or "-"
+        if not present:
+            # 分卷缺了要说"缺分卷"（那是**传输单位**：整包不在 __release/ 里，
+            # 只缺一卷就得重下那卷 —— 报"缺 release.zip"会让人以为包没下过）
+            rows.append(("skip", asset,
+                         ("本地没有（缺分卷 %s）" % missing[0]) if parts
+                         else ("本地没有（缺 %s）" % missing[0])))
+            continue
+        for ent in entries:
+            ent = ent or {}
+            frm = ent.get("from") or ""
+            to = ent.get("to")
+            if not frm or to is None:
+                sys.stderr.write("release.json 的 artifacts.%s 里有一条缺 from/to —— 没法解\n" % asset)
+                return 1
+            if to == "":
+                # 对照表明说"只校验、不铺开"（源码包：开发机上本来就有源码，ADR-0039）。
+                # ⚠️ 这一行的 from/to 都填 `-`，**不能留空字段** —— TSV 是用
+                # `read` 按制表符读的，而制表符属于 IFS 空白：中间的空字段会被
+                # **折叠掉**，后面的列整体前移一格（实测踩过：`verify` 行的
+                # 空 `to` 让 volspec 读成了 role，报出"缺分卷: source"）。
+                rows.append(("verify", asset, "-", "-", shas.get(asset, "-"), volspec,
+                             roles.get(asset, "")))
+                continue
+            to_norm = to.strip("/")
+            if to_norm != "." and to_norm != "__output" and not to_norm.startswith("__output/"):
+                sys.stderr.write(
+                    "release.json 的 artifacts.%s 里写的落点 [%s] 不在 __output/ 下 ——\n"
+                    "  产物一律解到项目的 __output/ 下（`.` 只给声明面 / 源码铺回用；\n"
+                    '  空串 "" 表示只校验不铺开）。要改落点就改这份对照表，\n'
+                    "  别让引擎猜（ADR-0045 / D57）。\n" % (asset, to))
+                return 1
+            rows.append(("entry", asset, frm, to, shas.get(asset, "-"), volspec,
+                         roles.get(asset, "")))
+
+    # dist.json 说了这一版有哪些发布资产：role=release 的**必须**在对照表里写清解到哪
+    # （那是要装进 __output/ 的东西，绝不许猜）；role=source 的漏了 → 只校验不铺开
+    # （源码包：开发机上本来就有源码；① 类根本不走这条路）。
+    for name in sorted(roles):
+        if name in handled or is_offline_asset(name):
+            continue
+        if roles.get(name) == "release":
+            sys.stderr.write(
+                "%s 是这一版的产物资产，但 %s 的 artifacts 里没写它解到哪 ——\n"
+                "  引擎不猜（ADR-0045 / D57）。跑一次 wtool pack-release 补上，"
+                "或者手工在对照表里写清。\n" % (name, rj))
+            return 1
+        volspec = ",".join("%s:%s" % (v.get("name", ""), v.get("sha256") or "-")
+                           for v in vols.get(name, []) if v.get("name")) or "-"
+        rows.append(("verify", name, "-", "-", shas.get(name, "-"), volspec, "source"))
+
+    if not any(r[0] in ("entry", "verify") for r in rows):
+        sys.stderr.write(
+            "release.json 对照表里声明的资产，本地一个都没有 —— 先把包和 dist.json\n"
+            "  放到同一个目录（默认 <项目>/__release/；--from=<目录> 可以指到别处；\n"
+            "  dist.json 要跟包放在一起，分卷的校验靠它）。\n")
+        for r in rows:                       # 逐条说清"缺什么"，别让人自己猜
+            if r[0] == "skip":
+                sys.stderr.write("    %s：%s\n" % (r[1], r[2]))
+        return 1
+
+    for r in rows:
+        print("\t".join(str(x) for x in r))
+    return 0
+
+
 def write_dist(args):
     """把 shell 算好的分卷表落成 dist.json（写 scratch，由 shell 拷走）。"""
     rows = _read_tsv(args.rows)
@@ -3778,22 +4178,47 @@ def release_targets(project_dir):
 
 
 def release_json(args):
-    """`scripts/release.json` 的内容：**提交进仓库**的发布声明（ADR-026）。
+    """`scripts/release.json` 的内容：**提交进仓库**的发布声明（ADR-026 / ADR-0045）。
 
     它是 `wtool download-release` **唯一要读的东西**，所以必须自足：
     光凭它就能拼出每个资产的下载地址、校验 sha256 —— 不用先下任何东西
     （这一点是它和 `__release/dist.json` 的根本区别：后者跟着包走，
     和包同源，所以只能用来拼卷，不能当"可信清单"）。
 
+    **两族一个文件**（D53 / D56），四个命令各写各的那部分，谁都不许抹掉别人的：
+
+      | 谁                  | 写什么                                              |
+      |---------------------|-----------------------------------------------------|
+      | `pack-release`      | `artifacts`（产物包 / 源码包解到哪）                |
+      | `pack-offline-release` | `artifacts`（自足包解到哪）                      |
+      | `publish-release`   | 非离线族：`tag` / `base_url` / `assets[]` / targets |
+      | `publish-offline-release` | 离线族：`offlineTag`                         |
+
+    ⇒ 所以这里是**读出旧文件 → 改自己那几段 → 打出来**（`--existing`），
+      不是重新生成一份。旧文件里别的字段（另一族的 tag、上次的 targets…）原样留下。
+
     资产表**按 `__release/` 目录里实际有的文件**算（和 `publish-release`
     上传时用的 `find -maxdepth 1 -type f` 同一条规则）—— 保证"清单里有的
     就是传上去的"，不会漂移。role 从 dist.json 里补，补不到的留空。
+    **离线族的资产不算进 `assets[]`**：那条链的 base_url 指向**非离线** tag，
+    列进来会让 `download-release` 去 404 的地址下东西（两族落点见 D56）。
 
     Python 只算不写：这里 print 出来，落盘由 shell 侧的 `wt_atomic_write` 干。
     """
     rel_dir = os.path.abspath(args.release_dir)
     dist_path = os.path.abspath(args.dist) if args.dist else \
         os.path.join(rel_dir, "dist.json")
+
+    old = {}
+    if args.existing and os.path.isfile(args.existing):
+        try:
+            with open(args.existing, encoding="utf-8") as fh:
+                old = json.load(fh) or {}
+        except (OSError, ValueError) as exc:
+            sys.stderr.write("读不了 %s: %s\n" % (args.existing, exc))
+            raise SystemExit(1)
+    if not isinstance(old, dict):
+        old = {}
 
     dist = {}
     if os.path.isfile(dist_path):
@@ -3816,6 +4241,10 @@ def release_json(args):
             # `.source` 是引擎自己的来源标记，不是发布资产
             if name.startswith("."):
                 continue
+            # 离线族的包归**另一个 release 页**（D56）：不进 assets[]（那是非离线
+            # 族的清单，base_url 指着非离线 tag），只进 artifacts（"解到哪"）。
+            if is_offline_asset(name):
+                continue
             fp = os.path.join(rel_dir, name)
             if not os.path.isfile(fp):
                 continue
@@ -3831,34 +4260,119 @@ def release_json(args):
                            "bytes": os.path.getsize(fp),
                            "sha256": sha.hexdigest()})
 
-    pid = dist.get("project") or args.project_id or ""
+    # ── 对照表：资产名 → 解到哪（D57）────────────────────────────────────
+    # 键来自三处：dist.json 说的逻辑资产名（分卷后大文件本身不在 __release/ 里，
+    # 只能从那儿知道它存在）、目录里实际有的离线族包、旧文件里已有的（别弄丢）。
+    known = set(a for a in roles if a and not is_offline_asset(a))
+    if os.path.isdir(rel_dir):
+        for name in sorted(os.listdir(rel_dir)):
+            # 只要**包本身**：`.sha256` / `check-hash.sh` / `.part-*` 都是它的附件，
+            # 不给它们单独写一条"解到哪"（真正的资产是那个包）。
+            if name.startswith(".") or name == OFFLINE_CHECK_HASH \
+                    or name.endswith(".sha256") or ".part-" in name:
+                continue
+            if is_offline_asset(name):
+                known.add(name)
+    known |= set((old.get("artifacts") or {}).keys())
+    if args.offline_assets:
+        known |= set(a for a in args.offline_assets.split(",") if a)
+
+    rel = args.project_rel or ""
+    if not rel and args.project_dir:
+        rel = os.path.relpath(os.path.abspath(args.project_dir),
+                              os.path.abspath(args.root or
+                                              os.environ.get("WTOOL_ROOT") or
+                                              os.path.dirname(os.path.abspath(args.project_dir))))
+        if rel in (".", "/") or rel == ".." or rel.startswith(".." + os.sep):
+            rel = os.path.basename(os.path.abspath(args.project_dir))
+        rel = rel.replace(os.sep, "/")
+    declare = dist.get("declare") or []
+    if not declare:
+        _decl_base = os.path.abspath(args.project_dir) if args.project_dir \
+            else os.path.dirname(rel_dir)
+        declare = [f for f in DECLARE_FILES if os.path.isfile(os.path.join(_decl_base, f))]
+
+    artifacts = {}
+    for name in sorted(known):
+        ent = artifact_entries(name, rel, declare, has_release="release.zip" in known)
+        if ent:
+            artifacts[name] = ent
+
+    pid = dist.get("project") or args.project_id or old.get("project") or ""
     targets = [t for t in (args.targets or "").split(",") if t]
-    out = {
+    out = dict(old)                       # ← 先留着上一版，再覆盖自己这几段
+    out.update({
         "schema": 1,
         "project": pid,
-        "repo": dist.get("repo", ""),
-        "tag": dist.get("tag", ""),
-        "base_url": dist.get("base_url", ""),
-        "commit": dist.get("commit", ""),
-        "packed_at": dist.get("packed_at", ""),
-        "published_at": args.at or "",
-        "wtool_engine": args.engine or "",
-        "dirty": args.dirty == "1",
-        "volume_size": dist.get("volume_size", ""),
-        "declare": dist.get("declare", []),
-        # ⚠️ 今天只有 target 名字；glibc / arch 要等项目侧的 targets 清单
-        # 定下来（BL-28）才补得上。补上之前 download-release 不能按 glibc 选包。
-        "targets": [{"target": t} for t in targets],
-        "assets": assets,
-        # how 要说清"解出来是什么"：只有源码包的版本没有 __output/ 可解（ADR-0039）
-        "how": ("wtool download-release %s   # 下到项目的 __release/（按本文件的 sha256 校验）\n"
-                "wtool unpack-release %s     # %s\n"
-                "wtool install %s            # 装到本机"
-                % (pid, pid,
-                   "拼分卷 + 解到 __output/" if any(a.get("role") == "release" for a in assets)
-                   else "拼分卷 + 把源码铺回项目目录", pid)),
-    }
+        # 离线族（publish-offline-release 那条线）：--offline-tag 给了才动它的值
+        "offlineTag": args.offline_tag or old.get("offlineTag", ""),
+        "artifacts": artifacts,
+    })
+    # 非离线族那几段（tag / base_url / assets[] / targets…）**只有 publish-release
+    # 有权改**（--dev-fields）：pack-release 也会调这里刷新对照表，它要是顺手把
+    # assets[] 重算一遍，"清单里有的就是传上去的"这条就破了（还没传呢）。
+    if args.dev_fields:
+        out.update({
+            "repo": dist.get("repo", "") or old.get("repo", ""),
+            "tag": dist.get("tag", "") or old.get("tag", ""),
+            "base_url": dist.get("base_url", "") or old.get("base_url", ""),
+            "assets": assets,
+            "commit": dist.get("commit", ""),
+            "packed_at": dist.get("packed_at", ""),
+            "published_at": args.at or old.get("published_at", ""),
+            "wtool_engine": args.engine or old.get("wtool_engine", ""),
+            "dirty": args.dirty == "1",
+            "volume_size": dist.get("volume_size", ""),
+            "declare": dist.get("declare", []),
+            # ⚠️ 今天只有 target 名字；glibc / arch 要等项目侧的 targets 清单
+            # 定下来（BL-28）才补得上。补上之前 download-release 不能按 glibc 选包。
+            "targets": [{"target": t} for t in targets],
+        })
+    else:
+        # 新建的文件（或从没发过非离线族的项目）：字段**留空但留着**，
+        # download-release 读它时不会撞上缺字段。
+        for key, seed in (("repo", ""), ("tag", ""), ("base_url", ""),
+                          ("assets", []), ("commit", ""), ("packed_at", ""),
+                          ("published_at", ""), ("wtool_engine", ""),
+                          ("volume_size", ""), ("declare", []), ("targets", [])):
+            out.setdefault(key, seed)
+    out["how"] = _release_how(pid, assets if args.dev_fields else out.get("assets") or [],
+                              artifacts, out.get("offlineTag", ""), out.get("tag", ""))
     print(json.dumps(out, ensure_ascii=False, indent=2))
+
+
+def _release_how(pid, assets, artifacts, offline_tag, tag):
+    """`release.json` 的 `how`：**这一份清单教人敲哪几条命令**。
+
+    两族各有各的读者：非离线族是"有源码的开发机"（download → unpack → install），
+    离线族是"断网机"（人工下自足包 → unzip → cp -a → install，**没有 wtool**）。
+    """
+    lines = []
+    if any(a.get("role") == "release" for a in assets):
+        dev = "拼分卷 + 解到 __output/"
+    else:
+        dev = "拼分卷 + 把源码铺回项目目录"
+    if assets and tag:
+        lines.append("wtool download-release %s   # 下到项目的 __release/（按本文件的 sha256 校验）" % pid)
+        lines.append("wtool unpack-release %s     # %s" % (pid, dev))
+        lines.append("wtool install %s            # 装到本机" % pid)
+    off = [a for a in artifacts if a in OFFLINE_ASSETS.values()]
+    if off:
+        if lines:
+            lines.append("")
+        lines.append("# 断网机（没有 wtool，也不联网）：从离线 tag %s 的发布页人工下载" % (offline_tag or "offline-<日期>"))
+        for a in sorted(off):
+            if a == OFFLINE_ASSETS["source"]:
+                lines.append("unzip %s && cp -a wtool/. \"$WTOOL_HOME/wtool/\"   # ① 源码即产物" % a)
+            else:
+                lines.append("unzip %s && cp -a wtool/. \"$WTOOL_HOME/wtool/\"" % a)
+        lines.append("wtool install %s            # 东西都在包里，不联网" % pid)
+    if INSTALLER_ASSET in artifacts:
+        if lines:
+            lines.append("")
+        lines.append("# 还没有 .wtool 的机器（种子包，解开来是 .wtool/ 树）：")
+        lines.append("tar xzf %s -C \"$HOME\" && \"$HOME/.wtool/install.sh\"" % INSTALLER_ASSET)
+    return "\n".join(lines)
 
 
 def download_doc(args):
@@ -4256,11 +4770,11 @@ def _print_kind_matrix():
         print("  ".join(_cjk_pad(r[i], widths[i]) for i in range(len(headers))))
     if KIND_GATE_DEFERRED:
         print()
-        print("⚠️ 本轮**还没接入门禁**（目标语义是「不适用」，现在只提醒、不拦）：")
+        print("⚠️ 过渡状态：下面这几条**还没接入门禁**（目标语义是「不适用」，现在只提醒、不拦）：")
         for _c in KIND_GATE_DEFERRED:
             print("    %s" % _c)
-        print("   理由：替代品 pack-offline-release / publish-offline-release 还没实现（D54/D62），")
-        print("   现在拦下 = ① 项目一个包都发不出、下不了。看板那几格已按目标语义显示「不支持」。")
+        print("   理由写在 wtool_plan.py 的 KIND_GATE_DEFERRED 上（替代品还没落地才会留在这儿）；")
+        print("   看板那几格已按目标语义显示「不支持」。")
 
 
 def _width_of(text):
@@ -4338,11 +4852,11 @@ def kind_caps(args):
             continue
         pid = project_id_of(d, args.root or None)
         if cmd in KIND_GATE_DEFERRED:
-            # 目标语义上不适用，但替代品（离线族）还没实现 → **放行但出声**，
+            # 目标语义上不适用，但替代品还没落地 → **放行但出声**，
             # 绝不静默成功（见 KIND_GATE_DEFERRED 的注释）。
             if not args.quiet:
                 print("wtool: 提醒：'%s' 是 kind=%s，按目标模型 %s 对它不适用（%s）；"
-                      "替代命令还没实现，本轮先放行。"
+                      "替代命令还没落地，这一轮先放行。"
                       % (pid, kind, cmd, kind_unsupported_reason(kind, cmd)),
                       file=sys.stderr)
             continue
@@ -4435,6 +4949,30 @@ def build_parser():
     pk.add_argument("project")
     pk.add_argument("--scratch", required=True)
 
+    # offline-plan：离线自足包的清单（ADR-0045 / D50）。**只算不写**（除 scratch）。
+    op = sub.add_parser("offline-plan")
+    op.add_argument("project")
+    op.add_argument("--scratch", required=True)
+    op.add_argument("--root", default="")
+    # 正在跑的那份引擎住哪儿 —— 用来认"安装器项目"（D59 的 `.wtool/` 树特例）。
+    # 判据是**位置**不是名字：目录改名（bootstrap → wtool-base-tools）之后照样成立。
+    op.add_argument("--bootstrap", default="")
+
+    # unpack-plan：声明式解包的计划（ADR-0045 / D57）。读 release.json + dist.json，
+    # 打一张 TSV 给 shell 执行 —— 引擎不猜"解到哪"。
+    upp = sub.add_parser("unpack-plan")
+    upp.add_argument("project")
+    upp.add_argument("--from-dir", default="")
+    upp.add_argument("--release-json", default="")
+
+    # offline-assets：publish-offline-release 要传哪些文件（只有离线族那些）
+    oa = sub.add_parser("offline-assets")
+    oa.add_argument("--release-dir", required=True)
+
+    # dev-assets：publish-release 要传哪些文件（非离线族那些；和上面互补）
+    da = sub.add_parser("dev-assets")
+    da.add_argument("--release-dir", required=True)
+
     stt = sub.add_parser("status")
     stt.add_argument("--root", required=True)
     stt.add_argument("--state", required=True)
@@ -4474,6 +5012,16 @@ def build_parser():
     rj.add_argument("--at", default="")
     rj.add_argument("--dirty", default="0")
     rj.add_argument("--targets", default="")
+    # ── 两族一个文件（D53 / D56）：读旧的那份、只改自己这几段 ──────────────
+    rj.add_argument("--existing", default="")
+    rj.add_argument("--offline-tag", default="")
+    rj.add_argument("--offline-assets", default="")
+    rj.add_argument("--project-dir", default="")
+    rj.add_argument("--project-rel", default="")
+    rj.add_argument("--root", default="")
+    # --dev-fields：这次调用**有权改非离线族那几段**（tag / base_url / assets[] /
+    # targets…）—— 只有 publish-release 传它。pack-* 只刷新对照表，不许动别人的账。
+    rj.add_argument("--dev-fields", action="store_true")
 
     dd = sub.add_parser("download-doc")
     dd.add_argument("--rows", required=True)
@@ -4634,6 +5182,18 @@ def main(argv):
                 return 1
         elif args.cmd == "release-json":
             release_json(args)
+        elif args.cmd == "offline-plan":
+            res = offline_plan(args)
+            print("asset     : %s" % res["asset"])
+            print("shape     : %s" % res["shape"])
+            print("files     : %d 个" % len(res["files"]))
+            print("declare   : %s" % (",".join(res["declare"]) or "-"))
+        elif args.cmd == "unpack-plan":
+            return unpack_plan(args)
+        elif args.cmd == "offline-assets":
+            return offline_assets(args)
+        elif args.cmd == "dev-assets":
+            return dev_assets(args)
         elif args.cmd == "download-doc":
             download_doc(args)
         elif args.cmd == "check":

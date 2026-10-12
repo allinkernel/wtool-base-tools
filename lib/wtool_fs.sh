@@ -1402,220 +1402,392 @@ print(os.path.relpath(os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])
 
     _pk_n=$(awk -F'\t' '$4=="volume"{v++; next} {n++} END{printf "%d 个文件 / %d 个分卷", n, v}' \
             "$_pk_scratch/rows.tsv")
+    # 对照表：这些包解到哪（D57）。`unpack-release` 只认它，所以**打包这一侧就要写上** ——
+    # 不然"本地 pack → unpack"这条往返路没有表可读（发布那一侧由 publish-* 补 tag）。
+    wt_release_json_write "$_pk_dir" "$_pk_pid" "$_pk_scratch" "$_pk_pub/dist.json" "" "-" 0 \
+        || wt_warn "  包打好了，但 scripts/release.json 没刷新"
     wt_info "发布包已生成: $_pk_pub（$_pk_n）"
     # ⚠️ 写成 if 而不是 `[ ] && cmd`：条件为假时那条命令返回 1，
     #    在 `set -eu` 下会把整个 wtool 干掉（同一坑见 cmd_check 里的注释）。
     if [ "$_pk_mode" = source-only ]; then
         wt_info "  这一版只有源码包（项目没有构建产物，见 ADR-0039）"
     fi
-    wt_info "  下一步: wtool publish-release ${_pk_pid:-<项目>}   # 上传 + 写 scripts/release.json"
-    wt_info "  该提交的（文本，进 Git）：docs/download.md 和上传后的 scripts/release.json"
+    wt_info "  下一步: wtool publish-release ${_pk_pid:-<项目>}   # 上传 + 补 scripts/release.json 的 tag"
+    wt_info "  离线族的自足包是另一条命令：wtool pack-offline-release ${_pk_pid:-<项目>}"
+    wt_info "  该提交的（文本，进 Git）：docs/download.md 和 scripts/release.json（artifacts 对照表）"
     wt_info "  __release/ 是待上传目录（.gitignore 里，不进 Git）"
 }
 
-# 源码包 → 项目目录。
+# ==========================================================================
+# 离线族：**自足包**（ADR-0045 / D50 / D51 / D54 / D59）
 #
-# **只在"这一版没有产物包"时才走这条路**（ADR-0039）：项目没有构建能力，
-# 源码就是产物 —— 不铺开的话 `install` 没有东西可装。
+# 两族的区别，一张表记牢：
 #
-# 包内第一层是 `wtool/<项目相对路径>/`（外加 `wtool/.wtool-dist/<...>.json` 标记）：
-# 那是"解压到工作区**上一层**、得到的路径和 repo sync 一致"的布局。这里的目标是
-# **项目目录本身**，所以要把 `wtool/<相对路径>` 整段前缀剥掉。
+#   非离线族 `pack-release`          → `release.zip`（**只有产物**，带 `dist.json`）
+#   离线族   `pack-offline-release`  → ① `source-offline.zip` / ②③ `release-offline.zip`
+#                                      （**自足**：`wtool.xml` + `env.*` + 源码或产物；
+#                                       **不放 `dist.json`**，旁边一份 `<包名>.sha256`；
+#                                       分卷时给一份 `check-hash.sh`）
 #
-# ‼️ 前缀**有几段取决于项目有多深**（`terminal/tmux` 是两段、`bootstrap` 是一段），
-#    所以不能"剥掉 wtool/ 就行" —— 实测踩过：按"wtool/ 下唯一的顶层目录"剥，
-#    `wtool/terminal/tmux/…` 会铺成 `<项目>/tmux/…`，多出一层，install 找不到 wtool.xml。
+# **断网机只认一个自足包**（D50 的不变式）：解开出顶层 `wtool/` →
+# `cp -a wtool/. "$WTOOL_HOME/wtool/"` 同名合并 → `wtool install`。
+# **解包与合并不需要 wtool**（就是 unzip/tar + cp），所以校验也不能依赖 wtool。
 #
-# 所以按打包时**同一条算法**先算一遍相对路径（wtool_fs.sh 里 wt_pack_release 也是这么算的）；
-# 算不出来（项目改过名 —— ADR-0037：身份就是路径）或对不上时，退回读包里
-# `.wtool-dist/<...>.json` 的 `layout` 字段 —— 那记的正是打包时的路径。
-wt_unpack_source_into() {   # <源码包> <项目目录> <scratch>
-    _us_pkg=$1; _us_dir=$2; _us_scratch=$3
-    _us_tmp="$_us_scratch/unpack-src"
-    wt_run rm -rf -- "$_us_tmp"
-    wt_run mkdir -p -- "$_us_tmp"
-    wt_unpack_one "$_us_pkg" "$_us_tmp"
+# 安装器包是**特例**（D59）：`wtool-base-tools.tar.gz`，解开是 **`.wtool/` 树**
+# —— 那是"还没有 `.wtool` 的机器"的种子。
+# ==========================================================================
+WT_OFFLINE_CHECK="check-hash.sh"       # 分卷时那份不依赖 wtool 的校验脚本（D51）
+WT_OFFLINE_MARK=".offline"             # 来源标记：打包时的 commit（publish 拿它当 --target）
 
-    _us_rel=$(python3 -c 'import os, sys
-print(os.path.relpath(os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])))' \
-              "$_us_dir" "$WTOOL_ROOT" 2>/dev/null || true)
-    _us_pay=""
-    case $_us_rel in
-        "" | .. | ../* | /*) ;;                    # 不在工作区里：只能靠包里的标记
-        *) if [ -d "$_us_tmp/wtool/$_us_rel" ]; then _us_pay="$_us_tmp/wtool/$_us_rel"; fi ;;
-    esac
-    if [ -z "$_us_pay" ]; then
-        _us_layout=$(python3 -c '
-import glob, json, os, sys
-for f in sorted(glob.glob(os.path.join(sys.argv[1], "wtool", ".wtool-dist", "*.json"))):
-    try:
-        with open(f, encoding="utf-8") as fh:
-            d = json.load(fh)
-    except Exception:
-        continue
-    lay = (d.get("layout") or "").strip("/")
-    if lay:
-        print(lay)
-        break
-' "$_us_tmp" 2>/dev/null || true)
-        if [ -n "$_us_layout" ] && [ -d "$_us_tmp/$_us_layout" ]; then
-            _us_pay="$_us_tmp/$_us_layout"
-            wt_info "  按包里的标记铺：$_us_layout（和本机的 ${_us_rel:-<相对路径>} 对不上）"
-        fi
+# 打 tar.gz。参数和 wt_zip_create 一模一样（安装器包必须是 tar：用户敲的是 tar xzf）。
+wt_tar_create() {   # <out.tar.gz> <base-dir> <list-file> [--prefix=P] [--extra ...]
+    _tc_out=$1; _tc_base=$2; _tc_list=$3; shift 3
+    _tc_n=$(awk 'END{print NR}' "$_tc_list" 2>/dev/null || echo 0)
+    if wt_dry; then
+        wt_step "[dry-run] 打包 $(basename -- "$_tc_out")（$_tc_n 个文件，tar.gz）"
+        return 0
     fi
-    [ -n "$_us_pay" ] || wt_die "源码包里找不到项目目录（期望 wtool/${_us_rel:-<相对路径>}）: $_us_pkg"
-    wt_run mkdir -p -- "$_us_dir"
-    # `/.` 才能连隐藏文件一起铺；`-a` 保留权限位和（相对）软链 —— 和源码包怎么打的对应
-    wt_run cp -a -- "$_us_pay/." "$_us_dir/"
-    # 发布副本标记：解压副本没有 .git，`install` 靠它认出"这是发布副本"、head 才有出处
-    # （wtool.sh 的 wt_release_marker 读的就是 $WTOOL_ROOT/.wtool-dist/<路径换成横线>.json）。
-    # 不铺它的话，"没有 .git 的工作区"上 `wtool install` 会以"不是 git 仓库"拒绝。
-    if [ -d "$_us_tmp/wtool/.wtool-dist" ]; then
-        wt_run mkdir -p -- "$WTOOL_ROOT/.wtool-dist"
-        cp -f -- "$_us_tmp/wtool/.wtool-dist"/*.json "$WTOOL_ROOT/.wtool-dist/" \
+    python3 "$WT_ZIP_TOOL" create-tar "$_tc_out" "$_tc_base" "$_tc_list" "$@" \
+        || wt_die "打包失败: $_tc_out"
+    wt_step "打包 $(basename -- "$_tc_out")（$_tc_n 个文件，$(wt_bytes "$_tc_out") 字节）"
+}
+
+# 分卷的校验脚本：**所有分片 hash 写全、直接跑就校验、不依赖 wtool**（D51 用户原话）。
+# 生成的是**独立脚本**：只用 sha256sum（coreutils），不 source 引擎的任何东西。
+wt_offline_check_hash() {   # <__release 目录> <资产名> <整包 sha256>
+    _ch_pub=$1; _ch_asset=$2; _ch_whole=$3
+    _ch_out="$_ch_pub/$WT_OFFLINE_CHECK"
+    {
+        printf '#!/bin/sh\n'
+        printf '# %s 的分卷校验 —— 由 wtool pack-offline-release 生成。\n' "$_ch_asset"
+        printf '# **不依赖 wtool**：只用 sha256sum，直接跑就行：\n'
+        printf '#     sh %s\n' "$WT_OFFLINE_CHECK"
+        printf '# 拼回整包：cat %s.part-* > %s\n' "$_ch_asset" "$_ch_asset"
+        printf '# 整包 sha256（拼回来之后可以核对）：%s\n' "$_ch_whole"
+        printf 'set -u\n'
+        printf 'cd -- "$(dirname -- "$0")" || exit 1\n'
+        printf "sha256sum -c --strict - <<'EOF'\n"
+        for _ch_p in "$_ch_pub/$_ch_asset".part-*; do
+            [ -f "$_ch_p" ] || continue
+            printf '%s  %s\n' "$(wt_sha256 "$_ch_p")" "$(basename -- "$_ch_p")"
+        done
+        printf 'EOF\n'
+    } > "$_ch_out"
+    chmod +x -- "$_ch_out"
+}
+
+# 刷新/补写 `<项目>/scripts/release.json`（ADR-0045 / D53 / D56 / D57）。
+#
+# **四个命令都走这里**，各写各的那一段，谁都不许抹掉别人的（合并的判据在 py 的
+# `release-json --existing` 里，shell 只负责落盘）：
+#   · 两个 pack    → 只刷新 `artifacts` 对照表（"这个包里有什么、解到哪"）
+#   · publish-release       → 非离线族：tag / base_url / assets[] / targets（$7=1）
+#   · publish-offline-release → 离线族：offlineTag
+#
+#   $1 项目目录  $2 项目id  $3 scratch  $4 dist.json（没有给 -）
+#   $5 离线族资产名（可空：分卷之后整包不在 __release/ 里，只能这样告诉它）
+#   $6 offlineTag（没有给 -）  $7 dev-fields（1 = 有权改非离线族那几段）
+#   $8 targets（可空）  $9 dirty（0/1）
+wt_release_json_write() {
+    _rw_dir=$1; _rw_pid=$2; _rw_scratch=$3; _rw_dist=$4; _rw_oasset=${5:-}
+    _rw_otag=${6:-}; _rw_dev=${7:-0}; _rw_targets=${8:-}; _rw_dirty=${9:-0}
+    _rw_out="$_rw_dir/scripts/release.json"
+    _rw_tmp="$_rw_scratch/release.json"
+    if wt_dry; then
+        wt_step "[dry-run] 写 $_rw_out（两族一个文件：artifacts 对照表${_rw_otag:+/offlineTag}）"
+        return 0
+    fi
+    wt_run mkdir -p -- "$_rw_dir/scripts" || return 1
+    set -- python3 "$PY" release-json \
+        --release-dir "$_rw_dir/__release" \
+        --project-dir "$_rw_dir" --project-id "$_rw_pid" --root "$WTOOL_ROOT" \
+        --existing "$_rw_out"
+    if [ -n "$_rw_dist" ] && [ "$_rw_dist" != "-" ]; then
+        set -- "$@" --dist "$_rw_dist"
+    fi
+    if [ -n "$_rw_oasset" ]; then
+        set -- "$@" --offline-assets "$_rw_oasset"
+    fi
+    if [ -n "$_rw_otag" ] && [ "$_rw_otag" != "-" ]; then
+        set -- "$@" --offline-tag "$_rw_otag"
+    fi
+    if [ "$_rw_dev" = 1 ]; then
+        # `--at` 落到 `release.json` 的 `published_at`：**保持原来的格式**
+        # （`date -Iseconds` = `+08:00`；引擎别处的 `wt_now` 是 `+0800`，
+        #  这一格从 publish-release 起就是前者，不在这轮顺手改它）
+        set -- "$@" --dev-fields --engine "$ENGINE_VERSION" --at "$(date -Iseconds)" \
+                   --targets "$_rw_targets" --dirty "$_rw_dirty"
+    fi
+    "$@" > "$_rw_tmp" || { wt_warn "生成 scripts/release.json 失败"; return 1; }
+    wt_atomic_write "$_rw_out" "$_rw_tmp" || { wt_warn "写不了 $_rw_out"; return 1; }
+    return 0
+}
+
+# 打**离线自足包** → <项目>/__release/（ADR-0045 / D50 / D51 / D54 / D59）
+#   wt_pack_offline_release <项目目录> <卷大小> <scratch> [<项目id>]
+#
+# 包名按 kind 定：① `source-offline.zip`、②③ `release-offline.zip`；
+# 安装器项目是特例 → `wtool-base-tools.tar.gz`（`.wtool/` 树）。判据都在 py 里
+# （`offline-plan`）—— shell 不复制那份表。
+wt_pack_offline_release() {
+    _of_dir=$1; _of_vol=$2; _of_scratch=$3; _of_pid=${4:-}
+    _of_pub="$_of_dir/__release"
+
+    python3 "$PY" offline-plan "$_of_dir" --scratch "$_of_scratch" \
+        --root "$WTOOL_ROOT" --bootstrap "$WTOOL_BOOTSTRAP" \
+        > "$_of_scratch/offline.log" 2>&1 || {
+        cat -- "$_of_scratch/offline.log" >&2
+        wt_die "算离线自足包的清单失败: $_of_dir"
+    }
+    _of_asset=$(awk -F'\t' '$1=="asset"{print $2}' "$_of_scratch/offline.tsv")
+    _of_shape=$(awk -F'\t' '$1=="shape"{print $2}' "$_of_scratch/offline.tsv")
+    _of_prefix=$(awk -F'\t' '$1=="prefix"{print $2}' "$_of_scratch/offline.tsv")
+    _of_link=$(awk -F'\t' '$1=="link"{print $2}' "$_of_scratch/offline.tsv")
+    _of_kind=$(awk -F'\t' '$1=="kind"{print $2}' "$_of_scratch/offline.tsv")
+    _of_n=$(awk 'END{print NR}' "$_of_scratch/offline.files" 2>/dev/null || echo 0)
+    [ -n "$_of_asset" ] || wt_die "算不出离线包的名字（planner 没写出 offline.tsv）: $_of_dir"
+
+    if wt_dry; then
+        wt_step "[dry-run] 产 $_of_pub/$_of_asset（$_of_n 个文件，kind=$_of_kind）"
+        wt_step "[dry-run] 包内第一层：$_of_prefix（解压即合并进 \$WTOOL_HOME）"
+        wt_step "[dry-run] 旁边写 $_of_asset.sha256；超 $_of_vol 就切分卷 + $WT_OFFLINE_CHECK（不依赖 wtool）"
+        wt_step "[dry-run] **不放 dist.json**（离线包只有 hash txt / $WT_OFFLINE_CHECK，D51）"
+        wt_step "[dry-run] 刷新 $_of_dir/scripts/release.json 的 artifacts 对照表（D57）"
+        return 0
+    fi
+
+    if [ "$_of_n" -le 0 ]; then
+        wt_die "离线自足包里一个文件都没有 —— 断网机上 \`wtool install\` 什么都装不出来。
+  ②③ 类：先把产物准备好（wtool build <项目>，或 download-release + unpack-release）
+  ① 类：这个项目连源码文件都没有（.gitignore 是不是把什么都排除了？）"
+    fi
+
+    wt_run mkdir -p -- "$_of_pub"
+    # 只清**本族**这一版会重新生成的东西。别的族（release.zip / dist.json / .source）
+    # 和用户自己放在这儿的文件，一个都不动。
+    rm -f -- "$_of_pub/$_of_asset" "$_of_pub/$_of_asset.sha256" \
+             "$_of_pub/$WT_OFFLINE_CHECK" "$_of_pub/$_of_asset".part-* 2>/dev/null || true
+
+    if [ "$_of_shape" = "dotwtool" ]; then
+        # 安装器包（D59）：`.wtool/` 树。`.wtool/install.sh` 必须是**相对软链** ——
+        # install.sh 靠解析自身真实路径算项目目录（proj=dirname(here)/..），
+        # 拷贝出来的那份会把 `.wtool` 当成项目目录，然后死在"找不到 wtool.sh"。
+        wt_run mkdir -p -- "$_of_scratch/link"
+        wt_run ln -sfn -- "$_of_link" "$_of_scratch/link/install.sh"
+        wt_tar_create "$_of_pub/$_of_asset" "$_of_dir" "$_of_scratch/offline.files" \
+            --prefix="$_of_prefix" --extra "$_of_scratch/link/install.sh" ".wtool/install.sh"
+    else
+        wt_zip_create "$_of_pub/$_of_asset" "$_of_dir" "$_of_scratch/offline.files" \
+            --prefix="$_of_prefix"
+    fi
+    wt_hash_file "$_of_pub/$_of_asset" > "$_of_pub/$_of_asset.sha256"
+
+    _of_bytes=$(wt_bytes "$_of_pub/$_of_asset")
+    _of_sha=$(wt_sha256 "$_of_pub/$_of_asset")
+    _of_volbytes=$(wt_size_bytes "$_of_vol")
+    if [ "$_of_bytes" -gt "$_of_volbytes" ]; then
+        wt_info "  $_of_asset 有 $((_of_bytes / 1048576))M，按 $_of_vol 一卷切开（ASCII 后缀 .part-aa…）"
+        wt_run split -b "$_of_vol" -a 2 "$_of_pub/$_of_asset" "$_of_pub/$_of_asset.part-" \
+            || wt_die "切分卷失败: $_of_asset"
+        # 整包不留在 __release/（它正是传不上去的那个），分卷留下
+        wt_run mv -f -- "$_of_pub/$_of_asset" "$_of_scratch/$_of_asset"
+        wt_offline_check_hash "$_of_pub" "$_of_asset" "$_of_sha"
+        wt_info "  分卷校验脚本：$_of_pub/$WT_OFFLINE_CHECK（用户直接跑，不依赖 wtool）"
+    fi
+
+    # 来源标记：这一版是拿哪个 commit 打的 → publish-offline-release 拿它当 --target。
+    # 点开头 = 不是发布资产（上传时被排除）。
+    printf 'packed\t%s\t%s\n' "$(git -C "$_of_dir" rev-parse HEAD 2>/dev/null || echo -)" \
+        "$(wt_now)" > "$_of_pub/$WT_OFFLINE_MARK"
+
+    # 对照表：这个包解到哪（D57）。两族共用一个 release.json，谁也不许抹掉谁。
+    wt_release_json_write "$_of_dir" "$_of_pid" "$_of_scratch" "-" "$_of_asset" "-" 0 \
+        || wt_warn "  离线包打好了，但 scripts/release.json 没刷新"
+
+    if [ -f "$_of_scratch/$_of_asset" ]; then
+        _of_parts=$(LC_ALL=C ls -1 "$_of_pub/$_of_asset".part-* 2>/dev/null | wc -l | tr -d ' ')
+        wt_info "离线自足包已生成: $_of_pub/$_of_asset.part-*（$_of_parts 卷，整包 $((_of_bytes / 1048576))M）"
+    else
+        wt_info "离线自足包已生成: $_of_pub/$_of_asset（$_of_bytes 字节）"
+    fi
+    if [ -f "$_of_pub/$WT_OFFLINE_CHECK" ]; then
+        wt_info "  校验：$_of_pub/$_of_asset.sha256 + $WT_OFFLINE_CHECK"
+    else
+        wt_info "  校验：$_of_pub/$_of_asset.sha256（sha256sum -c 直接过）"
+    fi
+    wt_info "  断网机：解开 → cp -a wtool/. \"\$WTOOL_HOME/wtool/\" → wtool install ${_of_pid:-<项目>}"
+    wt_info "  下一步: wtool publish-offline-release ${_of_pid:-<项目>}   # 发到 offline-<日期> 那个 release 页"
+    wt_info "  该提交的（文本，进 Git）：scripts/release.json（artifacts 对照表）"
+}
+
+# 发布副本标记：`wtool/.wtool-dist/<项目>.json` → 工作区根的 `.wtool-dist/`。
+#
+# 它是**引擎自己的标记**（`install` 靠它认出"这是从发布包解出来的工作区"，
+# 没有 .git 也免 `--force`），**不是项目资产** —— 所以不进 release.json 的对照表，
+# 由引擎在解源码包时顺手铺一次。这里明说、也打日志，不做暗事。
+wt_unpack_marker() {   # <源码包> <工作区根> <scratch>
+    _um_pkg=$1; _um_root=$2; _um_scratch=$3
+    _um_tmp="$_um_scratch/unpack-marker"
+    wt_run rm -rf -- "$_um_tmp"
+    wt_run mkdir -p -- "$_um_tmp"
+    wt_unpack_one "$_um_pkg" "$_um_tmp"
+    if [ -d "$_um_tmp/wtool/.wtool-dist" ]; then
+        wt_run mkdir -p -- "$_um_root/.wtool-dist"
+        cp -f -- "$_um_tmp/wtool/.wtool-dist"/*.json "$_um_root/.wtool-dist/" \
             2>/dev/null || true
+        wt_info "  发布副本标记 → $_um_root/.wtool-dist/"
     fi
 }
 
-# 按 dist.json 校验分卷 → 拼接 → 解开到 <项目>/__output/ 和项目根
-#   wt_unpack_release <项目目录> <scratch> [发布目录]
-# $3 = dist.json 和分卷所在的目录（默认 <项目>/__release/）。`cmd_unpack_release` 的
-# `--from=` 就是它 —— ‼️ 这个参数原来**没人读**（函数只看 $1/$2）：`--from=` 被静默
-# 丢掉，于是"指定了下载目录、却去 <项目>/__release/ 找 dist.json"（报"没有 dist.json"）。
+# 按 `release.json` 的对照表**声明式**解包（ADR-0045 / D57 / Q1 + Q10）
+#   wt_unpack_release <项目目录> <scratch> [下载目录]
+#
+# $3 = 包和 dist.json 所在的目录（默认 `<项目>/__release/`）；`--from=` 就是它。
+#
+# 读两样东西，**一样都不猜**：
+#   · `<项目>/scripts/release.json` 的 `artifacts.<资产名>` → "[{from,to}]"：解到哪
+#   · 那个目录里的 `dist.json`（有的话）→ 分卷表与每卷 / 整包的 sha256：怎么校验
+# 计划由 py 算（`unpack-plan`，只算不写），这里只做"校验 + 解包"这些**写**动作。
+#
+# 行的形状（py 打的 TSV）：
+#   entry  <资产名> <from> <to> <sha256|-> <卷:sha,…|-> <role>
+#   verify <资产名> -      -  <sha256|-> <卷:sha,…|-> <role>   ← 对照表标了 to=""（只校验）
+#   skip   <资产名> <为什么跳过>
 wt_unpack_release() {
     _ur_dir=$1; _ur_scratch=$2; _ur_pub=${3:-}
     [ -n "$_ur_pub" ] || _ur_pub="$_ur_dir/__release"
-    _ur_dist="$_ur_pub/dist.json"
-    [ -f "$_ur_dist" ] || wt_die "没有 $_ur_dist —— 把 dist.json 和所有分卷放到同一个目录里
-  （默认是 <项目>/__release/；用 --from=<目录> 可以指到别处）"
+    _ur_rows="$_ur_scratch/unpack.rows.tsv"
 
-    python3 "$PY" read-dist "$_ur_dist" > "$_ur_scratch/dist.rows.tsv" \
-        || wt_die "读不了 dist.json: $_ur_dist"
-    _ur_rows="$_ur_scratch/dist.rows.tsv"
-    _ur_legacy=$(awk -F'\t' '$1=="meta" && $2=="legacy"{print 1}' "$_ur_rows")
-    # 这一版有没有**产物包**？没有 = 只有源码包（ADR-0039：没有构建能力的项目
-    # 不再打 release.zip）。源码包的语义因此分两种，必须问这一句才知道走哪条：
-    #   有产物包 → 源码包**只校验、不铺开**（install 要的是 __output/）
-    #   没产物包 → 源码就是产物，**必须铺回项目目录**，否则 install 没东西可装
-    _ur_has_rel=$(awk -F'\t' '$1=="file" && $5=="release"{print 1; exit}' "$_ur_rows")
-    _ur_tmp="$_ur_scratch/unpack"
-
-    # 老格式（astronvim 自己的 publish.sh 写的那种：只有 volumes + compression，
-    # 没有 files 段）**不再支持**（ADR-023：彻底抛弃历史代码）。
-    # 明确报错，不做"猜着解一半"—— 那会留下一个看起来装好了、其实缺东西的 __output/。
-    if [ "$_ur_legacy" = 1 ]; then
-        wt_die "$_ur_dist 是老格式（没有 files 段，只有 volumes + compression）——
-  2026-09-28 起不再支持这种包（见 harness/docs/adr/0023）。
-  两条路：①用当时的 wtool 版本解开它；②重发一版新包：wtool pack-release <项目>"
-    fi
-
-    _ur_field() {   # <kind> <name> <列号>
-        awk -F'\t' -v k="$1" -v n="$2" -v c="$3" '$1==k && $2==n {print $c}' "$_ur_rows"
-    }
+    python3 "$PY" unpack-plan "$_ur_dir" --from-dir "$_ur_pub" \
+        > "$_ur_rows" || wt_die "unpack-release 算不出计划（上面那条错误说的是原因）"
 
     _ur_got=0
-    for _ur_name in $(awk -F'\t' '$1=="file"{print $2}' "$_ur_rows"); do
-        _ur_role=$(_ur_field file "$_ur_name" 5)
-        _ur_sha=$(_ur_field file "$_ur_name" 3)
-        _ur_vols=$(awk -F'\t' -v n="$_ur_name" '$1=="volume" && $5==n {print $2}' "$_ur_rows")
-        if [ -n "$_ur_vols" ]; then
-            # install 只消费 release.zip（§5）：源码包的分卷不全就跳过，
-            # 不是错误 —— 只下 release.zip 的机器完全合法。
-            _ur_lack=""
-            for _ur_v in $_ur_vols; do
-                [ -f "$_ur_pub/$_ur_v" ] || { _ur_lack=$_ur_v; break; }
-            done
-            if [ -n "$_ur_lack" ]; then
-                if [ "$_ur_role" = "source" ] && [ -n "$_ur_has_rel" ]; then
-                    wt_warn "源码包的分卷不全（缺 $_ur_lack），跳过 —— install 不需要它"
+    _ur_prepared=""
+    _ur_srcpkg=""            # 源码包（拼卷之后的那份）→ 末尾铺发布副本标记用
+    _ur_tab=$(printf '\t')
+    while IFS="$_ur_tab" read -r _ur_k _ur_name _ur_from _ur_to _ur_sha _ur_vols _ur_role; do
+        [ -n "${_ur_k:-}" ] || continue
+        case $_ur_k in
+            skip)
+                wt_info "  跳过 $_ur_name：$_ur_from"
+                continue ;;
+            entry | verify) ;;
+            *) continue ;;
+        esac
+
+        # 整个包（或它的所有分卷）先准备好 —— 一个资产可能有多条 entry（产物 + 声明面），
+        # 只准备一次。
+        case " $_ur_prepared " in
+            *" $_ur_name "*) ;;
+            *)
+                _ur_pkg="$_ur_pub/$_ur_name"
+                _ur_hasvol=0
+                [ "$_ur_vols" != "-" ] && _ur_hasvol=1
+                # 只读检查：文件/卷在不在（写动作都在 dry-run 守卫之后）
+                if [ "$_ur_hasvol" = 1 ]; then
+                    _ur_missing=""
+                    _ur_oldifs=$IFS; IFS=,
+                    for _ur_v in $_ur_vols; do
+                        _ur_vn=${_ur_v%%:*}
+                        [ -f "$_ur_pub/$_ur_vn" ] || _ur_missing=$_ur_vn
+                    done
+                    IFS=$_ur_oldifs
+                    [ -n "$_ur_missing" ] && wt_die "缺分卷: $_ur_pub/$_ur_missing"
+                fi
+                _ur_prepared="$_ur_prepared $_ur_name"
+                if wt_dry; then
+                    # dry-run 只到这儿：一个字节都不写（拼卷 / 解包都在下面）
                     continue
                 fi
-                wt_die "缺分卷: $_ur_pub/$_ur_lack"
-            fi
-        else
-            _ur_out="$_ur_pub/$_ur_name"
-            if [ ! -f "$_ur_out" ]; then
-                if [ "$_ur_role" = "source" ] && [ -n "$_ur_has_rel" ]; then
-                    wt_warn "源码包没下，跳过（install 只认 release.zip）: $_ur_name"
-                    continue
+                if [ "$_ur_hasvol" = 1 ]; then
+                    # 逐卷校验 sha256（**必须**：分卷是传输单位，坏一卷整包就废了）
+                    wt_run mkdir -p -- "$_ur_scratch/concat"
+                    _ur_pkg="$_ur_scratch/concat/$_ur_name"
+                    : > "$_ur_pkg"
+                    _ur_k_n=0
+                    _ur_oldifs=$IFS; IFS=,
+                    for _ur_v in $_ur_vols; do
+                        _ur_vn=${_ur_v%%:*}
+                        _ur_vs=${_ur_v#*:}
+                        _ur_have=$(wt_sha256 "$_ur_pub/$_ur_vn")
+                        [ "$_ur_have" = "$_ur_vs" ] || wt_die "分卷校验失败: $_ur_vn
+  期望 sha256: $_ur_vs
+  实际 sha256: $_ur_have"
+                        cat -- "$_ur_pub/$_ur_vn" >> "$_ur_pkg"
+                        _ur_k_n=$((_ur_k_n + 1))
+                    done
+                    IFS=$_ur_oldifs
+                    wt_step "拼接 $_ur_k_n 卷 → $_ur_name"
                 fi
-                wt_die "缺文件: $_ur_out（把 dist.json 和它一起下到 __release/）"
-            fi
-        fi
+                if [ -n "$_ur_sha" ] && [ "$_ur_sha" != "-" ]; then
+                    _ur_have=$(wt_sha256 "$_ur_pkg")
+                    [ "$_ur_have" = "$_ur_sha" ] || wt_die "$_ur_name 整体校验失败（下载不完整？）
+  期望 sha256: $_ur_sha
+  实际 sha256: $_ur_have"
+                else
+                    wt_warn "  $_ur_name 没有 sha256 可对（没有 dist.json？）—— 只解开，没校验"
+                fi
+                if [ "$_ur_name" = "$WT_SOURCE_ZIP" ]; then
+                    # 记**拼卷之后**那份的路径：SOURCE.zip 被切过卷时，__release/ 里
+                    # 只有分片，末尾铺发布副本标记得用 scratch 里拼好的这一个。
+                    _ur_srcpkg=$_ur_pkg
+                fi
+                ;;
+        esac
+
         # ★ dry-run 在这里分岔：上面全是**只读**检查（文件在不在、卷够不够），
-        #   下面全是**写**（拼卷进 scratch、: > 输出文件、wt_unpack_one 铺 __output/）。
-        #   原来没有这道守卫 → `unpack-release --dry-run` **真的解包**
-        #   （实测：跑完 __output/<target>/… 里东西都在，和真跑逐字相同），
-        #   而文档说的是"只出计划"。拼卷之后的 sha256 校验在 dry-run 里做不了
-        #   （要先拼出来）—— 所以这里明说"没校验"，不假装验过。
+        #   下面全是**写**（拼卷进 scratch、extract-tree 铺 __output/）。
+        #   拼卷之后的 sha256 校验在 dry-run 里做不了（要先拼出来）——
+        #   所以这里明说"没校验"，不假装验过。
         if wt_dry; then
-            if [ "$_ur_role" = "source" ] && [ -n "$_ur_has_rel" ]; then
-                wt_step "[dry-run] 源码包（只校验、不铺开）: $_ur_name"
-            elif [ "$_ur_role" = "source" ]; then
-                wt_step "[dry-run] 解开源码包 → $_ur_dir（这一版没有产物包，源码就是产物）"
-            elif [ -n "$_ur_vols" ]; then
-                wt_step "[dry-run] 拼接分卷并解开 $_ur_name → $_ur_dir/__output/"
+            if [ "$_ur_k" = verify ]; then
+                wt_step "[dry-run] 只校验不铺开: $_ur_name（对照表里标了 to=\"\"）"
+            elif [ "$_ur_hasvol" = 1 ]; then
+                wt_step "[dry-run] 校验 $_ur_vols 并拼接 → 按对照表（$_ur_from）解到 $_ur_dir/${_ur_to}"
             else
-                wt_step "[dry-run] 解开 $_ur_name → $_ur_dir/__output/"
+                wt_step "[dry-run] 解开 $_ur_name → $_ur_dir/${_ur_to}（按对照表：$_ur_from）"
             fi
             _ur_got=$((_ur_got + 1))
             continue
         fi
-        if [ -n "$_ur_vols" ]; then
-            wt_run mkdir -p -- "$_ur_tmp"
-            _ur_out="$_ur_tmp/$_ur_name"
-            : > "$_ur_out"
-            _ur_k=0
-            for _ur_v in $_ur_vols; do
-                _ur_exp=$(_ur_field volume "$_ur_v" 3)
-                _ur_have=$(wt_sha256 "$_ur_pub/$_ur_v")
-                [ "$_ur_have" = "$_ur_exp" ] || wt_die "分卷校验失败: $_ur_v
-  期望 sha256: $_ur_exp
-  实际 sha256: $_ur_have"
-                cat -- "$_ur_pub/$_ur_v" >> "$_ur_out"
-                _ur_k=$((_ur_k + 1))
-            done
-            wt_step "拼接 $_ur_k 卷 → $_ur_name"
-        fi
-        if [ -n "$_ur_sha" ] && [ "$_ur_sha" != "-" ]; then
-            _ur_have=$(wt_sha256 "$_ur_out")
-            [ "$_ur_have" = "$_ur_sha" ] || wt_die "$_ur_name 整体校验失败（下载不完整？）
-  期望 sha256: $_ur_sha
-  实际 sha256: $_ur_have"
-        fi
-        if [ "$_ur_role" = "source" ] && [ -n "$_ur_has_rel" ]; then
-            # 有产物包的 release：源码包只校验不铺开（install 只消费 release.zip，
-            # 装东西的人不需要源码）—— 这条**没变**，有构建能力的项目行为一字不改。
+
+        if [ "$_ur_k" = verify ]; then
             wt_info "源码包校验通过（不铺开）: $_ur_name"
             _ur_got=$((_ur_got + 1))
             continue
         fi
-        if [ "$_ur_role" = "source" ]; then
-            # 这一版**只有源码包**（ADR-0039）：项目没有构建产物，源码就是产物 ——
-            # 不铺开的话 `wtool install` 装的东西一个都不在（实测：只解 release.zip 时
-            # 铺出来的是声明面，`~/.tmux.conf` 那条软链指向的 tmux.conf 根本不存在）。
-            wt_info "解开源码包 → $_ur_dir（这一版没有产物包，源码就是产物）"
-            wt_unpack_source_into "$_ur_out" "$_ur_dir" "$_ur_scratch"
-            _ur_got=$((_ur_got + 1))
-            continue
+
+        # ★ 解包：**只**按对照表的 from/to 落位（wtool_zip.py extract-tree 干这件事，
+        #   它会把 from 的目录前缀剥掉，也**不会**在解不开时留下半个目录）。
+        #   引擎不在这里拼路径、也不猜。
+        _ur_dest="$_ur_dir"
+        if [ "$_ur_to" != "." ] && [ -n "$_ur_to" ]; then
+            _ur_dest="$_ur_dir/$_ur_to"
         fi
-        wt_info "解开 $_ur_name → $_ur_dir"
-        wt_run mkdir -p -- "$_ur_dir"
-        wt_unpack_one "$_ur_out" "$_ur_dir"
+        if [ "$_ur_name" = "$WT_SOURCE_ZIP" ] && [ "$_ur_to" = "." ]; then
+            wt_info "解开源码包 → $_ur_dir（这一版没有产物包：源码就是产物，ADR-0039）"
+        fi
+        python3 "$WT_ZIP_TOOL" extract-tree "$_ur_pkg" "$_ur_dest" --from="$_ur_from" \
+            || wt_die "按对照表解 $_ur_name 失败：包里没有匹配 [$_ur_from] 的成员（表里写的落点是 [$_ur_to]）
+  两种可能，都得人来定（引擎不许猜）：
+    ① 包太老 —— 2026-09-28 那次改名（release/ → __output/，ADR-0033）之前打的，
+       包内顶层是 release/<target>/：重打一版（wtool pack-release <项目>），
+       或者手工铺成 __output/<target>/ 之后再解。
+    ② scripts/release.json 的对照表和这个包不是一对（改了表没重打包）。"
         _ur_got=$((_ur_got + 1))
-    done
+    done < "$_ur_rows"
 
-
-    [ "$_ur_got" -gt 0 ] || wt_die "dist.json 里没有可解的东西: $_ur_dist"
+    [ "$_ur_got" -gt 0 ] || wt_die "release.json 的对照表里没有可解的东西: $_ur_dir"
     if wt_dry; then
         # dry-run 的收尾语不能复用真跑那句（"铺到 __output/"）：一个字节都没写
-        wt_info "dry-run：以上 $_ur_got 个文件的计划，什么都没解开（__output/ 一个字节都没写）"
+        wt_info "dry-run：以上 $_ur_got 条的计划，什么都没解开（__output/ 一个字节都没写）"
         return 0
     fi
-    wt_info "unpack-release 完成（只校验 + 铺到 __output/，不做安装）"
-    if [ -z "$_ur_has_rel" ]; then
-        wt_info "  （这一版只有源码包：源码已铺回项目目录，见 ADR-0039）"
+    # 源码包铺回项目目录时，顺手铺发布副本标记（见 wt_unpack_marker 的注释）
+    if [ -n "$_ur_srcpkg" ] && [ -f "$_ur_srcpkg" ]; then
+        wt_unpack_marker "$_ur_srcpkg" "$WTOOL_ROOT" "$_ur_scratch"
     fi
+    wt_info "unpack-release 完成（只校验 + 按对照表铺开，不做安装）"
     wt_info "  下一步: wtool install $_ur_dir"
 }
 

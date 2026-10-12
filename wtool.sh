@@ -39,11 +39,20 @@
 #                         见 docs/adr/0039；资产名用 ASCII 是 GitHub 的硬要求，
 #                         见 docs/adr/0040 + docs/hazards.md H27）
 #   wtool unpack-release <项目>... [--from=目录]
-#                       照 dist.json 校验每卷 sha256 → 拼接 → 解到 __output/
-#                       （**只有源码包**的版本改为把源码铺回项目目录 —— 那就产物）
+#                       照 **release.json 的对照表**（声明式，D57）校验 → 拼接 →
+#                       解到项目 __output/ 下（`to="."` 的条目落项目根：声明面 / 源码包）
 #   wtool publish-release [<项目>...] [--tag=TAG] [--dry-run] [--force]
 #                       把 <项目>/__release/ 里的东西传到 GitHub Release（**只上传**），
 #                       成功之后写 scripts/release.json（下载清单，记得提交）
+#   wtool pack-offline-release <项目>...|all [--volume-size=32M] [--dry-run]
+#                       **离线族**：产自足包到 <项目>/__release/ —— ① source-offline.zip、
+#                       ②③ release-offline.zip、安装器项目 wtool-base-tools.tar.gz
+#                       （解开是 .wtool/ 树）；包里是"离线机 wtool install 需要的东西"
+#                       （wtool.xml + env.* + 源码或产物），**不放 dist.json**；
+#                       旁边写 <包名>.sha256，分卷时再给 check-hash.sh（不依赖 wtool）
+#   wtool publish-offline-release <项目>...|all [--tag=offline-YYYY-MM-DD] [--dry-run]
+#                       把自足包 + 校验文件传到 **offline-<日期>** 那个 release 页
+#                       （和开发机那族的 tag/release 页**分开**，ADR-0045 / D56）
 #   wtool unpack-layer   <项目> [--layer=] [--target=]
 #                       __layer/<target>/ 的顶层 blob → __output/<target>/<层>/。**不联网、不要 docker**
 #   wtool push-layer     <项目>... [--registry=<前缀>] [--target=] [--layer=]
@@ -2397,11 +2406,75 @@ cmd_pack_release() {
 }
 
 # --------------------------------------------------------------------------
-# unpack-release：按 dist.json 校验每卷 sha256 → 拼接 → 解开
+# pack-offline-release：**离线族** —— 自足包（ADR-0045 / D50 / D51 / D54 / D59）
 #
-# 只认 dist.json，**不需要任何项目特定知识**：
-#   release 那一份解到项目根（里面有 __output/ 和声明面 wtool.xml / env.zsh /
-#   env.bash），源码包只校验不铺开。
+# 与非离线族 `pack-release` 的分工，一句话：
+#
+#   pack-release           → `release.zip`（**只有产物**，带 `dist.json`）
+#                            给**有源码的开发机**（download-release + unpack-release）
+#   pack-offline-release   → ① `source-offline.zip` / ②③ `release-offline.zip`
+#                            **自足**：离线机上 `wtool install` 需要的东西都在里面
+#                            （`wtool.xml` + `env.*` + 源码或产物）；**不放 `dist.json`**
+#                            （D51），旁边一份 `<包名>.sha256`，分卷时再给 `check-hash.sh`
+#                            给**断网机**：解开 → `cp -a wtool/. "$WTOOL_HOME/wtool/"` →
+#                            `wtool install`（解包/合并不需要 wtool）
+#
+# 包名按 `kind` 定（判据在 py 的 `offline-plan`，shell 不复制那张表）；
+# **安装器项目**是特例（D59）→ `wtool-base-tools.tar.gz`，解开是 `.wtool/` 树。
+#
+# `all` = 工作区里所有项目（离线族三类都有；用户 2026-10-13 本轮口径）。
+# ⚠️ DESIGN §2.4 / §8.2 把这个词留给了**整机迁移包**（L1 实体化 + L2 留链 + `--check`），
+#    那一条**还没实现** —— 落地时这个名字要二选一（整机包改名 / 逐项目加开关）。
+# --------------------------------------------------------------------------
+cmd_pack_offline_release() {
+    _targets=""
+    _vol_override=""
+    for arg in "$@"; do
+        case $arg in
+            --dry-run)        WTOOL_DRY_RUN=1 ;;
+            --volume-size=*)  _vol_override=${arg#--volume-size=} ;;
+            -*)               wt_die "未知参数: $arg" ;;
+            *)                _targets="$_targets $arg" ;;
+        esac
+    done
+    [ -n "$_targets" ] || wt_die "用法: wtool pack-offline-release <项目>...|all [--volume-size=32M] [--dry-run]
+
+  产**离线自足包**到 <项目>/__release/ —— 按 kind 定名：
+    ① 纯源码            → source-offline.zip
+    ②③ muslbin/docker   → release-offline.zip
+    安装器项目（引擎自己）→ wtool-base-tools.tar.gz（解开是 .wtool/ 树）
+  包内第一层是 wtool/<项目路径>/…（解压即合并进 \$WTOOL_HOME/wtool）；
+  **不放 dist.json**；旁边写 <包名>.sha256，分卷时再给 check-hash.sh（不依赖 wtool）。
+  断网机：unzip → cp -a wtool/. \"\$WTOOL_HOME/wtool/\" → wtool install <项目>"
+    [ -n "$_vol_override" ] || _vol_override=${WTOOL_VOLUME_SIZE:-32M}
+
+    _targets=$(wt_expand_targets "" $_targets)
+    [ -n "$(printf '%s' "$_targets" | tr -d ' ')" ] || wt_die "没有匹配的项目"
+
+    _scratch=$(mktemp -d "${TMPDIR:-/tmp}/wtool-offline.XXXXXX")
+    trap 'rm -rf -- "$_scratch"' EXIT INT TERM
+
+    _done=0
+    for _want in $_targets; do
+        _row=$(wt_resolve_project "$_want") || exit $?
+        _pid=$(printf '%s\n' "$_row" | cut -f2)
+        _path=$(printf '%s\n' "$_row" | cut -f3)
+
+        wt_info "── $_pid"
+        wt_info "  卷大小 : $_vol_override"
+        wt_pack_offline_release "$_path" "$_vol_override" "$_scratch" "$_pid"
+        _done=$((_done + 1))
+    done
+    wt_info "pack-offline-release 完成（$_done 个项目）"
+}
+
+# --------------------------------------------------------------------------
+# unpack-release：**声明式**解包（ADR-0045 / D57）
+#
+# 解到哪**不猜**：读项目里提交的 `scripts/release.json` 的 `artifacts` 对照表
+# （`资产名 → [{from,to}]`），产物落项目 `__output/` 下、声明面 / 源码包落项目根
+# （`to=""` = 只校验不铺开）。`__release/dist.json`（有的话）只负责"怎么拼 + 校验"。
+# 离线族的自足包**不归它管**（断网机手工 unzip + cp -a，D50）。
 # "解开"和"装"是两件事 —— 装是 wtool install 的事（这样才登记得进清单、卸得掉）。
 # --------------------------------------------------------------------------
 cmd_unpack_release() {
@@ -2772,12 +2845,14 @@ WTOOL_SUBCOMMANDS="build install uninstall move bootstrap
 status check repair doctor
 validate init version kill-self-forever refresh-downloads
 pack-release unpack-release publish-release download-release
+pack-offline-release publish-offline-release
 sudo-install sudo-uninstall sudo-bootstrap
 unpack-layer push-layer pull-layer"
 
 # 第一个位置参数是"项目"的命令（补全时列项目路径，再加 all）
 WTOOL_PROJECT_CMDS="status install uninstall move build pack-release publish-release
-download-release unpack-release sudo-install sudo-uninstall
+download-release unpack-release
+pack-offline-release publish-offline-release sudo-install sudo-uninstall
 unpack-layer push-layer pull-layer"
 
 # 补全和看板用同一套 sudo 规则（ADR-0035）。install-env.sh 里有同名函数，
@@ -2826,6 +2901,8 @@ wt_complete_flags() {   # <命令> —— 候选开关，一行一个（**只列
         build)              printf '%s\n' --dry-run --force --jobs= --target= --rebuild ;;
         pack-release)       printf '%s\n' --dry-run --force --tag= --volume-size= --repo= ;;
         publish-release)    printf '%s\n' --dry-run --force --tag= --allow-foreign --out= ;;
+        pack-offline-release)    printf '%s\n' --dry-run --volume-size= ;;
+        publish-offline-release) printf '%s\n' --dry-run --force --tag= --allow-foreign --repo= ;;
         download-release)   printf '%s\n' --dry-run ;;
         unpack-release)     printf '%s\n' --dry-run --from= ;;
         sudo-install)       printf '%s\n' --dry-run --force ;;
@@ -3438,13 +3515,16 @@ cmd_publish_release() {
             continue
         fi
 
-        # ⚠️ `.source` 是内部标记（来源：packed / downloaded），**不上传、不进清单**。
-        # 它以点开头，所以 `__release/*` 这种 shell 展开本来也看不到它 ——
-        # 这里显式排除是为了 find 那条路。
-        _files=$(find "$_rel" -maxdepth 1 -type f ! -name '.source' | LC_ALL=C sort)
+        # 要传的东西：**非离线族**那一半（ADR-0045 / D54 / D56）。
+        #   · 点开头的（`.source` / `.offline`）是引擎自己的来源标记 —— 不传、不进清单；
+        #   · 离线族那些（`*-offline.zip` / 它的 `.sha256` / 分卷 / `check-hash.sh` /
+        #     安装器包）归**另一个 release 页** —— 串到这一页上，用户就会在两边的
+        #     页面里都看到不该看到的包。
+        # 判据在 py 里（`dev-assets`，和 `offline-assets` 互补）—— shell 不复制资产名表。
+        _files=$(python3 "$PY" dev-assets --release-dir "$_rel" 2>/dev/null) || _files=""
         _n=$(printf '%s\n' "$_files" | awk 'NF{n++} END{print n+0}')
         if [ "$_n" = 0 ]; then
-            wt_warn "  __release/ 里什么都没有，跳过（先 wtool pack-release $_pid）"
+            wt_warn "  __release/ 里没有可传的东西，跳过（先 wtool pack-release $_pid）"
             _failed=$((_failed + 1))
             continue
         fi
@@ -3526,14 +3606,11 @@ except Exception:
         # "$_dirty" 已经扣掉 wtool 自己生成的文件（release.json / download.md）
         _dirty_flag=0
         [ -n "$_dirty" ] && _dirty_flag=1
-        python3 "$PY" release-json \
-            --release-dir "$_rel" --dist "$_rel/dist.json" \
-            --project-id "$_pid" --engine "$ENGINE_VERSION" \
-            --at "$(date -Iseconds)" --dirty "$_dirty_flag" \
-            --targets "$_targets" > "$_scratch/release.json" \
-            || { wt_warn "  生成 release.json 失败 —— 文件传上去了，但清单没更新"; continue; }
-        wt_atomic_write "$_path/scripts/release.json" "$_scratch/release.json" \
-            || { wt_warn "  写不了 scripts/release.json"; continue; }
+        # 合并写（ADR-0045 / D53）：这份文件里**还躺着离线族那一半**
+        # （`offlineTag` / 自足包的 `artifacts`），非离线族的发布不许把它抹掉。
+        wt_release_json_write "$_path" "$_pid" "$_scratch" "$_rel/dist.json" "" "-" 1 \
+            "$_targets" "$_dirty_flag" \
+            || { wt_warn "  写不了 scripts/release.json（文件传上去了，清单没更新）"; continue; }
         wt_info "  已写 scripts/release.json（下载清单）—— **记得提交**："
         wt_info "    git -C $_path add scripts/release.json && git -C $_path commit -m '发布 $_tag'"
 
@@ -3573,6 +3650,169 @@ except Exception:
         wt_warn "$_failed 个项目没有发出去（见上面的原因）"
         return 1
     fi
+}
+
+
+# --------------------------------------------------------------------------
+# publish-offline-release：把**离线自足包**发到 `offline-<日期>` 那个 release 页
+# （ADR-0045 / D51 / D54 / D56）
+#
+# **必须是两个 release 页**（D56 用户原话："确保语义上的区分"）：
+#   · 非离线族（`release.zip` + `dist.json`）→ `publish-release`，tag **不带** offline
+#   · 离线族（自足包 + 校验文件）           → 本命令，tag **明显带** `offline`
+#   理由：两类包的消费者不同（开发机 vs 断网机）、校验机制不同（dist.json vs
+#   hash txt / check-hash.sh）—— 混在一页里，用户**极可能下错包**。
+#   GitHub 的事实：同一仓库、两个 tag = 两个独立 release 页。
+#
+# 只上传**离线族**的那些文件（自足包 / `.sha256` / 分卷 / `check-hash.sh`）——
+# 判据在 py（`offline-assets`），开发机那一族的 `release.zip` / `dist.json`
+# 一个都不许串到这一页来。
+# --------------------------------------------------------------------------
+cmd_publish_offline_release() {
+    _want=""
+    _tag_override=""
+    _repo_override=""
+    for arg in "$@"; do
+        case $arg in
+            --dry-run)       WTOOL_DRY_RUN=1 ;;
+            --force)         WTOOL_FORCE=1 ;;
+            --allow-foreign) WTOOL_ALLOW_FOREIGN=1 ;;
+            --tag=*)         _tag_override=${arg#--tag=} ;;
+            --repo=*)        _repo_override=${arg#--repo=} ;;
+            -*)              wt_die "未知参数: $arg" ;;
+            *)               _want="$_want $arg" ;;
+        esac
+    done
+    [ -n "$_want" ] || wt_die "用法: wtool publish-offline-release <项目>...|all [--tag=offline-YYYY-MM-DD] [--dry-run] [--force]
+
+  把 <项目>/__release/ 里的**离线自足包**（+ .sha256 / 分卷 check-hash.sh）
+  传到 offline-<日期> 那个 release 页 —— 它和开发机那份（publish-release 的
+  release.zip + dist.json）是**两个 tag、两个页面**（ADR-0045 / D56）。
+  tag 名必须**明显带 offline**（默认 offline-<今天>），传别的名字会被拒。
+  先打包：wtool pack-offline-release <项目>"
+
+    command -v gh >/dev/null 2>&1 || wt_die "publish-offline-release 需要 gh（GitHub CLI）；装好再试"
+
+    _want=$(wt_expand_targets "" $_want)
+    [ -n "$(printf '%s' "$_want" | tr -d ' ')" ] || wt_die "没有匹配的项目"
+
+    _scratch=$(mktemp -d "${TMPDIR:-/tmp}/wtool-puboff.XXXXXX")
+    trap 'rm -rf -- "$_scratch"' EXIT INT TERM
+
+    _done=0
+    _failed=0
+    for _w in $_want; do
+        _row=$(wt_resolve_project "$_w") || exit $?
+        _pid=$(printf '%s\n' "$_row" | cut -f2)
+        _path=$(printf '%s\n' "$_row" | cut -f3)
+        _rel="$_path/__release"
+
+        # tag：默认 `offline-<今天>`。用户给了就**必须带 offline** —— 这条是 D56 的
+        # 硬要求（"tag 名必须明显带 offline"），不是风格问题：两族混在一页上，
+        # 下错包的人分不清哪一版是给断网机的。
+        if [ -n "$_tag_override" ]; then
+            _tag=$_tag_override
+        else
+            _tag="offline-$(date +%Y-%m-%d)"
+        fi
+        case $_tag in
+            *offline*) ;;
+            *) wt_die "tag 名必须明显带 offline（ADR-0045 / D56）：[$_tag] 不行。
+  离线族的包只发到离线 tag 上，默认 offline-$(date +%Y-%m-%d)；
+  开发机那份走 wtool publish-release（另一个 tag / 另一个页面）。" ;;
+        esac
+
+        wt_info "── $_pid"
+        # 目标仓：--repo= 优先，否则 <publish to=>（publish-list 第 7 列），再否则项目 remote
+        _to=$(printf '%s\n' "$_row" | cut -f7)
+        if [ -n "$_repo_override" ]; then
+            _repo=$_repo_override
+        elif [ -n "$_to" ] && [ "$_to" != "-" ]; then
+            _repo=$_to
+        else
+            _repo=$(wt_publish_repo_of "$_path") || {
+                wt_warn "  $_pid 没有可用的 git remote，跳过"
+                _failed=$((_failed + 1))
+                continue
+            }
+        fi
+        wt_info "  目标仓 : $_repo"
+        wt_info "  tag    : $_tag（离线族；开发机那族是另一个 tag）"
+
+        # 权限检查：第三方上游仓在这里被挡下（同 publish-release）
+        if [ "${WTOOL_ALLOW_FOREIGN:-0}" != 1 ]; then
+            _rc=0
+            _perm=$(wt_publish_can_push "$_repo") || _rc=$?
+            if [ "$_rc" = 1 ]; then
+                wt_warn "  没有 $_repo 的写权限（viewerPermission=$_perm）"
+                wt_warn "  这是第三方仓。要发布请在 wtool.xml 写 <publish to=\"自己的仓\"/>。"
+                _failed=$((_failed + 1))
+                continue
+            elif [ "$_rc" != 0 ]; then
+                wt_warn "  查不到 $_repo（rc=$_rc），继续尝试"
+            fi
+        fi
+
+        # 要传的东西：只有**离线族**那些（判据在 py，shell 不复制资产名表）
+        _files=$(python3 "$PY" offline-assets --release-dir "$_rel" 2>/dev/null) || _files=""
+        _n=$(printf '%s\n' "$_files" | awk 'NF{n++} END{print n+0}')
+        if [ "$_n" = 0 ]; then
+            wt_warn "  $_rel 里没有离线自足包 —— 先打包：wtool pack-offline-release $_pid"
+            _failed=$((_failed + 1))
+            continue
+        fi
+
+        # 这一版是拿哪个 commit 打的 → 建 tag 时当 --target（同 ADR-0041 的理由：
+        # 不传的话 gh 把 tag 建在**远端默认分支**的 HEAD 上，可追溯性对不上）。
+        _sha=""
+        if [ -f "$_rel/$WT_OFFLINE_MARK" ]; then
+            _sha=$(cut -f2 < "$_rel/$WT_OFFLINE_MARK" 2>/dev/null || true)
+        fi
+        if [ -z "$_sha" ] || [ "$_sha" = "-" ]; then
+            _sha=""
+            wt_warn "  $_rel/$WT_OFFLINE_MARK 里没有 commit —— 这一版不传 --target，"
+            wt_warn "  gh 会把 tag 建在远端默认分支的 HEAD 上（可追溯性对不上，包本身不受影响）"
+        else
+            wt_info "  target : $_sha（这一版打包用的 commit）"
+        fi
+
+        _names=$(printf '%s\n' "$_files" | tr '\n' ' ')
+        if wt_dry; then
+            wt_step "[dry-run] 上传 $_n 个文件 → $_repo $_tag"
+            wt_step "[dry-run] 资产（$_n 个）: $_names"
+            wt_step "[dry-run] 之后把 offlineTag=$_tag 写进 scripts/release.json（记得提交）"
+            _done=$((_done + 1))
+            continue
+        fi
+
+        wt_publish_gh_release "$_repo" "$_tag" "$_pid 离线包 $(date +%Y-%m-%d)" \
+            "离线族的自足包（给断网机）：解开 → cp -a wtool/. \"\$WTOOL_HOME/wtool/\" → wtool install。
+校验：<包名>.sha256（sha256sum -c）；分卷时跑 check-hash.sh（不依赖 wtool）。
+开发机那一族（release.zip + dist.json）在**另一个** release 页上，见 scripts/release.json 的 tag。" \
+            "$_sha"
+        # shellcheck disable=SC2086
+        if ! wt_publish_gh_upload "$_repo" "$_tag" $_files; then
+            _failed=$((_failed + 1))
+            continue
+        fi
+        wt_publish_record "$_pid" "$_repo" "$_tag" "$_n" "release-offline:$_tag"
+
+        # 发布声明：同一个 `scripts/release.json`，只补**离线族那一段**
+        # （`offlineTag` + 自足包的 artifacts）。非离线族的 tag / assets[] 原样留着。
+        wt_release_json_write "$_path" "$_pid" "$_scratch" "-" "" "$_tag" 0 \
+            || { wt_warn "  写不了 scripts/release.json（包传上去了，清单没更新）"; continue; }
+        wt_info "  已写 scripts/release.json 的 offlineTag —— **记得提交**："
+        wt_info "    git -C $_path add scripts/release.json && git -C $_path commit -m '离线发布 $_tag'"
+
+        _done=$((_done + 1))
+    done
+
+    if [ "$_failed" -gt 0 ]; then
+        wt_warn "$_failed 个项目没有发出去（见上面的原因）"
+        return 1
+    fi
+    [ "$_done" -gt 0 ] || wt_info "publish-offline-release 完成（0 个项目）"
+    return 0
 }
 
 
@@ -4461,6 +4701,8 @@ case $_cmd in
     pack-release)   cmd_pack_release "$@" ;;
     unpack-release) cmd_unpack_release "$@" ;;
     publish-release) cmd_publish_release "$@" ;;
+    pack-offline-release)    cmd_pack_offline_release "$@" ;;
+    publish-offline-release) cmd_publish_offline_release "$@" ;;
     push-layer)    cmd_push_layer "$@" ;;
     pull-layer)    cmd_pull_layer "$@" ;;
     push-layers)   wt_die "push-layers 已改名 push-layer，而且**对象变了**：推的现在是 __layer/<target>/ 里的**真镜像**（ADR-024），不是 __output/ 打的假镜像。

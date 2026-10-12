@@ -799,6 +799,7 @@ _cmds=$(WTOOL_SUDO=yes "$WT" _complete "" 2>/dev/null | tr '\n' ' ')
 for want in install uninstall bootstrap build check repair doctor status \
             validate init version kill-self-forever refresh-downloads \
             pack-release publish-release download-release unpack-release \
+            pack-offline-release publish-offline-release \
             sudo-install sudo-uninstall sudo-bootstrap \
             unpack-layer push-layer pull-layer; do
     case " $_cmds " in
@@ -854,6 +855,7 @@ mkdir -p "$_probe_home" "$_probe_ws"
 for _pc in install uninstall bootstrap build check repair doctor status \
            validate init version kill-self-forever refresh-downloads \
            pack-release publish-release download-release unpack-release \
+           pack-offline-release publish-offline-release \
            unpack-layer push-layer pull-layer; do
     _pf=""
     for _cand in $(WTOOL_SUDO=yes "$WT" _complete "-" "$_pc" 2>/dev/null); do

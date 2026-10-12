@@ -35,6 +35,12 @@ trap 'rm -rf -- "$T"' EXIT INT TERM
 export WTOOL_HOME="$T/home" WTOOL_STATE="$T/state"
 mkdir -p "$WTOOL_HOME"
 
+# ⚠️ 下面所有 fixture 都声明 `kind="docker"`（ADR-0045 / D49 的类型门禁）：
+#    `pack-release` / `unpack-release` 是**非离线族**，只对 ③ 类有意义 ——
+#    不写 kind 的项目默认是 ①（source），敲这两条会在分发点被门禁直接拒掉（rc=3）。
+#    离线族那两条（pack-offline-release / publish-offline-release）才是三类都有的，
+#    它们的断言在本文件最后（场景 10）。
+
 # 从 zip 里读成员名
 zlist() { py -c 'import sys,zipfile
 print("\n".join(zipfile.ZipFile(sys.argv[1]).namelist()))' "$1"; }
@@ -57,7 +63,7 @@ printf 'bin\n'                  > "$P/__output/ubuntu_24.04/bin/tmux"
 chmod +x "$P/__output/ubuntu_24.04/bin/tmux"
 cat > "$P/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" priority="50">
+<wtool schema="1" kind="docker" priority="50">
   <zshrc  src="env.zsh"/>
   <bashrc src="env.bash"/>
   <link home="~/.tmux.conf" wtool="~/.wtool/.tmux.conf" subproject="tmux.conf"/>
@@ -181,11 +187,14 @@ print(",".join(sorted(v["name"] for v in d["volumes"] if v["of"]=="release.zip")
     | grep -q "release.zip-vol01" && ok "dist.json 列了分卷" || bad "dist.json 没列分卷"
 
 # 模拟"另一台只有浏览器的机器"：把 dist.json + 所有分卷放进一个新项目目录
+# ⚠️ 还要带 **scripts/release.json**（提交在仓库里的那份对照表）—— 声明式解包
+#    （ADR-0045 / D57）靠它知道"解到哪"，没有它就**拒绝**（不猜）。
 P2="$T/ws2/terminal/tmux"
 export WTOOL_ROOT="$T/ws2"
-mkdir -p "$P2/__release"
+mkdir -p "$P2/__release" "$P2/scripts"
 cp "$P/__release/dist.json" "$P2/__release/"
 cp "$P/__release"/*-vol* "$P2/__release/"
+cp "$P/scripts/release.json" "$P2/scripts/"
 "$WT" unpack-release "$P2" > "$T/unpack2.log" 2>&1 \
     || bad "unpack-release 执行" "$(cat "$T/unpack2.log")"
 [ -x "$P2/__output/ubuntu_24.04/bin/tmux" ] && ok "__output/ 解出来了（可执行位也在）" \
@@ -203,9 +212,10 @@ printf '\n== 场景 2c：unpack-release 的 --dry-run（不许真解包）与 --
 #      "指定了下载目录，却去 <项目>/__release/ 找 dist.json"。
 P2c="$T/ws2c/terminal/tmux"
 export WTOOL_ROOT="$T/ws2c"
-mkdir -p "$P2c/__release" "$T/fromdir"
+mkdir -p "$P2c/__release" "$P2c/scripts" "$T/fromdir"
 cp "$P/__release/dist.json" "$P2c/__release/"
 cp "$P/__release"/*-vol* "$P2c/__release/"
+cp "$P/scripts/release.json" "$P2c/scripts/"
 cp "$P/__release/dist.json" "$T/fromdir/"
 cp "$P/__release"/*-vol* "$T/fromdir/"
 _rc=0
@@ -217,8 +227,10 @@ chk "★--dry-run 之后 __output/ 里零文件（一个字节都不许写）" "
 grep -q '什么都没解开' "$T/unpack2c.log" && ok "dry-run 的收尾语说清了没解开" \
     || bad "dry-run 收尾语在撒谎" "$(tail -3 "$T/unpack2c.log")"
 # --from=：新项目目录里**没有** __release/，dist.json 与分卷只在 $T/fromdir/ 里
+# （对照表仍然读项目里提交的那份 —— 它是"解到哪"的唯一来源）
 P2d="$T/ws2d/terminal/tmux"
-mkdir -p "$P2d"
+mkdir -p "$P2d/scripts"
+cp "$P/scripts/release.json" "$P2d/scripts/"
 _rc=0
 "$WT" unpack-release "$P2d" > "$T/unpack2d.log" 2>&1 || _rc=$?
 [ "$_rc" != 0 ] && ok "没有 __release/ 也没给 --from → 拒绝（不猜）" || bad "居然成功了"
@@ -230,6 +242,17 @@ _rc=0
     || bad "--from 没生效（参数被丢掉）" "$(cat "$T/unpack2d2.log")"
 [ -x "$P2d/__output/ubuntu_24.04/bin/tmux" ] && ok "--from 那个目录里的包解出来了" \
     || bad "没解出来" "$(tail -5 "$T/unpack2d2.log")"
+# 没有对照表 → **拒绝**，而且要说清表在哪、谁写它（声明式解包，ADR-0045 / D57）
+P2e="$T/ws2e/terminal/tmux"
+mkdir -p "$P2e/__release"
+cp "$P/__release/dist.json" "$P2e/__release/"
+cp "$P/__release"/*-vol* "$P2e/__release/"
+_rc=0
+"$WT" unpack-release "$P2e" > "$T/unpack2e.log" 2>&1 || _rc=$?
+[ "$_rc" != 0 ] && ok "★没有 release.json（对照表）→ 拒绝解开（不猜）" || bad "没有表也解开了"
+grep -q 'release.json' "$T/unpack2e.log" \
+    && ok "报错点名了 release.json（并说清谁写它）" || bad "报错没点名" "$(cat "$T/unpack2e.log")"
+[ ! -e "$P2e/__output" ] && ok "拒绝之后没有留下半个 __output/" || bad "留下了半个 __output/"
 
 
 # 场景 2b：**改名（2026-09-28，__release/ → __output/）之前**打的包 —— 顶层是 __release/<target>/
@@ -276,14 +299,19 @@ for v in d.get("volumes", []):
 json.dump(d, open(ddst, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
 PY
 cp "$T/oldpkg/dist.json" "$T/oldpkg/source.zip" "$T/oldpkg/release.zip" "$P2b/__release/"
-"$WT" unpack-release "$P2b" > "$T/unpack2b.log" 2>&1 \
-    || bad "unpack-release 跑旧布局的包" "$(cat "$T/unpack2b.log")"
-grep -q 'mv release __output' "$T/unpack2b.log" \
-    && ok "旧布局的包解开后提示 mv release __output（不然下一步只会说 __output/ 是空的）" \
-    || bad "解旧布局的包没给迁移提示" "$(tail -3 "$T/unpack2b.log")"
-[ -f "$P2b/release/ubuntu_24.04/bin/tmux" ] \
-    && ok "旧包确实解成了 release/<target>/（提示的前提成立）" \
-    || bad "旧包的布局没按原样解开"
+mkdir -p "$P2b/scripts"
+cp "$P2b_SUB/scripts/release.json" "$P2b/scripts/"     # 对照表（声明式解包要读它）
+_rc=0
+"$WT" unpack-release "$P2b" > "$T/unpack2b.log" 2>&1 || _rc=$?
+# ‼️ 声明式解包（ADR-0045 / D57）之后，"包里有什么"由对照表说了算：
+#    旧布局（顶层 release/<target>/）和表里的 `__output/**` **对不上** ——
+#    引擎**不许猜**，所以拒解开，并把两种可能说清（包太老 / 表和包不是一对）。
+[ "$_rc" != 0 ] && ok "旧布局的包（顶层 release/<target>/）对不上对照表 → 拒绝（不猜）" \
+    || bad "旧布局的包居然解开了（说明引擎在猜路径）"
+grep -q '__output' "$T/unpack2b.log" && grep -q 'release' "$T/unpack2b.log" \
+    && ok "报错说清了：表里要 __output/**、包里是 release/（并给出重打/迁移两条路）" \
+    || bad "没说清对不上在哪" "$(cat "$T/unpack2b.log")"
+[ ! -e "$P2b/__output" ] && ok "拒绝之后没有留下半个 __output/" || bad "留下了半个 __output/"
 
 # --------------------------------------------------------------------------
 printf '\n== 2c：源码包必须排除**新旧六个**产物目录（ADR-0033）==\n'
@@ -303,7 +331,7 @@ mkdir -p "$P2c/scripts"
 printf '#!/bin/sh\ntrue\n' > "$P2c/scripts/build.sh"
 cat > "$P2c/wtool.xml" <<'XML'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" priority="50">
+<wtool schema="1" kind="docker" priority="50">
 </wtool>
 XML
 git -C "$P2c" add -A; git -C "$P2c" -c user.name=t -c user.email=t@t commit -qm init
@@ -330,9 +358,10 @@ cd "$here" || exit 1
 printf '\n== 场景 3：卷坏了 / 缺卷 → 拒绝解开 ==\n'
 P3="$T/ws3/terminal/tmux"
 export WTOOL_ROOT="$T/ws3"
-mkdir -p "$P3/__release"
+mkdir -p "$P3/__release" "$P3/scripts"
 cp "$P/__release/dist.json" "$P3/__release/"
 cp "$P/__release"/*-vol* "$P3/__release/"
+cp "$P/scripts/release.json" "$P3/scripts/"
 printf 'x' >> "$P3/__release/release.zip-vol01"          # 弄坏第一卷
 _rc=0
 "$WT" unpack-release "$P3" > "$T/unpack3.log" 2>&1 || _rc=$?
@@ -344,8 +373,9 @@ grep -q '校验失败' "$T/unpack3.log" && ok "说清了是校验失败" \
 
 P4="$T/ws4/terminal/tmux"
 export WTOOL_ROOT="$T/ws4"
-mkdir -p "$P4/__release"
+mkdir -p "$P4/__release" "$P4/scripts"
 cp "$P/__release/dist.json" "$P4/__release/"               # 一卷都不放
+cp "$P/scripts/release.json" "$P4/scripts/"
 _rc=0
 "$WT" unpack-release "$P4" > "$T/unpack4.log" 2>&1 || _rc=$?
 [ "$_rc" != 0 ] && ok "缺分卷 → 拒绝解开" || bad "缺分卷居然还解开成功"
@@ -365,7 +395,7 @@ printf 'alias ll="ls -alF"\n' > "$P5/env.zsh"
 printf 'alias ll="ls -alF"\n' > "$P5/env.bash"
 cat > "$P5/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" priority="45">
+<wtool schema="1" kind="docker" priority="45">
   <zshrc  src="env.zsh"/>
   <bashrc src="env.bash"/>
 </wtool>
@@ -419,9 +449,10 @@ grep -q '旧的中文资产名' "$T/pack5b.log" && ok "pack-release 报了一声
 # 只有源码包的机器：下载 → 解包 → **源码铺回项目目录**（否则 install 没东西可装）
 P6="$T/ws6/shell/zsh"
 export WTOOL_ROOT="$T/ws6"
-mkdir -p "$P6/__release"
+mkdir -p "$P6/__release" "$P6/scripts"
 cp "$P5/__release/dist.json" "$P6/__release/"
 cp "$P5/__release/source.zip" "$P6/__release/"
+cp "$P5/scripts/release.json" "$P6/scripts/"      # 对照表：源码包解到哪由它说了算
 "$WT" unpack-release "$P6" > "$T/unpack6.log" 2>&1 \
     || bad "只有源码包也能 unpack" "$(cat "$T/unpack6.log")"
 [ -f "$P6/wtool.xml" ] && ok "源码铺回项目目录了（wtool.xml 到位）" \
@@ -447,7 +478,7 @@ chmod +x "$P6c/__output/bin/tool"
 printf '只在本机、包外的东西\n'      > "$P6c/src/keep.txt"
 cat > "$P6c/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" priority="50"/>
+<wtool schema="1" kind="docker" priority="50"/>
 EOF
 printf '__output/\n__release/\n' > "$P6c/.gitignore"
 git -C "$P6c" init -q && git -C "$P6c" add -A \
@@ -460,8 +491,9 @@ git -C "$P6c" init -q && git -C "$P6c" add -A \
     || bad "对照：release-hash.txt 没产出"
 # 换一台"新机器"（没有 src/），只放包 → 源码包不该被铺开
 P6d="$T/ws6d/acme/app"; export WTOOL_ROOT="$T/ws6d"
-mkdir -p "$P6d/__release"
+mkdir -p "$P6d/__release" "$P6d/scripts"
 cp "$P6c/__release/"* "$P6d/__release/"
+cp "$P6c/scripts/release.json" "$P6d/scripts/"    # 对照表（源码包那条是 to=""：只校验）
 "$WT" unpack-release "$P6d" > "$T/unpack6d.log" 2>&1 \
     || bad "对照 unpack" "$(cat "$T/unpack6d.log")"
 [ -f "$P6d/__output/bin/tool" ] && ok "对照：产物解出来了（__output/）" \
@@ -480,7 +512,7 @@ printf 'x\n' > "$P7/__output/x.bin"
 printf 'true\n' > "$P7/scripts/build.sh"
 cat > "$P7/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" priority="50"/>
+<wtool schema="1" kind="docker" priority="50"/>
 EOF
 git -C "$P7" init -q && git -C "$P7" add -A \
     && git -C "$P7" -c user.name=t -c user.email=t@t commit -qm init
@@ -506,7 +538,7 @@ printf 'export DEMO=1\n' > "$P8/env.zsh"
 printf 'export DEMO=1\n' > "$P8/env.bash"
 cat > "$P8/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" priority="50"/>
+<wtool schema="1" kind="docker" priority="50"/>
 EOF
 printf '__output/\nrelease/\n' > "$P8/.gitignore"
 printf '#!/bin/sh\ntrue\n' > "$P8/scripts/build.sh"
@@ -516,11 +548,17 @@ git -C "$P8" init -q && git -C "$P8" add -A \
     || bad "场景 6 的 pack-release" "$(cat "$T/pack8.log")"
 # 假装那些资产已经挂在发布页上
 cp -f "$P8"/__release/*.zip "$P8"/__release/dist.json "$P8"/__release/*-hash.txt "$T/pub8/" 2>/dev/null || true
-# 生成"提交进仓库"的声明（真流程里由 publish-release 写），再把 base_url 指到本地
+# 生成"提交进仓库"的声明（真流程里由 publish-release 写：pack-* 只写对照表，
+# publish 补 tag / assets[]），再把 base_url 指到本地
+#   ⚠️ 先写临时文件再 mv：生成器要**读旧的那份**（合并两族），直接 `>` 到同一个
+#      路径会先把它截断成 0 字节 —— 生成器读到空文件、整个发布声明就没了（踩过）。
 py "$boot/lib/wtool_plan.py" release-json --release-dir "$P8/__release" \
+    --project-dir "$P8" --root "$WTOOL_ROOT" --existing "$P8/scripts/release.json" \
     --dist "$P8/__release/dist.json" --project-id terminal/tmux --engine 1.0.0 \
-    --at 2026-01-01T00:00:00+0800 --dirty 0 --targets ubuntu_24.04 > "$P8/scripts/release.json" \
+    --at 2026-01-01T00:00:00+0800 --dirty 0 --targets ubuntu_24.04 --dev-fields \
+    > "$T/rj8.json" \
     || bad "生成 release.json"
+mv -f "$T/rj8.json" "$P8/scripts/release.json"
 py - "$P8/scripts/release.json" "$T/pub8" <<'PY'
 import json, sys
 p, base = sys.argv[1], sys.argv[2]
@@ -642,6 +680,222 @@ printf '' > "$ROWS"
 DOC9B=$(py "$boot/lib/wtool_plan.py" update-downloads --doc "$DOCS" --rows "$ROWS")
 printf '%s\n' "$DOC9B" | grep -q '还没有发布过任何项目' \
     && ok '空表时明说「还没有发布过任何项目」' || bad "空表没给说明"
+
+# --------------------------------------------------------------------------
+printf '\n== 场景 10：离线族 pack-offline-release（自足包 / 资产名 / 校验）（ADR-0045 / D50 / D51 / D54）==\n'
+#   两族的区别是本轮的核心，所以这里逐条盯：
+#     ① 包名按 kind 定（source-offline.zip / release-offline.zip / 安装器特例）
+#     ② **自足**：wtool.xml + env.* + 源码或产物；顶层是 wtool/<项目路径>/
+#     ③ **不放 dist.json**；旁边一份 <包名>.sha256；分卷时给 check-hash.sh
+#     ④ check-hash.sh **不依赖 wtool**（干净 PATH 里直接跑；坏一卷要报错）
+
+# ---- ① 纯源码：source-offline.zip ----------------------------------------
+OWS="$T/ws10"; export WTOOL_ROOT="$OWS"
+OS1="$OWS/terminal/tmux"
+mkdir -p "$OS1/bin"
+printf 'set -g mouse on\n'   > "$OS1/tmux.conf"
+printf 'export DEMO=1\n'     > "$OS1/env.zsh"
+printf 'export DEMO=1\n'     > "$OS1/env.bash"
+printf '#!/bin/sh\necho mem\n' > "$OS1/bin/mem.sh"
+cat > "$OS1/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" priority="50"/>
+EOF
+git -C "$OS1" init -q && git -C "$OS1" add -A \
+    && git -C "$OS1" -c user.name=t -c user.email=t@t commit -qm init
+"$WT" pack-offline-release terminal/tmux > "$T/off1.log" 2>&1 \
+    || bad "① pack-offline-release" "$(cat "$T/off1.log")"
+chk "① 资产名按 kind：source-offline.zip" \
+    "$(ls "$OS1/__release/source-offline.zip" 2>/dev/null | grep -c . || true)" "1"
+[ -f "$OS1/__release/dist.json" ] && bad "① 离线包里不该有 dist.json（D51）" \
+    || ok "① 不放 dist.json（只有哈希文件，D51）"
+[ -f "$OS1/__release/source-offline.zip.sha256" ] \
+    && ok "① 旁边有 source-offline.zip.sha256" || bad "① 没有 .sha256"
+chk "① .sha256 里那一行就是包本身（sha256sum -c 直接过）" \
+    "$(cd "$OS1/__release" && sha256sum -c source-offline.zip.sha256 2>&1 | awk '{print $2}')" "OK"
+for f in wtool.xml env.zsh env.bash tmux.conf bin/mem.sh; do
+    zhave "$OS1/__release/source-offline.zip" "wtool/terminal/tmux/$f" \
+        && ok "① 自足：包里有 $f" || bad "① 包里缺 $f"
+done
+chk "① 包里没有 dist.json" \
+    "$(zlist "$OS1/__release/source-offline.zip" | grep -c 'dist\.json' || true)" "0"
+check "① 对照表：源码自足包并进 \$WTOOL_HOME/wtool（to=.）" "wtool/**" \
+    "$(py -c 'import json,sys
+print(json.load(open(sys.argv[1]))["artifacts"]["source-offline.zip"][0]["from"])' \
+        "$OS1/scripts/release.json")"
+
+# ---- ② muslbin：release-offline.zip + 分卷 + check-hash.sh ----------------
+OS2="$OWS/tools/musl-bins"
+mkdir -p "$OS2/__output/usr/bin"
+printf 'export DEMO=1\n' > "$OS2/env.zsh"
+printf 'export DEMO=1\n' > "$OS2/env.bash"
+cat > "$OS2/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" kind="muslbin" priority="60"/>
+EOF
+printf 'MUSL-BINARY-MUSL-BINARY-MUSL-BINARY\n' > "$OS2/__output/usr/bin/fzf"
+chmod +x "$OS2/__output/usr/bin/fzf"
+printf '# fzf --zsh 的产物\n' > "$OS2/__output/fzf.zsh"
+git -C "$OS2" init -q && git -C "$OS2" add -A \
+    && git -C "$OS2" -c user.name=t -c user.email=t@t commit -qm init
+"$WT" pack-offline-release tools/musl-bins --volume-size=300 > "$T/off2.log" 2>&1 \
+    || bad "② pack-offline-release" "$(cat "$T/off2.log")"
+_np=$(LC_ALL=C ls "$OS2/__release"/release-offline.zip.part-* 2>/dev/null | grep -c . || true)
+[ "$_np" -ge 2 ] && ok "② 资产名按 kind：release-offline.zip，切成了 $_np 卷" \
+    || bad "② 没切卷（$_np）—— --volume-size=300 下不该只有一卷"
+[ -e "$OS2/__release/release-offline.zip" ] && bad "② 切了卷还留着整包（它正是传不上去的那个）" \
+    || ok "② 切卷之后整包不留在 __release/"
+[ -f "$OS2/__release/check-hash.sh" ] && ok "② 分卷给了 check-hash.sh" || bad "② 没有 check-hash.sh"
+chk "② check-hash.sh 把所有分片都写全了" \
+    "$(grep -c '  release-offline.zip.part-' "$OS2/__release/check-hash.sh" || true)" "$_np"
+# ★ 分片拼回整包 → 声明面 + 产物 + <generate> 的产物都在，且**没有 dist.json**。
+#    ⚠️ 分片**不是完整的 zip**（zipfile 拿它当 zip 会抛异常）—— 先按 check-hash.sh
+#    那句 `cat …part-* > …` 拼起来再读；顺序对不对由整体 sha256 兜住。
+chk "★② 分片拼回整包：拼出来的 sha256 对得上，内容是声明面 + 产物 + 生成物，没有 dist.json" \
+    "$(python3 - "$OS2" <<'PY'
+import sys, glob, os, zipfile, io, hashlib
+d = sys.argv[1]
+rel = os.path.join(d, "__release")
+parts = sorted(glob.glob(os.path.join(rel, "release-offline.zip.part-*")))
+blob = b"".join(open(p, "rb").read() for p in parts)
+want = open(os.path.join(rel, "release-offline.zip.sha256"),
+            encoding="utf-8").read().split()[0]
+names = zipfile.ZipFile(io.BytesIO(blob)).namelist()
+good = (hashlib.sha256(blob).hexdigest() == want
+        and all(n in names for n in ("wtool/tools/musl-bins/wtool.xml",
+                                     "wtool/tools/musl-bins/env.zsh",
+                                     "wtool/tools/musl-bins/__output/usr/bin/fzf",
+                                     "wtool/tools/musl-bins/__output/fzf.zsh"))
+        and not any(n.endswith("dist.json") for n in names))
+print("yes" if good else "no")
+PY
+)" "yes"
+# ★ 不依赖 wtool：干净 PATH 里直接跑（连 wtool 的影子都不给）
+_rc=0
+_cr=$(cd "$OS2/__release" && env -i PATH=/usr/bin:/bin sh ./check-hash.sh 2>&1) || _rc=$?
+chk "★② check-hash.sh 不用 wtool 就能跑（干净 PATH，rc=0）" "$_rc" "0"
+chk "★② 每一卷都报 OK" "$(printf '%s\n' "$_cr" | grep -c ': OK$' || true)" "$_np"
+# 坏一卷必须报出来 —— 一个永远说 OK 的校验脚本等于没有
+printf 'x' >> "$OS2/__release/release-offline.zip.part-aa"
+_rc2=0
+_cr2=$(cd "$OS2/__release" && env -i PATH=/usr/bin:/bin sh ./check-hash.sh 2>&1) || _rc2=$?
+[ "$_rc2" != 0 ] && ok "★② 坏了一卷 → check-hash.sh 非 0（真的在校验）" \
+    || bad "② 卷坏了却报成功" "$_cr2"
+printf '%s\n' "$_cr2" | grep -q 'FAILED' && ok "② 说清了哪一卷 FAILED" || bad "② 没说清哪卷坏"
+
+# ---- ③ docker：release-offline.zip（产物 + 声明面）------------------------
+OS3="$OWS/shell/zsh"
+mkdir -p "$OS3/__output/ubuntu_24.04/usr/bin"
+printf 'export DEMO=1\n' > "$OS3/env.bash"
+cat > "$OS3/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" kind="docker" priority="70"/>
+EOF
+printf '#!/bin/sh\necho zsh\n' > "$OS3/__output/ubuntu_24.04/usr/bin/zsh"
+chmod +x "$OS3/__output/ubuntu_24.04/usr/bin/zsh"
+git -C "$OS3" init -q && git -C "$OS3" add -A \
+    && git -C "$OS3" -c user.name=t -c user.email=t@t commit -qm init
+"$WT" pack-offline-release shell/zsh > "$T/off3.log" 2>&1 \
+    || bad "③ pack-offline-release" "$(cat "$T/off3.log")"
+zhave "$OS3/__release/release-offline.zip" "wtool/shell/zsh/__output/ubuntu_24.04/usr/bin/zsh" \
+    && ok "③ 自足：产物在包里，顶层是 wtool/<项目路径>/" || bad "③ 产物的路径不对"
+zhave "$OS3/__release/release-offline.zip" "wtool/shell/zsh/wtool.xml" \
+    && ok "③ 声明面（wtool.xml）也在包里" || bad "③ 缺 wtool.xml"
+chk "③ 资产名按 kind：release-offline.zip（和 ② 同名，但各在自己的项目里）" \
+    "$(ls "$OS3/__release/release-offline.zip" 2>/dev/null | grep -c . || true)" "1"
+
+# ---- 安装器包是特例：wtool-base-tools.tar.gz（.wtool/ 树，D59）-------------
+#   判据是"引擎就住在这个项目里"（位置，不是名字）。测试里造一个**假的引擎项目**，
+#   再把 WTOOL_BOOTSTRAP 指到它 —— 引擎自己就是这么认的。
+OS4="$OWS/wtool-base-tools"
+mkdir -p "$OS4/lib" "$OS4/scripts"
+printf '#!/bin/sh\n# 假的引擎入口（只为让"这里住着引擎"这条判据成立）\n' > "$OS4/wtool.sh"
+printf '# 假的规划器\n' > "$OS4/lib/wtool_plan.py"
+printf '#!/bin/sh\n# 安装器入口\n' > "$OS4/scripts/install.sh"
+cat > "$OS4/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" priority="5"/>
+EOF
+git -C "$OS4" init -q && git -C "$OS4" add -A \
+    && git -C "$OS4" -c user.name=t -c user.email=t@t commit -qm init
+WTOOL_BOOTSTRAP="$OS4" "$WT" pack-offline-release "$OS4" > "$T/off4.log" 2>&1 \
+    || bad "安装器包 pack-offline-release" "$(cat "$T/off4.log")"
+O4="$OS4/__release/wtool-base-tools.tar.gz"
+[ -f "$O4" ] && ok "安装器包的资产名固定是 wtool-base-tools.tar.gz（D59）" \
+    || bad "安装器包的资产名不对" "$(LC_ALL=C ls "$OS4/__release")"
+_t4=$(tar tzf "$O4")
+printf '%s\n' "$_t4" | grep -qx '\.wtool/wtool/wtool-base-tools/wtool.sh' \
+    && ok "安装器包解开是 .wtool/ 树（不是 wtool/ 树）" \
+    || bad "安装器包的第一层不对" "$(printf '%s\n' "$_t4" | head -3)"
+printf '%s\n' "$_t4" | grep -qx '\.wtool/install\.sh' \
+    && ok "安装器包里有 .wtool/install.sh（那台机器唯一要敲的入口）" || bad "缺 .wtool/install.sh"
+# ⚠️ 判据是 tar **列出的模式位**（第一列 l = 软链）＋ 链的目标，不是 $NF：
+#    GNU tar 详细列表里软链那一行的最后一个字段是**目标**，不是名字。
+tar tzvf "$O4" | grep -E '^l' | grep -q ' \.wtool/install\.sh -> wtool/wtool-base-tools/scripts/install\.sh$' \
+    && ok "★.wtool/install.sh 是**相对软链**（拷贝会让 install.sh 认错项目目录）" \
+    || bad ".wtool/install.sh 不是软链（install.sh 会因为找不到 wtool.sh 而失败）" \
+           "$(tar tzvf "$O4" | grep 'install\.sh')"
+
+# ---- ③b `all`：工作区里每个项目各产一个自足包（资产名按各自的 kind）--------
+_rc=0
+"$WT" pack-offline-release all > "$T/off1all.log" 2>&1 || _rc=$?
+chk "③b pack-offline-release all 退出码 0" "$_rc" "0"
+for _p in terminal/tmux tools/musl-bins shell/zsh; do
+    grep -q "── $_p" "$T/off1all.log" && ok "③b all 里点了 $_p" \
+        || bad "③b all 漏了 $_p" "$(grep -c '── ' "$T/off1all.log")"
+done
+chk "③b ① 拿到 source-offline.zip" \
+    "$(ls "$OS1/__release/source-offline.zip" 2>/dev/null | grep -c . || true)" "1"
+# ⚠️ `all` 用的是**默认**卷大小（32M），这个 fixture 不会被切开 —— 整包就在那儿；
+#    分卷那条路是 ② 上半段（`--volume-size=300`）专门测的。
+chk "③b ② 拿到 release-offline.zip（默认卷大小下不切）" \
+    "$(ls "$OS2/__release/release-offline.zip" 2>/dev/null | grep -c . || true)" "1"
+chk "③b ③ 拿到 release-offline.zip" \
+    "$(ls "$OS3/__release/release-offline.zip" 2>/dev/null | grep -c . || true)" "1"
+
+# ---- ④ 门禁：① 敲非离线族那四条 → 非 0（KIND_GATE_DEFERRED 已清空）--------
+#   `KIND_GATE_DEFERRED` 那一轮"放行但出声"的过渡开关已经清掉（替代品 = 离线族，
+#   本轮落地）→ ① 类敲 pack-release / publish-release / download-release /
+#   unpack-release 都必须**当场拒**，而且是分发点拒（脚本一行都不跑）。
+for _gc in pack-release publish-release download-release unpack-release; do
+    _rc=0
+    _out=$("$WT" "$_gc" terminal/tmux 2>&1) || _rc=$?
+    [ "$_rc" != 0 ] && ok "★① kind=source 敲 $_gc → 非 0（rc=$_rc）" \
+        || bad "① $_gc 居然过了门禁" "$_out"
+    case $_out in
+        *"是 kind=source"*) ok "  $_gc 的拒绝文案点明了 kind" ;;
+        *) bad "  $_gc 的拒绝文案不对" "$_out" ;;
+    esac
+done
+# 反证：离线族对 ① 是**放行**的（不然 ① 就没路可走了）
+_rc=0
+"$WT" pack-offline-release terminal/tmux --dry-run > "$T/off10.log" 2>&1 || _rc=$?
+chk "① 敲 pack-offline-release 放行（dry-run，rc=0）" "$_rc" "0"
+
+# ---- ⑤ 声明式解包：落点由 release.json 说了算（改表就改落点）---------------
+#   把对照表里 release.zip 的 to 改成 __output/换了个地方，产物就该跟着挪 ——
+#   这条是"引擎不写死路径"的直接证据（ADR-0045 / D57 用户原话：坚决不要隐晦）。
+OD="$T/ws10d/shell/zsh"
+mkdir -p "$OD/scripts" "$OD/__release"
+# 先打一个产物包（它会把 release.zip 写进对照表），再**改表**看落点跟不跟着走
+"$WT" pack-release "$OS3" --tag=v10 --repo=o/r > "$T/off10b.log" 2>&1 \
+    || bad "⑤ 为声明式对照准备一个产物包" "$(cat "$T/off10b.log")"
+cp "$OS3/scripts/release.json" "$OD/scripts/release.json"
+py - "$OD/scripts/release.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p, encoding="utf-8"))
+d["artifacts"]["release.zip"][0]["to"] = "__output/挪到这儿"
+json.dump(d, open(p, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+PY
+cp "$OS3/__release/release.zip" "$OS3/__release/dist.json" "$OD/__release/" 2>/dev/null || true
+"$WT" unpack-release "$OD" > "$T/off10c.log" 2>&1 \
+    || bad "⑤ 按改过的对照表 unpack" "$(cat "$T/off10c.log")"
+[ -x "$OD/__output/挪到这儿/ubuntu_24.04/usr/bin/zsh" ] \
+    && ok "★⑤ 改了对照表的 to，产物就落到新地方（落点确实是声明出来的）" \
+    || bad "⑤ 落点没跟着对照表走" "$(find "$OD/__output" -type f 2>/dev/null | head -3)"
+[ -e "$OD/__output/ubuntu_24.04" ] && bad "⑤ 还是按老路径解了一份（说明有硬编码）" \
+    || ok "⑤ 没有偷偷按老路径再解一份"
 
 # --------------------------------------------------------------------------
 printf '\n----------------------------------------\n'

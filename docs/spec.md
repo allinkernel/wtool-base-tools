@@ -49,15 +49,23 @@
   wtool sudo-uninstall <项目>...|all [--dry-run] [--force]
   wtool sudo-bootstrap [--dry-run] [--force]
 
-产物与发布（release 四条边：本地一对 pack/unpack，远端一对 publish/download）
+产物与发布（release **两族**：非离线族给开发机、离线族给断网机 —— ADR-0045 / D54）
   wtool build          [<项目>...|all] [--dry-run] [--target=<目标系统>] [--jobs=N] [--rebuild]
                                                        源码 → __output/（跑 scripts/build.sh 或引擎驱动容器；--rebuild = 无视"已经编好了"的三条判据）
   wtool pack-release   <项目>... [--tag=T] [--repo=owner/repo] [--volume-size=32M]
-                                                         __output/ → __release/（**不联网**）
+                                                         __output/ → __release/（**不联网**；只 ③ 类）
   wtool publish-release [<项目>...] [--tag=TAG] [--dry-run] [--force]
-                        [--allow-foreign] [--out=DIR]     __release/ → GitHub Release（**只上传**）
-  wtool download-release [<项目>...|all] [--dry-run]      GitHub Release → __release/（**只下载**）
-  wtool unpack-release <项目>... [--from=目录]             __release/ → __output/（**不联网**）
+                        [--allow-foreign] [--out=DIR]     __release/ → GitHub Release（**只上传**；只 ③ 类）
+  wtool pack-offline-release <项目>...|all [--volume-size=32M] [--dry-run]
+                                                         **离线族**：自足包 → <项目>/__release/
+                                                         （① source-offline.zip；②③ release-offline.zip；
+                                                          安装器项目 wtool-base-tools.tar.gz = .wtool/ 树）
+  wtool publish-offline-release <项目>...|all [--tag=offline-<日期>] [--dry-run] [--force]
+                        [--allow-foreign] [--repo=O/R]    自足包 + 校验文件 → **offline-<日期>** 那个 release 页
+                                                         （和开发机那一族**分开**：两个 tag / 两个页面，D56）
+  wtool download-release [<项目>...|all] [--dry-run]      GitHub Release → __release/（**只下载**；②③）
+  wtool unpack-release <项目>... [--from=目录]             __release/ → 项目 __output/（**不联网**；
+                                                         解到哪读 release.json 的对照表 —— 声明式，D57）
 
 层（第二条发布通道：容器镜像仓库，详见 §14）
   wtool _layer-save   <项目> --image=<镜像> [--target=<os_ver>] [--layer=<层名>]
@@ -157,18 +165,14 @@ connection reset），pull 走 `skopeo`（它写 OCI 布局时会合并 `index.j
 
 **判据只有一处**（`lib/wtool_plan.py` 的 `KIND_COMMANDS`）：shell 侧一个 kind 名都不写。
 
-> ⚠️ **过渡期（2026-10-13，D54/D62）**：矩阵里 ① 那一列标 `—` 的**四条发布族命令**
-> （`pack-release` / `publish-release` / `download-release` / `unpack-release`）的替代品
-> `pack-offline-release` / `publish-offline-release`（+ 断网机"解压自足包 → `cp -a` 合并"那条路）
-> **还没实现** —— 现在全拦下 = ① 项目**一个包都发不出、下不了**，所以这四条**先放行但出声**：
-> ```
-> wtool: 提醒：'terminal/tmux' 是 kind=source，按目标模型 pack-release 对它不适用
->        （它没有产物包 —— 源码即产物，离线包走 pack-offline-release）；替代命令还没实现，本轮先放行。
-> ```
-> 看板那几格已按**目标语义**显示 `不支持`（`kind-caps --matrix` 会把"还没接入门禁"的四条列出来）。
-> 离线族落地后把 `KIND_GATE_DEFERRED` 清空即可，本节其余部分不用改。
-> **已生效的是 `build` / `unpack-layer` / `push-layer` / `pull-layer` 这四条**（工作区里没有任何
-> 项目声明过构建能力，所以门禁它们不拿走任何在用的东西）。
+> ✅ **门禁已完全生效（2026-10-13，离线族那一轮）**：矩阵里 ① 那一列标 `—` 的四条
+> （`pack-release` / `publish-release` / `download-release` / `unpack-release`）**现在当场拒**
+> （`rc=3`，文案指路 `pack-offline-release`）；替代品 `pack-offline-release` /
+> `publish-offline-release` + 断网机"解压自足包 → `cp -a` 合并"那条路**已实现**
+> （见 §14 的「离线族：`pack-offline-release` / `publish-offline-release`」）。
+> 过渡开关 `KIND_GATE_DEFERRED`（`wtool_plan.py`）已清空 —— 那个元组留着，将来若再出现
+> "目标语义要拦、替代品还没落地"的命令，往里加一条即可（行为是"放行但出声"）。
+> `build` / `unpack-layer` / `push-layer` / `pull-layer` 从第一轮起就是硬拦的。
 
 > **别和另外两个 `kind` 混**：`<build kind="local|docker">`（怎么构建）与
 > `<publish kind="source|none">`（怎么发布）是**另一层**，见 [`manifest-schema.md`](manifest-schema.md)。
@@ -521,11 +525,11 @@ env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_
 |---|---|---|---|
 | pairing | `tests/pairing_test.sh` | 35 | install → uninstall 字节级回退、幂等、顺序无关、脏仓库拒绝、dry-run、搬家、`doctor --quiet` 可 eval |
 | sudo-install | `tests/provision_test.sh` | 40 | `/etc` 写入与备份、`sudo-uninstall` 还原、`<source>` 编译型、task 的 marker 幂等、when 过滤 |
-| publish | `tests/publish_test.sh` | 154 | 源码包形状、相对软链不被改写、第三方仓保护、gh 抖动时的复用、同名 commit 重发（非交互拒绝 / `--force` 放行）、**资产名全是 ASCII**（`--dry-run` 打出的清单 + `release.json` 的 `assets[]` —— H27 / ADR-0040）、**建 release 带 `--target=<被打包的 commit>`**（打包后又提交也不许拿 HEAD 顶替；拿不到就警告 + 不传）、**下载表刷新认发布声明里的 tag**（正反两面 + 没发布过的退回模板 + 前缀防撞名 + `unzip`/`tar` 分发 + 幂等） —— ADR-0041 场景 16/17 |
-| table | `tests/table_test.sh` | 94 | 能力表格（11 列的格子语义与列对齐）、图例逐条写全命令名、`__output/` 这个词、两张纯 ASCII 图（install 的 route 2 只写 unpack-release；release 图里 download 落 `__release/`、unpack 才到 `__output/`）|
+| publish | `tests/publish_test.sh` | 192 | 源码包形状、相对软链不被改写、第三方仓保护、gh 抖动时的复用、同名 commit 重发（非交互拒绝 / `--force` 放行）、**资产名全是 ASCII**（`--dry-run` 打出的清单 + `release.json` 的 `assets[]` —— H27 / ADR-0040）、**建 release 带 `--target=<被打包的 commit>`**（打包后又提交也不许拿 HEAD 顶替；拿不到就警告 + 不传）、**下载表刷新认发布声明里的 tag**（正反两面 + 没发布过的退回模板 + 前缀防撞名 + `unzip`/`tar` 分发 + 幂等） —— ADR-0041 场景 16/17、**场景 19 离线族 `publish-offline-release`**（两个 release 页/tag 分开、只传离线族的文件、tag 不带 `offline` 就拒、两族 tags 在同一个 `release.json` 里各就各位 —— ADR-0045 / D54 / D56） |
+| table | `tests/table_test.sh` | 106 | 能力表格（11 列的格子语义与列对齐）、图例逐条写全命令名、`__output/` 这个词、两张纯 ASCII 图（install 的 route 2 只写 unpack-release；release 图里 download 落 `__release/`、unpack 才到 `__output/`）|
 | release-copy | `tests/release_copy_test.sh` | 17 | 从发布包解压出来的工作区（没有 `.git`、没有 repo 客户端） |
-| release | `tests/release_test.sh` | 109 | pack-release 读 `.gitignore`、分卷、dist.json、unpack-release 往返与拒绝坏卷、**`unpack-release --dry-run` 不写 `__output/`**、**`--from=<目录>` 真被用上**（这两个原来都被静默忽略/无守卫）、**资产名全是 ASCII + 上一版留下的中文名报一声再删**（H27 / ADR-0040）、**下载块生成器按资产形状生成**（前缀防撞名 / `unzip` 与 `tar` 分发 / 分卷 `cat` 拼回 / `Expand-Archive`、`copy /b` / 块里的命令名与安装入口与现状一致 —— ADR-0041 场景 9） |
-| contract | `tests/contract_test.sh` | 250 | 新标签、两跳软链、执行顺序、__output/ 检查、`~/usr` 生命周期、认领检查、check/repair、kill、`<build kind>`（拒绝没 docker 的 docker 项目 + 形状决定 targets）、check 两个 shell 的汇总文件、`--prune`（三道刹车 + 幂等）、全局写锁（放锁 / 不硬闯 / 接管 / 可重入 / dry-run 不等锁）、Tab 补全（23 条候选 + `docs` 不进候选 + 内部命令不进候选 + `status` 两种形态 + 每个候选开关都真能被解析器认出来）、**`--dry-run` 不跑项目脚本**（前后 `find` 清单逐行相同）、**uninstall 按路径指项目、且真跑项目脚本**（标记文件 + 参数；解析不出来时明确报错、退出码非 0，`--no-script` 只警告 —— BL-47/BL-48）、**`--id` 老写法给指路**、**`wtool move` 收干净改名残留 + `--dry-run` 零副作用**、**手工 mv 的残渣 `wtool check` 必须报出来**（旧 env 块 / 悬空链 / registry 旧行 —— ADR-0037，场景 17） |
+| release | `tests/release_test.sh` | 158 | pack-release 读 `.gitignore`、分卷、dist.json、unpack-release 往返与拒绝坏卷、**`unpack-release --dry-run` 不写 `__output/`**、**`--from=<目录>` 真被用上**（这两个原来都被静默忽略/无守卫）、**资产名全是 ASCII + 上一版留下的中文名报一声再删**（H27 / ADR-0040）、**下载块生成器按资产形状生成**（前缀防撞名 / `unzip` 与 `tar` 分发 / 分卷 `cat` 拼回 / `Expand-Archive`、`copy /b` / 块里的命令名与安装入口与现状一致 —— ADR-0041 场景 9）、**场景 10 离线族 `pack-offline-release`**（资产名按 kind / 自足包顶层 `wtool/` / 不放 `dist.json` / `.sha256` / 分卷 `check-hash.sh` 在干净 PATH 里直接跑且坏卷要报错 / 安装器包 `wtool-base-tools.tar.gz` 是 `.wtool/` 树且 `install.sh` 是相对软链 / ① 敲非离线族四条全被门禁拒 / **改对照表的 `to` 落点就跟着改** —— ADR-0045 / D50 / D51 / D54 / D57） |
+| contract | `tests/contract_test.sh` | 286 | 新标签、两跳软链、执行顺序、__output/ 检查、`~/usr` 生命周期、认领检查、check/repair、kill、`<build kind>`（拒绝没 docker 的 docker 项目 + 形状决定 targets）、check 两个 shell 的汇总文件、`--prune`（三道刹车 + 幂等）、全局写锁（放锁 / 不硬闯 / 接管 / 可重入 / dry-run 不等锁）、Tab 补全（23 条候选 + `docs` 不进候选 + 内部命令不进候选 + `status` 两种形态 + 每个候选开关都真能被解析器认出来）、**`--dry-run` 不跑项目脚本**（前后 `find` 清单逐行相同）、**uninstall 按路径指项目、且真跑项目脚本**（标记文件 + 参数；解析不出来时明确报错、退出码非 0，`--no-script` 只警告 —— BL-47/BL-48）、**`--id` 老写法给指路**、**`wtool move` 收干净改名残留 + `--dry-run` 零副作用**、**手工 mv 的残渣 `wtool check` 必须报出来**（旧 env 块 / 悬空链 / registry 旧行 —— ADR-0037，场景 17） |
 | docker-build | `tests/docker_build_test.sh` | 101 | `kind="docker"` 的**引擎驱动构建**：按 `build/{targets,layers}.tsv` 起容器 → commit → 落 `__layer/` → 导 `__output/`（一层镜像对一层 output）、续跑、从 `__layer/` 恢复、失败不 commit、`export.filter`、dry-run、清单报错、**产物账本**（格式/来源/整表重写幂等/dry-run 不写/看板「下gz包」四种来源值/按项目分开/一行一个层目录含 `lang/x`/失败路径也重写，ADR-0036）、**`--rebuild` 绕过三条跳过判据**、**导出被拒不留残骸且重跑不被当成已导出**、**代理与本地镜像目录真的传进容器**、**构建日志保留 `<项目 id>` 里的 `/`** |
 | install-env | `tests/install_env_test.sh` | 67 | `install.sh` 第 0 步：镜像测速（按速度降序，不是字符串排序）、交互挑源 / 非交互自动选最快、换源前备份 + 不好用能退回去、`WTOOL_MIRROR=<代号|主机名|official>`、挑过一次就复用（`WTOOL_MIRROR=pick` 强制重测）、`container-raw.sh --user` 的**三件事**与提示文案不漂移 |
 | layer | `tests/layer_test.sh` | 50 | `__layer/<target>/` 那棵 OCI 镜像目录：写/读、blob 去重、index 合并、`unpack-layer` 解 blob + `OWNED.tsv` 扫描（**被拒之后重跑不许被当成已导出**）、`push-layer`（打桩 docker）、`pull-layer`（打桩 skopeo）、老名字指路 |
@@ -850,12 +854,13 @@ apt-get update && apt-get install -y --no-install-recommends \
 
 ---
 
-## 14. 发布层：release 的四条边
+## 14. 发布层：release 的两族、四条边
 
 `install` 管"这台机器上装好了没有"，`sudo-install` 管"系统层面备齐了没有"，
 发布层管"这些东西怎么到另一台机器上"。
 
-**release 有四条边、各一条命令**，名字就是**宾语（`release`）+ 方向**；再加上产出那条 `build`：
+**开发机这一族有四条边、各一条命令**，名字就是**宾语（`release`）+ 方向**；
+再加上产出那条 `build`：
 
 ```
   源码 ──wtool build──▶ __output/*
@@ -867,27 +872,44 @@ apt-get update && apt-get install -y --no-install-recommends \
        └──wtool install──▶ ~/.wtool/* ──(按 wtool.xml)──▶ ~/*
 ```
 
+**断网机那一族只有两条命令**（`pack-offline-release` / `publish-offline-release`），
+产的是**自足包**，而且**解包/合并根本不用 wtool**（详见本节后面的「离线族」）：
+
+```
+  项目目录 ──pack-offline-release──▶ __release/<自足包> + .sha256( + check-hash.sh )
+                                          │
+                                          └──publish-offline-release──▶ GitHub Release
+                                                                        （offline-<日期> 那个页面）
+  断网机：unzip 自足包 → cp -a wtool/. "$WTOOL_HOME/wtool/" → wtool install <项目>
+```
+
 | 命令 | 从哪 | 到哪 | 要什么 |
 |---|---|---|---|
 | `wtool build` | 源码 | `__output/` | 项目的 `scripts/build.sh` |
 | `wtool download-release` | GitHub Release | **`__release/`** | `curl` + 项目里**提交的** `scripts/release.json` |
-| `wtool unpack-release` | `__release/` | **`__output/`** | 只读 `__release/dist.json`，**不联网** |
-| `wtool pack-release` | `__output/` | `__release/` | 只读磁盘，**不联网** |
-| `wtool publish-release` | `__release/` | GitHub Release | `gh` + 干净的工作区 |
+| `wtool unpack-release` | `__release/` | **`__output/`** | 项目里**提交的** `scripts/release.json`（对照表）+ `__release/dist.json`，**不联网** |
+| `wtool pack-release` | `__output/` | `__release/` | 只读磁盘，**不联网**（只 ③ 类） |
+| `wtool publish-release` | `__release/` | GitHub Release | `gh` + 干净的工作区（只 ③ 类） |
+| `wtool pack-offline-release` | 源码 / `__output/` | `__release/`（自足包） | 只读磁盘，**不联网**（①②③ 都有） |
+| `wtool publish-offline-release` | `__release/`（自足包） | GitHub Release（`offline-<日期>` 页） | `gh` + 干净的工作区（①②③ 都有） |
 
 两条铁律：
 
 - **`install` 只读 `__output/`**，永远不读 `__release/`；
-- **`pack-release` / `unpack-release` 是 `__output/` 与 `__release/` 之间唯一的搬运工。**
+- **`pack-release` / `unpack-release` 是 `__output/` 与 `__release/` 之间唯一的搬运工**
+  （离线族不参与这条搬运：它是"另一台机器怎么拿到东西"那条路）。
 
 ### 契约文件：声明进仓库，事实跟产物走
 
 | 文件 | 谁写 | 在哪 | 干什么 |
 |---|---|---|---|
-| `scripts/release.json` | `publish-release`（**上传成功之后**写） | **提交进仓库** | **下载声明**：`repo` / `tag` / `base_url` / `commit` / `dirty` / `targets` / 每个资产的 `name` + `sha256` + `bytes`（另记 `published_at` 与引擎版本）。`download-release` **唯一**要读的东西 |
-| `__release/dist.json` | `pack-release` | 跟包走（**不提交**） | **这一份怎么拼**：分卷顺序、每卷 sha256、声明面清单。`unpack-release` 读它 |
+| `scripts/release.json` | **两个 pack 写 `artifacts`**（解到哪）；**两个 publish 各写自己那族的 tag**（非离线族还写 `assets[]`） | **提交进仓库** | **下载声明 + 声明式对照表**：`tag`（非离线族）/ `offlineTag`（离线族）/ `repo` / `base_url` / `commit` / `dirty` / `targets` / `assets[]`（每个资产的 `name` + `sha256` + `bytes`）/ **`artifacts`（资产名 → `[{from,to}]`，见 §14.6）**。`download-release` **唯一**要读的东西；`unpack-release` 的落点也读它 |
+| `__release/dist.json` | `pack-release`（**只有非离线族有**） | 跟包走（**不提交**） | **这一份怎么拼**：分卷顺序、每卷 sha256、声明面清单。自足包**不放它**（D51） |
 | `__release/.source` | `pack-release` 写 `packed` / `download-release` 写 `downloaded` | 跟包走（**不提交**） | 内部来源标记。`publish-release` 靠它拒绝"把刚下下来的包又传回去" |
-| `docs/download.md` | `pack-release` | **提交进仓库** | 给人看的下载页：这版发了什么、直链在哪 |
+| `__release/.offline` | `pack-offline-release`（`packed` + 打包时的 commit） | 跟包走（**不提交**） | `publish-offline-release` 拿那个 commit 当 `gh release create --target=`（同 ADR-0041 的理由） |
+| `__release/<包名>.sha256` | `pack-offline-release` | 跟包走（**要上传**） | 自足包的 sha256，一行；`sha256sum -c` 直接过（D51） |
+| `__release/check-hash.sh` | `pack-offline-release`（**分卷时才有**） | 跟包走（**要上传**） | 所有分片的 sha256 写全，**不依赖 wtool**：`sh check-hash.sh` 就校验（D51） |
+| `docs/download.md` | `pack-release` | **提交进仓库** | 给人看的下载页：这版发了什么、直链在哪（**只讲非离线族**） |
 
 `scripts/downloads.sh` **没有了**：那份"这次发了什么"的清单归 `scripts/release.json`。
 
@@ -1006,28 +1028,110 @@ wtool download-release all              # 所有提交了 release.json 的项目
 - 上面两种**退出码仍是 0**（只有参数错 / 缺 curl / 认不出项目才非 0）：
   部分失败要看输出里的 `warning`，**不能只看退出码**
 
-### unpack-release：只认 dist.json，不需要项目特定知识
+### unpack-release：**声明式**解包（解到哪读 `release.json`，不猜）
 
 ```
-读 __release/dist.json → 逐卷校验 sha256 → 按顺序拼接 → 校验整个文件的 sha256
-  → role=release 的解到项目根（里面有 __output/ 和声明面）
-  → role=source 的：这一版**有**产物包 → 只校验、不铺开（install 只消费 release.zip）
-                    这一版**没有**产物包 → 解到项目目录（源码就是产物，见下）
+读 <项目>/scripts/release.json 的 artifacts 对照表   ← 解到哪，**唯一**的来源（D57）
+读 __release/dist.json（有的话）                     ← 分卷表 + 每卷/整包 sha256
+  → 逐卷校验 sha256 → 按顺序拼接 → 校验整个文件的 sha256
+  → 按对照表逐条解开：把 from 的目录前缀剥掉，拼到 to 下面
 ```
 
-**源码包为什么分两种走法**（ADR-0039）：判据是 `dist.json` 里**有没有 `role=release`
-的文件** —— 一个都没有 = 这一版只发了源码包（项目没有构建能力）。那时 `install` 要装的
-东西全在源码里（`install.sh`、`bin/`、env 文件），**不铺开就是"install 时什么都没装"**。
-铺的时候要把 `wtool/<项目相对路径>/` 整段前缀剥掉（前缀有几段取决于项目有多深），
-并把 `wtool/.wtool-dist/<...>.json` 标记放到 `$WTOOL_ROOT/.wtool-dist/` ——
-解压副本没有 `.git`，`install` 靠这个标记才认得出"这是发布副本"而不要求 `--force`。
+**硬规矩**：
 
-一份都不缺才算成功；卷坏了 / 缺卷 / 拼接后 sha 不对 → **拒绝解开**（不许留下半个 `__output/`）。
-`--from=目录` 可以指到别处（下载目录），默认是 `<项目>/__release/`。
-**`--dry-run` 只打印计划**：不拼卷、不写 `__output/`（收尾语是"dry-run：以上 N 个文件的计划，
+1. **产物一律解到项目 `__output/` 下**。对照表里的 `to` 只允许三种值：
+   `__output` / `__output/<子目录>`（产物）、`.`（声明面 —— `wtool.xml` / `env.*` ——
+   和"源码就是产物"那一版的源码树）、`""`（**只校验、不铺开**）。
+   写别的 → **报错**（"不许有隐含规则/隐晦约定"）。
+2. **对照表里没写落点的产物资产 → 报错**，不猜（`role=release` 的漏了就停）。
+   `role=source` 的漏了 → 只校验不铺开（开发机上本来就有源码 —— ADR-0039）。
+3. **没有 `scripts/release.json` → 报错**并说清"谁写它"（两个 `pack-*` 会写 `artifacts`）。
+   它不是可有可无的元数据，而是解包契约的一部分。
+4. **离线族的包不归它管**：`source-offline.zip` / `release-offline.zip` /
+   `wtool-base-tools.tar.gz` 在对照表里也有条目（`to: "."`），但那是**断网机手工**
+   `unzip`/`tar` + `cp -a` 的活（D50 的不变式：解包与合并不需要 wtool）。
+   `unpack-release` 碰到它们**打印一句说明就跳过**。
+5. 卷坏了 / 缺卷 / 拼接后 sha 不对 / **对照表和包对不上**（例如 2026-09-28 改名之前
+   打的旧布局包，顶层是 `release/<target>/`）→ **拒绝解开**；`extract-tree` 在
+   一个成员都没匹配上时**连目标目录都不建**（不留半个 `__output/`）。
+
+`--from=目录` 可以指到别处（下载目录），默认是 `<项目>/__release/`；对照表**始终**读
+项目里提交的那份（它是契约，不是随包走的清单）。
+**`--dry-run` 只打印计划**：不拼卷、不写 `__output/`（收尾语是"dry-run：以上 N 条的计划，
 什么都没解开"）。文件在不在、卷够不够这类**只读**检查照做；拼卷之后才算得出来的 sha256
 在 dry-run 里**不做**（明说"没校验"，不假装验过）。
 目标目录**允许还没有 `wtool.xml`** —— 声明面正是从这个包里解出来的。
+
+**发布副本标记**（`wtool/.wtool-dist/<项目>.json` → `$WTOOL_ROOT/.wtool-dist/`）由引擎在解
+源码包时顺手铺一次：它是**引擎自己的标记**（`install` 靠它认出"这是发布副本"，没有 `.git`
+也免 `--force`），不是项目资产，所以**不进对照表**（这条在代码里明写、日志里也打）。
+
+### 离线族：`pack-offline-release` / `publish-offline-release`（ADR-0045 / D50 / D51 / D54 / D56）
+
+**两族的区别**（这是本轮的核心语义，别混）：
+
+| 族 | 命令 | 产什么 | 谁用 | 校验 | 发布落点 |
+|---|---|---|---|---|---|
+| **非离线** | `pack-release` / `publish-release` | ③ 的 `release.zip`（**只有产物**；带 `dist.json`） | **有源码的开发机** | `dist.json` + 每卷 sha256 | 一个 tag / 一个 release 页（tag 名**不带** `offline`） |
+| **离线** | `pack-offline-release` / `publish-offline-release` | ①`source-offline.zip` / ②③`release-offline.zip`（**自足**） | **断网机** | `<包名>.sha256`；分卷再给 `check-hash.sh` | **另一个** tag / 另一个 release 页，tag **必须明显带** `offline`（默认 `offline-<今天>`） |
+
+**资产名按 `kind` 定**（发布后改不了 —— H27 / ADR-0040；判据只有一处：
+`wtool_plan.py` 的 `OFFLINE_ASSETS`）：
+
+| `kind` | 离线自足包 |
+|---|---|
+| ① `source` | `source-offline.zip` |
+| ② `muslbin` / ③ `docker` | `release-offline.zip` |
+| **安装器项目**（引擎自己住的那个项目 —— 判据是**位置**不是名字：项目里就是 `wtool.sh` + `lib/wtool_plan.py`，而且正在跑的那份引擎住在里面） | **`wtool-base-tools.tar.gz`**（特例，D59） |
+
+**"自足"的判据 = 离线机上 `wtool install` 工作需要什么**：
+
+- ① 类：**它自己的源码文件**（`.gitignore` 过滤后）
+- ②③ 类：**`__output/` 的产物**（含 `<generate>` 的生成物 —— 它们按 D40/D41 就落在 `__output/` 下）
+- 两类都带：`wtool.xml` + `env.zsh` / `env.bash`（引擎靠前者知道 kind 和要建哪些链）
+
+**形状与校验**：
+
+- 包内第一层是 **`wtool/<项目路径>/…`** —— 断网机 `unzip` 出来直接
+  `cp -a wtool/. "$WTOOL_HOME/wtool/"` 同名合并（解包/合并不需要 wtool）。
+  **安装器包是特例**：解开是 **`.wtool/` 树**（`.wtool/install.sh` 是一条**相对软链**指向
+  `.wtool/wtool/<项目>/scripts/install.sh`；拷贝会让 `install.sh` 认错项目目录）——
+  它是"还没有 `.wtool` 的机器"的种子。
+- **不放 `dist.json`**（D51 用户原话："不要太麻烦了……`dist.json` 没人能看懂"）；
+  旁边一份 **`<包名>.sha256`**（一行，`sha256sum -c` 直接过）。
+- 超过 `--volume-size`（默认 32M / `WTOOL_VOLUME_SIZE`）→ 切成
+  **`<包名>.part-aa` / `-ab` …**（ASCII 后缀），整包**不留在 `__release/`**，
+  并生成 **`check-hash.sh`**：所有分片的 sha256 写全、**只用 `sha256sum`、
+  不依赖 wtool**，用户 `sh check-hash.sh` 就跑（拼回整包的命令也写在注释里）。
+- 落在 `<项目>/__release/`，只清**本族**这一版会重新生成的文件（不碰 `release.zip` /
+  `dist.json` / 用户自己的东西）。
+- `all` = 工作区里所有项目（三类都支持离线族）。
+- **两个 `pack-*` 都会刷新** `scripts/release.json` 的 `artifacts` 对照表；
+  **两个 `publish-*` 各写自己那族的 tag**（`tag` / `offlineTag`）——
+  合并写在 py 里（`release-json --existing`），谁也不许抹掉别人的账。
+
+**`publish-offline-release`**：只上传**离线族**的文件（自足包 + `.sha256` +
+分卷 + `check-hash.sh`；判据在 `wtool_plan.py` 的 `offline-assets`），
+目标 tag 默认 `offline-<今天>`，`--tag=` 给的**必须含 `offline`**（否则拒 —— D56 的硬要求），
+建 tag 时用打包时记在 `__release/.offline` 里的 commit 当 `--target`（同 ADR-0041 的理由）。
+
+**断网机上换 / 升级一个项目**（顺序不能变，D52）：
+
+```sh
+wtool uninstall shell/zsh                        # ① 先撤掉账本里它建的 L1/L2 链
+rm -rf "$WTOOL_HOME/wtool/shell/zsh"             # ② 再删旧的项目目录
+unzip -q release-offline.zip -d /tmp/zsh-new     # ③ 解开新包（① 类则是 source-offline.zip）
+cp -a /tmp/zsh-new/wtool/. "$WTOOL_HOME/wtool/"  # ④ 同名合并
+wtool install shell/zsh                          # ⑤ 重新装
+```
+
+第 ② 步**必须手工 `rm -rf`**：`wtool uninstall` 只逆放它自己建的链接与账本，**不删**
+`.wtool/wtool/<项目>` —— 那是从包里**合并**进来的，不在账本里；不删就会新旧文件混杂。
+
+> ⚠️ **`pack-offline-release all` 这个名字有歧义**（待用户拍板）：DESIGN §2.4 / §8.2 把
+> `all` 留给**整机迁移包**（L1 实体化 + L2 留链 + `--check` + 分卷 `wtool-all.tar.gz`），
+> 那一条**还没实现**。今天 `all` = 工作区里所有项目各产一个自足包（本轮用户口径）。
+> 落地整机包时要二选一：整机包改名，或给逐项目那条加开关。
 
 ### publish-release：只上传
 
