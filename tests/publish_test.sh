@@ -104,7 +104,8 @@ cat > "$P1/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <wtool schema="1" kind="docker" priority="50">
   <env src="env.zsh" shells="zsh"/>
-  <link src="tmux.conf" dest=".tmux.conf"/>
+  <!-- ADR-0045：装什么由精确语义的导出标签说（<link> 已删） -->
+  <export_bin src="__output/bin/tmux-helper"/>
 </wtool>
 EOF
 echo 'set -g mouse on' > "$P1/tmux.conf"

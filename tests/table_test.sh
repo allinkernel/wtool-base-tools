@@ -9,7 +9,7 @@
 #   项目 / prio   项目 id（相对工作区根算）和优先级
 #   build         有 scripts/build.sh（或项目根的老位置）→ 可执行
 #                 state 里记过 build                             → 已完成
-#   install       没有 install.sh 也没有 <link>/<env> 声明 → 不支持
+#   install       没有 install.sh 也没有 <export_*>/<env> 声明 → 不支持
 #                 已经装过（state 里记着）                → 已完成
 #                 有 build.sh 但 <项目>/__output/ 是空的    → 待产出
 #                 其余                                     → 可执行
@@ -68,6 +68,10 @@ C_DONE=$(printf '\033[32m已完成\033[0m')
 # --------------------------------------------------------------------------
 mkdir -p "$WS/declarative" "$WS/nowhere" "$WS/legacy" "$WS/outer/inner" \
          "$WS/ready/__output" "$WS/needsudo/provision"
+# 声明式项目的"要装什么"现在是**导出**（ADR-0045：<link> 已删）
+mkdir -p "$WS/declarative/__output/usr/bin"
+printf 'a\n' > "$WS/declarative/__output/usr/bin/a"
+
 
 # 有 build.sh + install.sh → **必须**声明 kind="docker"（ADR-0045 / D49）：
 # `构建` 那一列现在是**类型先判**的 —— 根元素不写 kind 就是 source，`wtool build`
@@ -79,12 +83,12 @@ mkbuildable() {   # <项目目录>
     printf '#!/bin/sh\n' > "$1/scripts/install.sh"
 }
 
-# 纯声明式：没有脚本，靠 wtool.xml 的 link/env 装。没有 build.sh → 不用等产出
+# 纯声明式：没有脚本，靠 wtool.xml 的 export/env 装。没有 build.sh → 不用等产出
 cat > "$WS/declarative/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" priority="10">
+<wtool schema="1" kind="docker" priority="10">
   <env src="env.zsh" shells="zsh"/>
-  <link src="a.conf" dest=".a.conf"/>
+  <export_bin src="__output/usr/bin/a"/>
 </wtool>
 EOF
 
@@ -238,9 +242,9 @@ else
 fi
 chk "★装过之后格子变 已完成（绿）" \
     "$(cell scripted 4)" "$C_DONE"
-[ -d "$WTOOL_HOME/.wtool/wtool-work-dir/links/scripted" ] \
-    && ok "东西真的铺进了临时 \$WTOOL_HOME（中转链接在）" \
-    || bad "临时 \$WTOOL_HOME 里没有中转链接（install 没真跑？）"
+[ -d "$WTOOL_HOME/.wtool/wtool/scripted" ] \
+    && ok "东西真的铺进了临时 \$WTOOL_HOME（L1 接入链在）" \
+    || bad "临时 \$WTOOL_HOME 里没有 L1 链（install 没真跑？）"
 
 echo "== 4. 嵌套项目的 id 相对工作区根算 =="
 # 曾经的真 bug：Python 侧靠 os.environ['WTOOL_ROOT'] 推 id，而 wtool.sh 里

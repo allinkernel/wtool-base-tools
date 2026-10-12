@@ -254,7 +254,10 @@ wt_load_project() {
 
 wt_print_plan() {
     _plan=$1
-    if [ ! -s "$_plan" ] || ! grep -qv '^reg	' "$_plan" 2>/dev/null; then
+    # `reg` / `reglink` 是"登记 + 记账"，**不是**要动的文件系统：只有它们的时候
+    # 就说"没有需要变更的内容"（重复 install 才是真正的 no-op）。
+    if [ ! -s "$_plan" ] \
+       || ! grep -qv -e '^reg	' -e '^reglink	' "$_plan" 2>/dev/null; then
         wt_info "没有需要变更的内容（已是最新）"
         return 0
     fi
@@ -262,6 +265,7 @@ wt_print_plan() {
         [ -z "${_action:-}" ] && continue
         case $_action in
             link) wt_step "link  $_dest -> $_source" ;;
+            reglink) wt_step "check $_dest -> $_source（已在，只记账）" ;;
             rc)   wt_step "rc    $_dest" ;;
             prune) wt_step "prune $_dest（清单里已经没有，删掉这条软链）" ;;
         esac
@@ -1499,13 +1503,12 @@ install 不替你做这个决定 —— 它永不联网。"
     wt_load_project "$_scratch"
     wt_info "project: $WTOOL_PROJECT_ID"
     wt_print_plan "$_scratch/plan.tsv"
-    wt_print_plan "$_scratch/plan.home.tsv"
 
     # 执行顺序（§4.2，和以前相反，别改回去）：
-    #   ① 引擎基建：中转链接 + env 块
+    #   ① 引擎基建：L1（项目接入链）+ L2（导出链）+ env 块
     #   ① 项目自己的 install.sh：__output/ → ~/.wtool
-    #   ② wtool.xml 的 link：影子 HOME → $HOME
-    # ②建的软链**指向**①铺出来的东西，顺序反了就是先建一堆悬空链接。
+    # ⚠️ 从 ADR-0045 起**没有第二阶段了**：`$HOME` 里不再有 wtool 建的软链
+    #    （D1），原来那张 `plan.home.tsv`（<link> 的第二跳）随 <link> 一起删了。
     wt_plan_exec "$_scratch/plan.tsv"
 
     # ⚠️ 正因为引擎会跑 install.sh，**项目里不能再放"调用 wtool install"的存根**，
@@ -1516,8 +1519,6 @@ install 不替你做这个决定 —— 它永不联网。"
         wt_info "项目脚本: install.sh（__output/ → ~/.wtool）"
         wt_run_project_script "$_project" install.sh || wt_die "install.sh 失败: $WTOOL_PROJECT_ID"
     fi
-
-    wt_plan_exec "$_scratch/plan.home.tsv"
 
     if ! wt_dry; then
         cp -f -- "$_scratch/meta.tsv" "$WTOOL_META"
@@ -1630,13 +1631,10 @@ cmd_uninstall() {
     wt_load_project "$_scratch"
     wt_info "project: $WTOOL_PROJECT_ID"
 
-    # 0) 拆 $HOME 软链之前先问一句：**还有别的项目要这条软链吗？**
-    #    判据是磁盘上所有 wtool 项目的 wtool.xml（§4.2），不是 registry ——
-    #    registry 一条落点只能有一个主人，而"两个项目都要 ~/.gitconfig"
-    #    是完全合理的。有别人要用就留着，把登记改成那个项目。
-    _claims=$(mktemp "${TMPDIR:-/tmp}/wtool-claims.XXXXXX")
-    python3 "$PY" claimed --root "$WTOOL_ROOT" --home "$WTOOL_HOME" \
-        --exclude-id "$WTOOL_PROJECT_ID" > "$_claims" 2>/dev/null || : > "$_claims"
+    # 0) （原"这条 $HOME 软链还有别人要用吗"那一问**已删**，ADR-0045）
+    #    <link> 没了、$HOME 里不再有 wtool 建的软链；而 L1/L2 的落点是**独占**的
+    #    （同一条 L2 落点被两个项目要 → 装第二个时直接报错，见 DESIGN §2.11）。
+    #    所以再留一份"别人的声明"清单就是死代码 —— 它读的是已经不存在的标签。
 
     # 1) rc 回退（内容由 py 算好，sh 只负责落盘）
     while IFS='	' read -r _action _kind _dest _source _sha _extra; do
@@ -1668,15 +1666,10 @@ cmd_uninstall() {
             [ -z "${_action:-}" ] && continue
             case $_action in
                 link)
-                    _other=$(awk -F'\t' -v d="$_dest" '$1 == d {print $2; exit}' "$_claims" 2>/dev/null || true)
-                    if [ -n "$_other" ]; then
-                        # 还有别人要用：软链留着，登记改到那个项目名下
-                        wt_info "保留 $_dest（项目 $_other 也声明了它）"
-                        wt_registry_set "$_dest" "$_other" "$_kind"
-                    else
-                        wt_link_remove "$_dest" "$_target"
-                        wt_registry_del "$_dest"
-                    fi
+                    # 落点是这个项目**独占**的（L1 = 项目路径，L2 = usr 下一条目；
+                    # 冲突在 install 时就报错了）→ 逆放时直接拆，没有"留给别人"那回事。
+                    wt_link_remove "$_dest" "$_target"
+                    wt_registry_del "$_dest"
                     ;;
                 mkdir)
                     wt_remove_dir_if_empty "$_dest"
@@ -1705,7 +1698,6 @@ cmd_uninstall() {
             esac
         done
     fi
-    rm -f -- "$_claims"
 
     # 3) 最后才让项目自己撤（§4.2：②' 拆 $HOME 软链 → ①' install.sh --uninstall）。
     #
@@ -1735,14 +1727,18 @@ cmd_uninstall() {
     fi
 
     # 4) 清理引擎自己的空目录
-    #    多个项目共享 wtool-work-dir/links 这类父目录，各自 journal 清不干净，
-    #    这里统一做一次"只删空目录"的收尾。
-    #    ⚠️ 只动 wtool-work-dir（引擎自用那一格），绝不碰 .wtool/usr 和影子 $HOME 的其它行。
+    #    L1/L2 的父目录（`.wtool/wtool/<父路径>`、`.wtool/usr/<part>`）是
+    #    **多项目共享**的，各自 journal 清不干净，这里统一做一次"只删空目录"的收尾。
+    #    ⚠️ 只删**空**目录（-empty）：`.wtool/usr` 里有别的项目的东西时一个都不动。
+    #    顺带把老的 `wtool-work-dir/` 残骸收走（ADR-0045 删掉的中转链目录，
+    #    老机器上升级之后可能还留着空壳）。
     if ! wt_dry; then
-        _work="$WTOOL_HOME/.wtool/wtool-work-dir"
-        if [ -d "$_work" ]; then
-            find "$_work" -depth -type d -empty -delete 2>/dev/null || true
-        fi
+        for _work in "$WTOOL_HOME/.wtool/wtool" "$WTOOL_HOME/.wtool/usr" \
+                     "$WTOOL_HOME/.wtool/wtool-work-dir"; do
+            if [ -d "$_work" ]; then
+                find "$_work" -depth -type d -empty -delete 2>/dev/null || true
+            fi
+        done
         rmdir -- "$WTOOL_HOME/.wtool" 2>/dev/null || true
     fi
 
@@ -1807,7 +1803,8 @@ cmd_uninstall() {
 # 为什么不能只 `mv`：**项目身份就是它的路径**（ADR-0037）。目录一改，
 # 这三处按**旧路径**建的东西就全对不上了：
 #   * `$WTOOL_STATE/<路径>/`（journal / env 块 / meta 都在这儿）
-#   * `~/.wtool/wtool-work-dir/links/<路径>` 中转软链
+#   * `~/.wtool/wtool/<路径>` 这条 **L1** 链（ADR-0045；老的
+#     `wtool-work-dir/links/<路径>` 中转链已删）
 #   * `~/.wtool/.zshrc` 里那段 `# >>> wtool:<路径>` env 块
 # 而且 registry 里还挂着旧路径 —— 下次 `install <新路径>` 会直接报
 # "dest 已被项目 <旧路径> 占用"（要 --force 才过，过完还留一堆孤儿）。
@@ -1837,7 +1834,7 @@ cmd_move() {
   两个路径都可以写相对工作区根的（terminal/foo），也可以写绝对路径。
 
   为什么要整条走一遍：项目身份就是它的路径，改目录 = 换身份 ——
-  状态目录、中转软链 links/<路径>、env 块名都是按旧路径建的。
+  状态目录、L1 链 <dot>/wtool/<路径>、env 块名都是按旧路径建的。
   只 mv 会留下一整套对不上的孤儿（wtool check 会把它们报出来）。"
 
     # ---- 解析成绝对路径 ----
@@ -2697,7 +2694,6 @@ cmd_repair() {
             rm -rf -- "$_scratch"; wt_warn "$_pid 的清单有问题，跳过"; continue; }
         wt_load_project "$_scratch"
         wt_plan_exec "$_scratch/plan.tsv"
-        wt_plan_exec "$_scratch/plan.home.tsv"
         rm -rf -- "$_scratch"
         _n=$((_n + 1))
     done
@@ -3207,16 +3203,17 @@ cmd_init() {
   <zshrc  src="env.zsh"/>
   <bashrc src="env.bash"/>
 
-  <!-- 提供一个配置文件：三段映射（home= 和 subproject= 必填）
-         home=        \$HOME 下的落点（写全，带 ~/）
-         wtool=       影子 HOME（~/.wtool/）下的落点；省掉就按镜像路径推
-         subproject=  项目里的相对路径（内容从这儿来）
-       连起来：<项目>/foo.conf → ~/.wtool/.foo.conf → ~/.foo.conf
-  <link home="~/.foo.conf" subproject="foo.conf"/>
-  -->
+  <!-- ① 纯源码（默认 kind="source"）：源码即产物，不写导出标签。
+       配置/脚本直接读 \$WTOOL_HOME/wtool/$_id/…（L1 链自动指过来）。
+       要让用户敲到命令/拿到环境变量，就写进本项目的 env.zsh / env.bash。 -->
 
-  <!-- 目录、内容由项目自己的 install.sh 产出时，把 subproject 换成 produced-by：
-  <link home="~/.config/foo" wtool="~/.wtool/.config/foo" produced-by="install.sh"/>
+  <!-- ②③ 类（kind="muslbin" / kind="docker"）：产物（__output/ 下的东西）导出到
+       \$WTOOL_HOME/usr/…（L2 链）。落点由标签决定，**没有 dest= 这个口子**：
+  <export_bin src="__output/usr/bin/foo"/>                  单个文件 → usr/bin/foo
+  <export_bin src="__output/usr/bin/foo" name="bar"/>       改名 → usr/bin/bar
+  <export_usr src="__output/usr"/>          usr/ 下每个白名单子项逐条目导出
+  <export_usr src="__output/usr" part="share"/>             只导出 usr/share/
+  <generate dest="__output/foo.zsh" cmd="foo --zsh"/>        安装时生成（cmd/script 二选一）
   -->
 
   <!-- 系统层（apt 包、/etc 下的文件、要跑的脚本）：**不在 install 里跑**
@@ -3333,7 +3330,7 @@ wt_proj_tbl_load() {
 # 被**静默跳过** —— 不报错、不警告，只有目录形式才跑。
 #
 # 项目身份 = 路径（2026-10-04 用户拍板干掉 id），所以匹配的就是**完整路径**：
-# 表里第 2 列、state 目录名、`~/.wtool/wtool-work-dir/links/<路径>` 三处全是它。
+# 表里第 2 列、state 目录名、`~/.wtool/wtool/<路径>`（L1）三处全是它。
 # 只认完整路径（`tmux` 不替你猜 `terminal/tmux`）有个安全的理由：state 里那条账
 # 叫 `foo/bar`，而表里只有 `x/foo/bar` 时会把**另一个项目**卸掉。找不到时把末段
 # 同名的候选打到 stderr 提示用户写全，但不替他选。

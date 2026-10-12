@@ -51,10 +51,12 @@ P="$W/ws/terminal/demo"
 printf '#!/bin/sh\ntrue\n' > "$P/scripts/build.sh"
 printf 'hello\n' > "$P/__output/ubuntu_24.04/main/payload/usr/bin/demo"; chmod +x "$P/__output/ubuntu_24.04/main/payload/usr/bin/demo"
 printf 'demo=1\n' > "$P/demo.conf"
+# ADR-0045：装什么由精确语义的导出标签说（`<link>` 已删）。
+# kind 必须是 ②③ —— ① 类是"源码即产物"，不写 <export_*>。
 cat > "$P/wtool.xml" <<'XML'
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" priority="50">
-  <link home="~/.demo.conf" wtool="~/.wtool/.demo.conf" subproject="demo.conf"/>
+<wtool schema="1" kind="docker" priority="50">
+  <export_bin src="__output/ubuntu_24.04/main/payload/usr/bin/demo"/>
 </wtool>
 XML
 printf '__output/\n__release/\n__layer/\nrelease/\n' > "$P/.gitignore"   # 旧名字也留着：源码包必须两个都忽略
@@ -100,17 +102,21 @@ for c in download publish provision scaffold; do
   printf '%-10s → ' "$c"; wtool $c 2>&1 | head -1 || true
 done
 
-say "3e. install → 检查影子 HOME 与 $HOME 软链 → uninstall 完全回退"
+say "3e. install → 检查 L1/L2 两条链 → uninstall 完全回退"
 wtool install terminal/demo
-printf '影子 HOME : %s\n' "$(readlink -f "$WTOOL_HOME/.wtool/.demo.conf")"
-printf '家目录软链: %s（WTOOL_HOME=%s）\n' "$(readlink "$WTOOL_HOME/.demo.conf")" "$WTOOL_HOME"
-[ -f "$WTOOL_HOME/.wtool/.demo.conf" ] && [ -L "$WTOOL_HOME/.demo.conf" ] \
+printf 'L1（项目在哪）: %s -> %s\n' "$WTOOL_HOME/.wtool/wtool/terminal/demo" \
+    "$(readlink "$WTOOL_HOME/.wtool/wtool/terminal/demo")"
+printf 'L2（提供什么）: %s -> %s\n' "$WTOOL_HOME/.wtool/usr/bin/demo" \
+    "$(readlink "$WTOOL_HOME/.wtool/usr/bin/demo")"
+[ -f "$WTOOL_HOME/.wtool/usr/bin/demo" ] \
+    && [ -L "$WTOOL_HOME/.wtool/wtool/terminal/demo" ] \
     || { echo "❌ 没装上"; exit 1; }
 wtool uninstall terminal/demo
-if [ -e "$WTOOL_HOME/.demo.conf" ] || [ -e "$WTOOL_HOME/.wtool/.demo.conf" ]; then
+if [ -e "$WTOOL_HOME/.wtool/usr/bin/demo" ] \
+   || [ -e "$WTOOL_HOME/.wtool/wtool/terminal/demo" ]; then
     echo "❌ uninstall 没撤干净"; exit 1
 fi
-echo "✅ 装得上、撤得干净（安装落点跟着 WTOOL_HOME 走，没碰真 \$HOME）"
+echo "✅ 装得上、撤得干净（L1/L2 全在 \$WTOOL_HOME 里，没碰真 \$HOME）"
 
 say "3f. 没有 docker 的机器上，声明 kind=docker 的项目必须在动手之前就被拦住（需求 4）"
 mkdir -p "$W/ws/editor/dockerdemo/scripts"
@@ -143,9 +149,9 @@ wtool layer-save terminal/demo --image=whatever 2>&1 | head -3 || true
 say "3h. 需求 2 的形状：install 认项目 id，也认 all"
 wtool install terminal/demo >/dev/null && echo "✅ install <项目 id> 能装" || { echo "❌ install <id> 不行"; exit 1; }
 wtool uninstall terminal/demo >/dev/null 2>&1 || true
-[ -e "$WTOOL_HOME/.demo.conf" ] && { echo "❌ uninstall 没撤掉"; exit 1; } || echo "✅ uninstall <路径> 撤掉了"
+[ -e "$WTOOL_HOME/.wtool/usr/bin/demo" ] && { echo "❌ uninstall 没撤掉"; exit 1; } || echo "✅ uninstall <路径> 撤掉了"
 wtool install all 2>&1 | tail -3
-[ -f "$WTOOL_HOME/.wtool/.demo.conf" ] && echo "✅ install all 装上了（= wtool bootstrap）" || { echo "❌ install all 不行"; exit 1; }
+[ -f "$WTOOL_HOME/.wtool/usr/bin/demo" ] && echo "✅ install all 装上了（= wtool bootstrap）" || { echo "❌ install all 不行"; exit 1; }
 
 say "4. 真工作区里的项目（这一条只看它说不说实话，不动网络、不写文件）"
 echo "--- 4a. 项目表里的 astronvim（它声明了 <build kind=\"docker\"/>）---"

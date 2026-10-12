@@ -102,7 +102,7 @@ WTOOL_ARTIFACTS / WTOOL_STATE_DIR
 `bootstrap` 本身也是一个 wtool 项目：
 
 ```sh
-cd bootstrap && ./install.sh     # 建 ~/.wtool/wtool-work-dir/links/bootstrap + 写 rc 块
+cd bootstrap && ./install.sh     # 建 ~/.wtool/wtool/bootstrap（L1 链）+ 写 rc 块
 exec zsh                          # 之后 wtool / WTOOL_PREFIX / OS 变量就位
 wtool doctor
 ```

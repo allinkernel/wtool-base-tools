@@ -250,24 +250,71 @@ ARTIFACT_ROOT = {
 }
 
 # ---------------------------------------------------------------------------
-# 引擎自用目录：~/.wtool/wtool-work-dir/
+# L1 / L2：两类链（ADR-0045 §1.3 / D5 / D7 / D11 / D19）
 #
-# ~/.wtool/ 是影子 $HOME：里面只允许出现"真 $HOME 里也会有的路径"
-# （~/.tmux.conf ↔ ~/.wtool/.tmux.conf，~/usr ↔ ~/.wtool/usr）。
-# 而"中转软链 <id> -> 项目目录"是**引擎自己造的东西**，$HOME 里没有对应物，
-# 所以它不能直接躺在 ~/.wtool/links/<id>（用户 2026-09-23 拍板）。
-# 引擎自用的一切都关进这一格 —— 它是影子 $HOME 下唯一一个故意不像 $HOME 的目录。
-WORK_DIR_NAME = "wtool-work-dir"
+#   L1「项目接入链」  <dot>/wtool/<项目路径>  →  工作区里那个项目目录   **绝对**
+#   L2「项目导出链」  <dot>/usr/<part>/<条目> →  ../../wtool/<项目路径>/__output/…
+#                                                                      **相对**
+#
+# `<dot>` = `.wtool` 根目录 —— **新模型里的 `$WTOOL_HOME`**（D47）。
+# ⚠️ 今天引擎里的 `WTOOL_HOME` 还是「被管理的家目录」（默认 `$HOME`）——
+#    **同名不同义**，整片改名是 DESIGN §7 那一轮的事。所以这一轮统一走
+#    `dot_dir()` 这一个入口：改名的涟漪只落在它一处（不是散在十几处字符串里）。
+#
+# 为什么 L1 绝对、L2 相对（D11 / §1.3）：L1 断了要能一眼看懂它指哪（工作区在
+# 磁盘上哪儿）；L2 两端**都在 `<dot>` 里面**，相对链跟着整个 `.wtool` 走 ——
+# 迁移包（`tar` 整棵）解开之后依然有效，不用重算（D45）。
+#
+# 为什么 L2 不能整条替换 `usr/`：`<dot>/usr` 是**所有项目共享**的（fzf 和 zsh
+# 都要往 `usr/bin` 里放东西）→ `usr/<part>` 必须是**实体目录**，里面**一条一链**。
+WTOOL_SUBDIR = "wtool"
+USR_SUBDIR = "usr"
+# L2 白名单 6 个（D19）。写别的 part（`.config`、`.local/share`…）**报错** ——
+# 不留"任意 dest"的口子（D6/D9），要加得先找用户拍板。
+USR_PARTS = ("bin", "lib", "libexec", "share", "include", "local")
+# `<muslbin arch=>`：今天只做 x86_64（D32）
+MUSLBIN_ARCHES = ("x86_64",)
+# sha256 的形状（64 个十六进制）：写错了要到下载时才炸，这里先拦
+SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
-def links_dir_for(home, project_id):
-    """中转软链在磁盘上的真实路径。"""
-    return os.path.join(home, ".wtool", WORK_DIR_NAME, "links", project_id)
+def dot_dir(home):
+    """`.wtool` 根目录 = 新模型里的 `$WTOOL_HOME`（D47）。
+
+    = 今天引擎里 `WTOOL_PREFIX` 的父目录（`WTOOL_PREFIX` 永远是 `<dot>/usr`），
+    也是影子 HOME 的根。**L1/L2 的落点全从这一个函数算**。
+    """
+    return os.path.join(os.path.abspath(home), SHADOW_ROOT_NAME)
 
 
-def links_dir_shell(project_id):
-    """写进 env 块的写法：$HOME 留到 source 时再展开（仓库搬家不用改块）。"""
-    return '"$HOME/.wtool/%s/links/%s"' % (WORK_DIR_NAME, project_id)
+def l1_path(home, project_id):
+    """L1 在磁盘上的真实路径：`<dot>/wtool/<项目路径>`（D5：按项目惰性建）。"""
+    return os.path.join(dot_dir(home), WTOOL_SUBDIR, project_id)
+
+
+def l1_path_shell(project_id):
+    """写进 env 块的写法：`$HOME`/`$WTOOL_HOME` 留到 source 时再展开。
+
+    ⚠️ 这里故意写 `$HOME/.wtool/…` 而不是 `$WTOOL_HOME/…`：今天 `WTOOL_HOME`
+    指的是**被管理的家目录**（默认就是 `$HOME`），写成 `$WTOOL_HOME/wtool/…`
+    会在老口径下解析成 `$HOME/wtool/…`（错的）。改名那一轮把 `$HOME/.wtool`
+    换成 `$WTOOL_HOME` 即可 —— 路径本身不动。
+    """
+    return '"$HOME/%s/%s/%s"' % (SHADOW_ROOT_NAME, WTOOL_SUBDIR, project_id)
+
+
+def l2_dir(home, part):
+    """L2 的落点目录：`<dot>/usr/<part>`（**实体目录**，多项目共享）。"""
+    return os.path.join(dot_dir(home), USR_SUBDIR, part)
+
+
+def l2_target(project_id, rel):
+    """L2 链的**相对**目标：从 `<dot>/usr/<part>/` 回到 `<dot>/wtool/<项目>/…`。
+
+    永远恰好两级 `../..`（落点固定在 `<dot>/usr/<part>/<条目>`）——
+    所以这个字符串与 `.wtool` 在磁盘上的位置无关，跟着树一起搬（D45）。
+    """
+    return "../../%s/%s/%s" % (WTOOL_SUBDIR, project_id, rel)
 
 
 def project_id_of(project_root, root=None):
@@ -648,11 +695,30 @@ def _parse_children(node, project_root, manifest_path, meta, entries, errors, de
                                  optional=_bool_attr(child, "optional"),
                                  manifest=manifest_path))
 
-        # --------------------------------------------------------------- link
-        elif tag == "link":
-            entry = _parse_link(child, errors, warnings, manifest_path)
+        # ------------------------------------------- 导出 / 生成 / muslbin
+        # 精确语义的专用标签（D4/D6/D9）：**没有泛用标签、没有 dest= 落点**
+        #   <export_bin src="__output/usr/bin/fzf" [name=]/>   单个文件 → usr/bin
+        #   <export_usr src="__output/usr" [part=]/>           逐条目 → usr/<part>
+        #   <muslbin url= tag= sha256= member= dest= arch=/>   ② 类的下载声明
+        #   <generate dest="__output/x.zsh" cmd=|script=/>     安装期产物
+        elif tag in ("export_bin", "export_usr", "generate", "muslbin"):
+            entry = _parse_export(tag, child, meta, errors, warnings, manifest_path)
             if entry is not None:
                 entries.append(entry)
+
+        # -------------------------------------------------- 删掉的 <link>
+        elif tag == "link":
+            # D3：**不留兼容期**（ADR-0045）。$HOME 里不再有 wtool 建的软链 ——
+            # 报错必须能照做：说清"原来那条该写成什么"，不能只说"未知元素"。
+            errors.append(
+                "<link> 已经删掉（ADR-0045 / D3）：$HOME 里不再有 wtool 建的软链。\n"
+                "        ① 类（纯源码）：配置/脚本**直接读源码**，"
+                "$WTOOL_HOME/wtool/<项目路径>/… 由 L1 解析"
+                "（今天 $WTOOL_HOME 就是 ~/.wtool，路径没变），删掉这条即可；\n"
+                "        ②③ 类：产物用 <export_bin src=\"__output/…\"/> 或 "
+                "<export_usr src=\"__output/usr\"/> 导出到 $WTOOL_HOME/usr/…；\n"
+                "        要包装函数/环境变量就写进本项目的 env.zsh / env.bash（%s）"
+                % manifest_path)
 
         # -------------------------------------------------------- sudo-install
         elif tag == "sudo-install":
@@ -740,97 +806,250 @@ def _parse_children(node, project_root, manifest_path, meta, entries, errors, de
                           % (tag, manifest_path))
 
 
-def _home_rel(raw, errors, manifest_path, tag):
-    """把 ~/... 或 .config/... 归一成相对 $HOME 的路径。"""
+def _require_output_rel(raw, tag, manifest_path, errors, attr="src"):
+    """`src` / `dest` 必须在项目的 `__output/` 之下（D40 / D41）。
+
+    理由（报错里也要说）：`__output/` 才代表「**构建出来的 / 下载解压出来的**」——
+    导出它，「开发机=链、bundle=实体」两态才都成立；源码树里的东西**不是导出对象**
+    （① 类源码即产物，走 L1，不写这些标签）。
+    """
     if not raw:
+        errors.append("<%s> 缺少 %s（%s）" % (tag, attr, manifest_path))
         return None
-    rel = raw
-    if rel.startswith("~/"):
-        rel = rel[2:]
-    elif rel == "~":
-        errors.append("<%s> 的 home 不能是 ~ 本身（%s）" % (tag, manifest_path))
+    if not is_safe_rel(raw):
+        errors.append("<%s %s=%r> 必须是不含 .. 的相对路径" % (tag, attr, raw))
         return None
-    elif rel.startswith("~"):
-        errors.append("<%s> 的路径只认 ~/... 写法，实际 %r" % (tag, raw))
-        return None
-    rel = rel.lstrip("/")
-    if not is_safe_rel(rel):
-        errors.append("<%s> 的路径必须是不含 .. 的相对路径，实际 %r" % (tag, raw))
+    rel = os.path.normpath(raw)
+    if rel != DIR_OUT and not rel.startswith(DIR_OUT + "/"):
+        errors.append(
+            "<%s %s=%r> 必须在项目的 %s/ 之下（D40/D41）：%s/ 代表「构建出来的 / "
+            "下载解压出来的」，源码树不是导出对象。\n"
+            "        要导出源码里的文件那是 ① 类的做法 —— 它不写 <export_*>："
+            "源码直接由 L1（$WTOOL_HOME/wtool/<项目路径>/…，今天 = ~/.wtool/wtool/…）"
+            "解析（%s）"
+            % (tag, attr, raw, DIR_OUT, DIR_OUT, manifest_path))
         return None
     return rel
 
 
-def _parse_link(child, errors, warnings, manifest_path):
-    """<link> 是**三段映射**（见 harness/architecture.md §3.2）：
+def _no_dest_attr(tag, child, manifest_path, errors):
+    """这些标签**没有 `dest=` 参数**（D6）：落点由标签本身决定。
 
-        <link home="~/.tmux.conf"
-              wtool="~/.wtool/.tmux.conf"
-              subproject="tmux.conf"/>
-
-        <项目>/tmux.conf ──► ~/.wtool/.tmux.conf ──► ~/.tmux.conf
-
-    `home` 是目录、内容由项目自己的 install.sh 产出时，把 subproject 换成
-    produced-by="install.sh"（这时没有中间那一跳，实体由脚本铺）。
-
-    旧写法 <link src="tmux.conf" dest=".tmux.conf"/> 仍然认（过渡期），
-    等价于 home=dest、wtool=~/.wtool/<dest>、subproject=src。
+    写了就报错、并告诉他能写成什么 —— 不静默忽略（忽略了用户会以为生效了）。
     """
-    home_raw = child.get("home")
-    wtool_raw = child.get("wtool")
-    sub = child.get("subproject")
-    produced = child.get("produced-by")
+    if child.get("dest") is None:
+        return False
+    hint = {
+        "export_bin": '单个文件用 <export_bin src="__output/…" [name=]/>'
+                      ' —— 落点固定 $WTOOL_HOME/usr/bin（今天 = ~/.wtool/usr/bin）',
+        "export_usr": '目录用 <export_usr src="__output/usr" [part=…]/>'
+                      ' —— 落点固定 $WTOOL_HOME/usr/<part>（今天 = ~/.wtool/usr/<part>）',
+    }.get(tag, "")
+    errors.append("<%s> 没有 dest= 参数（D6）：落点由标签本身决定。%s（%s）"
+                  % (tag, hint, manifest_path))
+    return True
 
-    if not home_raw and child.get("dest"):
-        warnings.append("<link src= dest=> 是旧写法，请改成 "
-                        "<link home= wtool= subproject=>（%s）" % manifest_path)
-        home_raw = child.get("dest")
-        sub = child.get("src")
-        wtool_raw = None
 
-    if not home_raw:
-        errors.append("<link> 需要 home=\"~/...\"（%s）" % manifest_path)
-        return None
-    if sub and produced:
-        errors.append("<link> 的 subproject 和 produced-by 只能有一个（%s）"
-                      % manifest_path)
-        return None
-    if not sub and not produced:
-        errors.append("<link home=%r> 需要 subproject= 或 produced-by=（%s）"
-                      % (home_raw, manifest_path))
-        return None
+def _parse_export(tag, child, meta, errors, warnings, manifest_path):
+    """四个精确语义标签的解析（ADR-0045 §1.5）。
 
-    home_rel = _home_rel(home_raw, errors, manifest_path, "link")
-    if home_rel is None:
-        return None
+    **本函数只做"结构 / 类型"这一层**（不碰磁盘）：磁盘判据（src 在不在、是不是
+    文件、白名单外的子目录）在 `validate_entries()` 里 —— `check` 也要用同一套。
+    """
+    kind = meta.get("project_kind", DEFAULT_PROJECT_KIND)
 
-    if wtool_raw:
-        wrel = _home_rel(wtool_raw, errors, manifest_path, "link")
-        if wrel is None:
+    # ---- 类型门槛（D40/D46 只适用 ②③；<muslbin> 只适用 ②）------------------
+    if tag == "muslbin":
+        if kind != "muslbin":
+            errors.append(
+                "<muslbin> 只对 kind=\"muslbin\" 的项目有意义（本项目 kind=%s）："
+                "它是**下载声明**，引擎靠它知道上游二进制在哪儿（%s）"
+                % (kind, manifest_path))
             return None
-        if not wrel.startswith(SHADOW_ROOT_NAME + "/"):
-            errors.append("<link wtool=%r> 必须写在 ~/%s/ 下面（影子 HOME）（%s）"
-                          % (wtool_raw, SHADOW_ROOT_NAME, manifest_path))
+    elif kind == "source":
+        errors.append(
+            "<%s> 不该出现在 kind=\"source\"（纯源码）项目里：**源码即产物**（D46），"
+            "它不碰 __output/，配置/脚本直接由 L1"
+            "（$WTOOL_HOME/wtool/<项目路径>/…，今天 = ~/.wtool/wtool/<项目路径>/…）解析。\n"
+            "        真有构建/下载产物 → 根元素改成 kind=\"muslbin\"（上游二进制）"
+            "或 kind=\"docker\"（跨发行版构建）（%s）" % (tag, manifest_path))
+        return None
+
+    # ---- <muslbin url= tag= sha256= member= dest= arch=/> --------------------
+    if tag == "muslbin":
+        url = (child.get("url") or "").strip()
+        if not url.startswith(("http://", "https://")):
+            errors.append("<muslbin url=%r> 必须是 http(s) 的绝对 URL（%s）"
+                          % (child.get("url"), manifest_path))
             return None
-        wtool_rel = wrel[len(SHADOW_ROOT_NAME) + 1:]
+        tagv = (child.get("tag") or "").strip()
+        if not tagv:
+            errors.append("<muslbin> 需要 tag=（上游版本，钉死；不许浮动）（%s）"
+                          % manifest_path)
+            return None
+        sha = (child.get("sha256") or "").strip()
+        if not SHA256_RE.match(sha):
+            errors.append("<muslbin sha256=%r> 得是 64 位十六进制（%s）："
+                          "它是下载后的校验值，写错等于没有校验"
+                          % (child.get("sha256"), manifest_path))
+            return None
+        dest = child.get("dest")
+        if not dest:
+            errors.append("<muslbin> 需要 dest=（解到 __output/ 下的哪个相对路径，"
+                          "例 dest=\"usr/bin/fzf\"）（%s）" % manifest_path)
+            return None
+        if not is_safe_rel(dest) or dest.startswith(DIR_OUT + "/") \
+                or dest == DIR_OUT:
+            errors.append("<muslbin dest=%r> 是**相对 __output/ 的**路径"
+                          "（例 \"usr/bin/fzf\"），不写 __output/ 前缀、不含 ..（%s）"
+                          % (dest, manifest_path))
+            return None
+        arch = (child.get("arch") or MUSLBIN_ARCHES[0]).strip()
+        if arch not in MUSLBIN_ARCHES:
+            errors.append("<muslbin arch=%r> 不认识：当前只做 %s（D32）（%s）"
+                          % (arch, "/".join(MUSLBIN_ARCHES), manifest_path))
+            return None
+        member = (child.get("member") or "").strip() or os.path.basename(dest)
+        return Entry("muslbin", url, url=url, tag=tagv, sha256=sha, member=member,
+                     dest=os.path.normpath(dest), arch=arch,
+                     manifest=manifest_path)
+
+    # ---- <generate dest="__output/x" cmd=|script=/> --------------------------
+    if tag == "generate":
+        # ⚠️ 这里**不查** `_no_dest_attr`：`dest` 就是 <generate> 自己的属性。
+        #    D6 那条"没有 dest="说的是"落点由标签本身决定"的 <export_*>/<muslbin>；
+        #    <generate> 的 dest 是**生成物写哪儿**，本来就该由清单说。
+        dest = _require_output_rel(child.get("dest"), tag, manifest_path, errors,
+                                   attr="dest")
+        if dest is None:
+            return None
+        cmd = (child.get("cmd") or "").strip()
+        script = (child.get("script") or "").strip()
+        if cmd and script:
+            errors.append("<generate dest=%r> 的 cmd= 和 script= **只能给一个**"
+                          "（现在两个都给了）（%s）" % (dest, manifest_path))
+            return None
+        if not cmd and not script:
+            errors.append("<generate dest=%r> 要 cmd=（跑一条命令）或 "
+                          "script=（跑项目里一个脚本），**二选一**，"
+                          "现在两个都没给（%s）" % (dest, manifest_path))
+            return None
+        if script and not is_safe_rel(script):
+            errors.append("<generate script=%r> 必须是不含 .. 的相对路径（%s）"
+                          % (script, manifest_path))
+            return None
+        return Entry("generate", dest, dest=dest, cmd=cmd, script=script,
+                     manifest=manifest_path)
+
+    # ---- <export_bin> / <export_usr> ----------------------------------------
+    if _no_dest_attr(tag, child, manifest_path, errors):
+        return None
+    src = _require_output_rel(child.get("src"), tag, manifest_path, errors)
+    if src is None:
+        return None
+
+    if tag == "export_bin":
+        name = (child.get("name") or "").strip() or os.path.basename(src)
+        if not name or name in (".", "..") or "/" in name or name.startswith("."):
+            errors.append("<export_bin name=%r> 只能是**一个文件名**"
+                          "（落点是 $WTOOL_HOME/usr/bin/<name>）（%s）"
+                          % (child.get("name"), manifest_path))
+            return None
+        return Entry("export_bin", src, name=name, manifest=manifest_path)
+
+    # export_usr：part 检查在**解析期**（值域错了不用等磁盘）
+    part = (child.get("part") or "").strip()
+    if part and part not in USR_PARTS:
+        errors.append("<export_usr part=%r> 不在白名单里（D19）：只认 %s。"
+                      "白名单外的位置（.config/… 之类）暂不支持（D9）—— "
+                      "要加得先找用户拍板（%s）"
+                      % (part, " / ".join(USR_PARTS), manifest_path))
+        return None
+    return Entry("export_usr", src, part=part, manifest=manifest_path)
+
+
+def usr_items(project_root, src, part=""):
+    """`<export_usr>` 会导出哪些条目：`[(part, item), …]`（只看磁盘，不报错）。
+
+    **条目 = `usr/<part>/` 下的每一个直接子项**，文件也好目录也好 —— 一条链
+    一条子项（`usr/bin/fzf` 是文件链，`usr/share/man` 是整棵子树一条链）。
+    `usr/<part>` 自己**永远不是链**：它是所有项目共享的实体目录（D7）。
+
+    **看板数"N 条软链"和计划展开落点走同一张判据** —— 别在两处各写一遍
+    "什么算一个条目"，那种两处实现迟早会漂。
+    """
+    src_dir = os.path.join(project_root, src)
+    if not os.path.isdir(src_dir):
+        return []
+    parts = [part] if part else sorted(
+        d for d in os.listdir(src_dir) if os.path.isdir(os.path.join(src_dir, d)))
+    out = []
+    for p in parts:
+        pdir = os.path.join(src_dir, p)
+        if not os.path.isdir(pdir):
+            continue
+        for item in sorted(os.listdir(pdir)):
+            out.append((p, item))
+    return out
+
+
+def _expand_export_usr(entry, project_root, home, errors, warnings, seen_dest):
+    """把 `<export_usr>` 展开成一条条 L2 落点（D7 —— **最容易写错的一条**）。
+
+    `$WTOOL_HOME/usr/` 是**所有项目共享**的 → 不能把整条 `usr` 换成某个项目的
+    `usr`。所以：
+
+      · 不带 `part`：对 `src` 的**每个直接子项 X** → 保证 `<dot>/usr/X` 是**实体目录**，
+        再把 `X` 里的**每个条目**各建一条链；
+      · 带 `part`：只做 `X = part` 那一个。
+
+    白名单外的直接子目录 → **报错并列出它**（用户说"到时我再找你加"）。
+    展开结果写回 `entry.links`：[(落点, 条目名, 源相对路径), …]，由 `plan_install` 落成动作行。
+    """
+    src_dir = os.path.join(project_root, entry.src)
+    if not os.path.isdir(src_dir):
+        errors.append("export_usr src 不是一个目录: %s（是在 __output/ 下吗？"
+                      "还没产出就先 wtool download-release + unpack-release，"
+                      "或 wtool build）" % src_dir)
+        return []
+    if entry.part:
+        if not os.path.isdir(os.path.join(src_dir, entry.part)):
+            errors.append("export_usr part=%r 在 %s 下不存在（那里有: %s）"
+                          % (entry.part, entry.src,
+                             ", ".join(sorted(os.listdir(src_dir))) or "（空）"))
+            return []
+        parts = [entry.part]
     else:
-        # 默认镜像路径：$HOME 里的路径在 ~/.wtool 下同名（§8）
-        wtool_rel = home_rel
+        parts = sorted(d for d in os.listdir(src_dir)
+                       if os.path.isdir(os.path.join(src_dir, d)))
+        stranger = [d for d in parts if d not in USR_PARTS]
+        if stranger:
+            errors.append(
+                "export_usr src=%r 下有白名单外的子目录: %s（白名单 6 个：%s）。\n"
+                "        $WTOOL_HOME/usr/ 是所有项目共享的，只允许这 6 个位置；"
+                "要加白名单得先找用户拍板（D19）"
+                % (entry.src, ", ".join(stranger), " / ".join(USR_PARTS)))
+            return []
+        files = [f for f in sorted(os.listdir(src_dir))
+                 if not os.path.isdir(os.path.join(src_dir, f))]
+        if files:
+            warnings.append("export_usr src=%r 下有**散文件**（不在任何 part 里，"
+                            "不会导出）: %s" % (entry.src, ", ".join(files)))
 
-    if produced and produced.strip() != "install.sh":
-        errors.append("<link produced-by=%r> 目前只认 install.sh（%s）"
-                      % (produced, manifest_path))
-        return None
-
-    if sub and not is_safe_rel(sub):
-        errors.append("<link subproject=%r> 必须是不含 .. 的相对路径" % sub)
-        return None
-
-    return Entry("link", sub or "",
-                 home=home_rel, wtool=wtool_rel,
-                 produced_by=(produced or "").strip(),
-                 force=_bool_attr(child, "force"),
-                 optional=_bool_attr(child, "optional"),
-                 manifest=manifest_path)
+    links = []
+    for part, item in usr_items(project_root, entry.src, entry.part):
+        dest = os.path.join(l2_dir(home, part), item)
+        if dest in seen_dest:
+            errors.append("两条声明指向同一个落点: %s（%s / %s）"
+                          % (dest, seen_dest[dest], entry.src))
+            continue
+        seen_dest[dest] = "%s/%s" % (entry.src, part)
+        links.append((dest, item, os.path.join(entry.src, part, item)))
+    if not links:
+        warnings.append("export_usr src=%r 展开出来**一条都没有**（"
+                        "各 part 目录是空的？）" % entry.src)
+    entry.links = links
+    return links
 
 
 def _parse_system_file(child, errors, manifest_path):
@@ -1048,13 +1267,32 @@ def render_distro_mirror(kind, os_id, codename, mirror, errors):
 # --------------------------------------------------------------------------
 # 校验
 # --------------------------------------------------------------------------
-def validate_entries(entries, project_root, home, state_dir, errors, warnings):
+def validate_entries(entries, project_root, home, state_dir, errors, warnings,
+                    require_disk=True):
+    """校验一份清单的**结构**（解析期已经查过一遍）+ **磁盘**（这一趟）。
+
+    `require_disk=False`：只看结构，**不碰磁盘**。给 `wtool check` 扫全工作区用 ——
+    `__output/` 是**产物**（构建/下载才有），一个刚 `repo sync` 完、还没
+    `download-release`/`build` 的项目**本来就没有它**；把那当成错误的话，
+    `check` 会对着干净工作区一路报红（假警报比不报更坏）。
+    **装过的**项目仍然照查不误（那时 `__output/` 应该在，链也该在）。
+    """
     seen_dest = {}
 
     for entry in entries:
-        # link 有自己的两跳路径规则，先单独走
-        if entry.kind == "link":
-            _validate_link(entry, project_root, home, errors, warnings, seen_dest)
+        # L2（<export_bin>/<export_usr>）：落点在 $WTOOL_HOME/usr 下，源在
+        # 项目的 __output/ 下 —— 两条都要看磁盘（D40/D7/D19）。
+        if entry.kind in ("export_bin", "export_usr"):
+            if require_disk:
+                _validate_export(entry, project_root, home, errors, warnings,
+                                 seen_dest)
+            continue
+        # <generate>/<muslbin>：本轮**只解析 + 校验**，不落动作（执行在 install 那块）
+        if entry.kind == "generate":
+            if require_disk:
+                _validate_generate(entry, project_root, errors)
+            continue
+        if entry.kind == "muslbin":
             continue
         # 只有 env / task 的 src 是"项目内相对路径"；
         # sysfile 的 src 可选（也可用 kind 生成），source 的 src 是 URL
@@ -1092,43 +1330,62 @@ def validate_entries(entries, project_root, home, state_dir, errors, warnings):
     return registry
 
 
-def _validate_link(entry, project_root, home, errors, warnings, seen_dest):
-    """算出 <link> 两跳的绝对路径，并检查源与落点。"""
-    shadow = os.path.join(home, SHADOW_ROOT_NAME)
-    abs_dest = os.path.join(home, entry.home)
-    abs_wtool = os.path.join(shadow, entry.wtool)
-    if not is_under(abs_dest, home):
-        errors.append("link home 逃出 $HOME: %s" % entry.home)
-        return
-    if not is_under(abs_wtool, shadow) or abs_wtool == shadow:
-        errors.append("link wtool 逃出 ~/%s: %s" % (SHADOW_ROOT_NAME, entry.wtool))
-        return
-    if abs_dest in seen_dest:
-        errors.append("同一个清单里 home 重复: %s" % entry.home)
-        return
-    # home 那一跳的落点在 $HOME 里；中间那一跳是我们自己造的，允许已存在
-    seen_dest[abs_dest] = entry
-    entry.abs_dest = abs_dest
-    entry.abs_wtool = abs_wtool
+def _validate_export(entry, project_root, home, errors, warnings, seen_dest):
+    """`<export_bin>` / `<export_usr>` 的磁盘判据 + 落点展开。
 
-    if entry.src:                       # subproject：内容来自项目目录
-        if not is_safe_rel(entry.src):
-            errors.append("link subproject=%r 必须是不含 .. 的相对路径" % entry.src)
+    一趟里做完两件事：
+      · **校验**（源在不在、是不是文件、白名单外的子目录）—— `check` 也走这里；
+      · **展开**（`entry.links` = [(落点, 条目名, 源相对路径), …]）—— 计划用它建链。
+
+    ⚠️ `src` 在**项目**里（`__output/…`），落点在 **`$WTOOL_HOME/usr/`** 下：
+    这个落点是**跨项目共享**的（fzf 和 zsh 都要往 usr/bin 放东西），所以
+    一条声明只占**一个条目**，`usr/<part>` 本身永远是实体目录（D7）。
+    """
+    src_path = os.path.join(project_root, entry.src)
+    if not os.path.exists(src_path):
+        errors.append(
+            "%s src 不存在: %s\n"
+            "        它是**产物**（__output/ 下的东西），不是源码 —— 先产出再装：\n"
+            "          wtool download-release <项目> + wtool unpack-release <项目>"
+            "   （② 类，从上游取）\n"
+            "          wtool build <项目>                                 "
+            "   （③ 类，本地编）" % (entry.kind, src_path))
+        return
+    if not is_under(src_path, project_root):
+        errors.append("%s src 逃出项目目录: %s" % (entry.kind, entry.src))
+        return
+
+    if entry.kind == "export_bin":
+        if not os.path.isfile(src_path):
+            errors.append(
+                "export_bin src=%r 必须是**一个文件**，现在是个目录（%s）。\n"
+                "        要导出整个目录用 <export_usr src=\"%s\" [part=]/>"
+                % (entry.src, src_path, entry.src))
             return
-        abs_src = os.path.join(project_root, entry.src)
-        if not os.path.exists(abs_src):
-            if getattr(entry, "optional", False):
-                warnings.append("link subproject 不存在（optional，跳过）: %s"
-                                % entry.src)
-                entry.skip = True
-                return
-            errors.append("link subproject 不存在: %s" % abs_src)
+        dest = os.path.join(l2_dir(home, "bin"), entry.name)
+        if dest in seen_dest:
+            errors.append("两条声明指向同一个落点: %s（%s / 本条的 %s）"
+                          % (dest, seen_dest[dest], entry.src))
             return
-        if not is_under(abs_src, project_root):
-            errors.append("link subproject 逃出项目目录: %s" % entry.src)
-            return
-        entry.abs_src = abs_src
-    # produced-by=install.sh：实体由项目脚本铺，这一跳只要落点没被占就行
+        seen_dest[dest] = entry.src
+        entry.links = [(dest, entry.name, entry.src)]
+        return
+
+    _expand_export_usr(entry, project_root, home, errors, warnings, seen_dest)
+
+
+def _validate_generate(entry, project_root, errors):
+    """`<generate>` 的磁盘判据（执行留给 install 那一块 —— 本轮只解析 + 校验）。
+
+    只查一样东西：`script=` 指的那个脚本**在不在**。不在的话 install 一定会失败，
+    而那时报错离"清单写错了"已经很远（越早报越好）。
+    """
+    if not entry.script:
+        return
+    abs_script = os.path.join(project_root, entry.script)
+    if not os.path.isfile(abs_script):
+        errors.append("<generate dest=%r script=%r> 那个脚本不存在: %s"
+                      % (entry.dest, entry.script, abs_script))
 
 
 def _read_registry(path):
@@ -1160,16 +1417,17 @@ def render_block(project_id, schema, prio, head, manifest_sha, env_rel):
     统一记在 $WTOOL_STATE/<id>/meta.tsv 里。
 
     块内容只依赖 project_id（和 env 的相对路径），所以仓库搬到任何位置，
-    块都一个字不用改；WTOOL_PROJECT_ROOT 在 source 时由中转链接实时解析。
+    块都一个字不用改；WTOOL_PROJECT_ROOT 在 source 时由 **L1 链**实时解析
+    （`$WTOOL_HOME/wtool/<项目路径>`，D5/D11 —— 老的
+    `wtool-work-dir/links/<路径>` 中转链已随 ADR-0045 删掉）。
     """
     begin = ("# >>> wtool:%s schema=%d engine=%s prio=%d head=%s manifest=%s >>>"
              % (project_id, schema, ENGINE_VERSION, prio, head or "-",
                 (manifest_sha or "-")[:12]))
-    link_dir = links_dir_shell(project_id)
     body = [
         # 这三个变量只在 source 期间有效；env 文件应把它们拷进自己的变量
         "WTOOL_PROJECT_ID='%s'" % project_id,
-        "WTOOL_PROJECT_DIR=%s" % link_dir,
+        "WTOOL_PROJECT_DIR=%s" % l1_path_shell(project_id),
         "export WTOOL_PROJECT_ID WTOOL_PROJECT_DIR",
         'WTOOL_PROJECT_ROOT=$(readlink -f -- "$WTOOL_PROJECT_DIR" 2>/dev/null '
         '|| printf \'%s\' "$WTOOL_PROJECT_DIR")',
@@ -1261,20 +1519,7 @@ def merge_rc(text, project_id, block, prio, remove_only):
 # --------------------------------------------------------------------------
 # 规划
 # --------------------------------------------------------------------------
-def _link_hops(entry, link_dir):
-    """一条 <link> 声明要建的软链：[(落点, 指向), ...]，顺序就是建链顺序。
-
-    中间那一跳（影子 HOME 里的实体）在前，$HOME 里那一跳在后 ——
-    建第二跳的时候第一跳必须已经在，否则就是一条悬空链。
-    """
-    hops = []
-    if entry.src:
-        hops.append((entry.abs_wtool, os.path.join(link_dir, entry.src)))
-    hops.append((entry.abs_dest, entry.abs_wtool))
-    return hops
-
-
-def _prune_rows(state_dir, project_id, owned, registry, link_dir):
+def _prune_rows(state_dir, project_id, owned, registry, l1):
     """`install --prune`：清掉「清单里已经删掉、磁盘上还在」的软链（BL-15）。
 
     判据是 **journal**（"我做过什么"）而不是磁盘扫描：只有我们自己记过账的落点
@@ -1300,7 +1545,7 @@ def _prune_rows(state_dir, project_id, owned, registry, link_dir):
             continue
         action, dest, target = f[0], f[2], f[3]
         if action == "link":
-            if dest in owned or dest == link_dir:
+            if dest in owned or dest == l1:
                 continue
             owner = registry.get(dest)
             if owner and owner != project_id:
@@ -1334,68 +1579,96 @@ def plan_install(args, scratch):
         errors.append("项目身份非法: %r（项目得在工作区里，身份就是它的相对路径）" % project_id)
 
     registry = validate_entries(entries, project_root, home, state_dir, errors, warnings)
+
+    # ---- 冲突：同一条 L2 落点只能有一个项目（D8 / D60）--------------------
+    #
+    # 判据是 **registry**（装过什么），不是磁盘扫描 —— 扫磁盘会把"用户自己放的
+    # 同名文件"也当成冲突。两个项目要同一个 $WTOOL_HOME/usr/<part>/<条目> 时
+    # **默认报错并指出占用者**；`--force` 只降级成警告（老开关，不新增
+    # `--takeover`：DESIGN §2.11 明确"遇到就报错，找助手改设计"）。
     conflicts = []
-    for entry in entries:
-        if getattr(entry, "skip", False) or not hasattr(entry, "abs_dest"):
-            continue
-        owner = registry.get(entry.abs_dest)
+    conflict_dests = set()
+    mine = [dest for entry in entries
+            for dest, _item, _src in getattr(entry, "links", ()) or ()]
+    for dest in mine:
+        owner = registry.get(dest)
         if owner and owner != project_id:
-            conflicts.append("dest 已被项目 %s 占用: %s" % (owner, entry.abs_dest))
+            conflict_dests.add(dest)
+            conflicts.append(
+                "冲突：%s 已被 %s 占用，%s 不能再导出同名条目。\n"
+                "       如需抢占或调整设计，请找助手改设计"
+                "（本项目暂不提供 --takeover）"
+                % (dest, owner, project_id))
+        # 上下级也冲突：一条 `usr/share/man`（目录链）和别人的 `usr/share/man/x`
+        # 会**写进同一个目录** —— 后者会被 ln 建到前者的目标里（= 污染那个项目的
+        # `__output/`），这种错静默得很。
+        for other in list(registry) + mine:
+            if other == dest:
+                continue
+            if other.startswith(dest.rstrip("/") + "/") \
+                    or dest.startswith(other.rstrip("/") + "/"):
+                who = registry.get(other, project_id)
+                conflicts.append(
+                    "冲突：%s 和 %s 是上下级（%s 占用）—— 会把链建进对方的目录里。\n"
+                    "       如需抢占或调整设计，请找助手改设计"
+                    "（本项目暂不提供 --takeover）" % (dest, other, who))
+                break
     if conflicts:
         if args.force:
             warnings.extend(conflicts)
         else:
             errors.extend(conflicts)
 
-    # 磁盘冲突检测
-    link_dir = links_dir_for(home, project_id)
+    # ---- 磁盘冲突：落点已被别的东西占着（不是软链 / 软链指向别处）----------
+    l1 = l1_path(home, project_id)
+    dests = [(l1, project_root)]
     for entry in entries:
-        if entry.kind != "link" or getattr(entry, "skip", False):
+        for dest, _item, src in getattr(entry, "links", ()) or ():
+            dests.append((dest, l2_target(project_id, src)))
+    for dest, want in dests:
+        # 已经报了"被别的项目占用"的落点不再补一句"指向别处" —— 同一件事说两遍
+        # 只会把 DESIGN §2.11 那条文案淹掉（--force 降级成警告时两条都留着）。
+        if dest in conflict_dests and not args.force:
             continue
-        for dest, want in _link_hops(entry, link_dir):
-            if os.path.islink(dest):
-                current = os.readlink(dest)
-                if os.path.normpath(current) != os.path.normpath(want):
-                    msg = "dest 已是软链但指向别处: %s -> %s" % (dest, current)
-                    (warnings if (args.force or entry.force) else errors).append(msg)
-            elif os.path.lexists(dest):
-                msg = "dest 已存在且不是软链: %s" % dest
-                (warnings if (args.force or entry.force) else errors).append(msg)
+        if os.path.islink(dest):
+            current = os.readlink(dest)
+            if os.path.normpath(current) != os.path.normpath(want):
+                msg = "dest 已是软链但指向别处: %s -> %s" % (dest, current)
+                (warnings if args.force else errors).append(msg)
+        elif os.path.lexists(dest):
+            msg = "dest 已存在且不是软链: %s" % dest
+            (warnings if args.force else errors).append(msg)
 
     if errors:
         raise PlanError("\n".join(errors))
 
-    rows = []          # 引擎基建：中转链接 + env 块（项目 install.sh **之前**）
-    home_rows = []     # 声明面：$HOME 里的软链（install.sh **之后**，见 §4.2）
+    rows = []          # 引擎基建：L1 + L2 + env 块（项目 install.sh **之前**）
     owned = set()      # 这次清单声明要有的落点（--prune 用它判断"哪些已经不该在"）
 
-    def add_link(bucket, kind, dest, target):
-        """reg 行始终发出（保持 registry 与磁盘一致）；
-        link 行只在软链缺失/指向不对时才发出，这样重复 install 才是真正的 no-op。"""
-        bucket.append(("reg", kind, dest, "", "", ""))
+    def add_link(kind, dest, target):
+        """**登记 + 记账**，软链已对时不重复建（`reglink` 动作，见 wtool_fs.sh）。
+
+        ⚠️ 为什么不沿用老的两条（`reg` + 按需 `link`）：软链已经存在且指向正确时
+        老写法只发 `reg` —— **journal 里就没有这条账**，于是它悬空之后
+        `wtool check` 看不见（DESIGN §2.8 实测过的假绿：把 `<D>/bootstrap` 弄悬空，
+        check 照样报"一切对得上"）。L1/L2 都必须进账本（P3）。
+        """
+        rows.append(("reglink", kind, dest, target, "", ""))
         owned.add(os.path.normpath(dest))
-        want = os.path.normpath(target)
-        if os.path.islink(dest) and os.path.normpath(os.readlink(dest)) == want:
-            return
-        bucket.append(("link", kind, dest, target, "", ""))
 
-    # 1) 稳定中转链接 ~/.wtool/wtool-work-dir/links/<id> -> <project_root>
-    add_link(rows, "dir", link_dir, project_root)
+    # 1) L1「项目接入链」：<dot>/wtool/<项目路径> → 工作区里那个项目目录
+    #    **绝对**路径（D11：断了能一眼看懂指哪）+ **按项目惰性创建**（D5：
+    #    只建装过的那个项目，不是一次把整棵工作区都链进来）。
+    add_link("dir", l1, project_root)
 
-    # 2) 项目内的软链，走**两跳**（§3.2）：
-    #       <项目>/<subproject> → ~/.wtool/<wtool> → $HOME/<home>
-    #    中间那一跳是实体落点（也进影子 HOME 的镜像规则），最后一跳才是
-    #    应用去找的那个位置。produced-by 的中间那一跳由项目 install.sh 铺，
-    #    引擎只建最后一跳。
+    # 2) L2「项目导出链」：<dot>/usr/<part>/<条目> → ../../wtool/<项目>/__output/…
+    #    **相对**目标（两端都在 .wtool 里，tar 走之后依然有效，D45）。
+    #    <dot>/usr/<part> 是**实体目录**（多项目共享），由 sh 侧 wt_ensure_dir 建。
     for entry in entries:
-        if entry.kind != "link" or getattr(entry, "skip", False):
-            continue
-        for dest, want in _link_hops(entry, link_dir):
-            bucket = home_rows if dest == entry.abs_dest else rows
-            add_link(bucket, "file", dest, want)
+        for dest, _item, src in getattr(entry, "links", ()) or ():
+            add_link("file", dest, l2_target(project_id, src))
 
     # 3) rc 注入
-    rc_index = 0
     desired = {}  # rcfile -> env_rel
     for entry in entries:
         if entry.kind != "env" or getattr(entry, "skip", False):
@@ -1428,10 +1701,9 @@ def plan_install(args, scratch):
 
     # 可选的收尾清理（BL-15）：`wtool install <项目> --prune`
     if getattr(args, "prune", False):
-        rows.extend(_prune_rows(state_dir, project_id, owned, registry, link_dir))
+        rows.extend(_prune_rows(state_dir, project_id, owned, registry, l1))
 
     _write_plan(scratch, rows)
-    _write_plan(scratch, home_rows, "plan.home.tsv")
     _write_meta(scratch, {
         "project_id": project_id,
         "project_root": project_root,
@@ -1447,7 +1719,7 @@ def plan_install(args, scratch):
         "project_root": project_root,
         "meta": meta,
         "rows": rows,
-        "home_rows": home_rows,
+        "l1": l1,
         "warnings": warnings,
     }
 
@@ -1977,7 +2249,8 @@ def pipeline_states(path, pub, st):
 
     # install：能力来自 wtool.xml 的 link/env，或项目自己的 scripts/install.sh
     has_script = _script("install.sh")
-    declarative = bool({e.kind for e in entries} & {"link", "env"})
+    declarative = bool({e.kind for e in entries}
+                      & {"export_bin", "export_usr", "generate", "env"})
 
     if not (has_script or declarative):
         out["install"] = LBL_NONE
@@ -2197,7 +2470,8 @@ def command_states(path, pub, st, state_dir):
         out["build"] = LBL_CAN
 
     # install：和 `wtool install` 的判据同一件事（声明面 + __output/ 在不在）
-    if not (_script("install.sh") or bool(kinds & {"link", "env"})):
+    if not (_script("install.sh")
+            or bool(kinds & {"export_bin", "export_usr", "generate", "env"})):
         out["install"] = LBL_NONE
     elif st.get("installed"):
         out["install"] = LBL_DONE
@@ -2597,7 +2871,9 @@ def render_dashboard(root, state_dir, verbose=False, color=None, brief=False):
         st["cells"] = pipeline_states(path, pub, st)
 
         _meta, entries = _manifest_entries(path)
-        st["n_link"] = sum(1 for e in entries if e.kind == "link")
+        st["n_link"] = sum(1 for e in entries if e.kind == "export_bin") + sum(
+            len(usr_items(path, e.src, e.part))
+            for e in entries if e.kind == "export_usr")
         st["n_env"] = sum(1 for e in entries if e.kind == "env")
         st["n_sysfile"] = sum(1 for e in entries if e.kind == "sysfile")
         st["n_source"] = sum(1 for e in entries if e.kind == "source")
@@ -2650,7 +2926,7 @@ def render_dashboard(root, state_dir, verbose=False, color=None, brief=False):
     if rows:
         out += _box(["项目", "状态", "会做什么"], rows, aligns=["l", "c", "l"])
     _none = [p["id"] for p in projects if p["cmds"]["install"] == LBL_NONE]
-    out.append("  没有列出来的项目 = 没声明要装什么（既没有 scripts/install.sh，也没有 <link>/<zshrc>）：%s"
+    out.append("  没有列出来的项目 = 没声明要装什么（既没有 scripts/install.sh，也没有 <export_*>/<zshrc>）：%s"
                % ("、".join(_none) if _none else "（无）"))
 
     out += _hdr("3. wtool sudo-install —— 能装哪些项目、跑过没")
@@ -2927,12 +3203,17 @@ def plan_usr_link(home, state, exclude=""):
     """
     home = os.path.abspath(home)
     dest = os.path.join(home, "usr")
-    target = os.path.join(home, SHADOW_ROOT_NAME, "usr")
+    target = os.path.join(dot_dir(home), USR_SUBDIR)
     rows = []
     if _installed_ids(state, exclude, home):
         # 刻意**不发 reg 行**：~/usr 不属于任何项目，它的生死归 wt_env_sync。
         # 登记成某个项目的话，那个项目 uninstall 之后 registry 里还留着它，
         # _installed_ids 就会永远认为"还有项目装着"，~/usr 再也收不走（踩过）。
+        #
+        # 目标目录（<dot>/usr）得先保证在：它现在是 **L2 的落点**（<dot>/usr/<part>
+        # 是实体目录），但在"只有 ① 类项目"的机器上没有任何 L2 链去建它 ——
+        # 那样 `~/usr` 会是一条悬空链，`wtool check` 会（正确地）报出来。
+        rows.append(("mkdir", "dir", target, "", "", ""))
         if not (os.path.islink(dest) and os.path.normpath(os.readlink(dest))
                 == os.path.normpath(target)):
             rows.append(("link", "dir", dest, target, "", ""))
@@ -3426,23 +3707,6 @@ def publish_info(project_dir, ws_root=None):
 # 判据是**磁盘上所有 wtool 项目的 wtool.xml**，不是 registry ——
 # registry 只能有一个主人，而"两个项目都要 ~/.gitconfig"是完全合理的。
 # --------------------------------------------------------------------------
-def claimed_homes(root, exclude_id="", home=""):
-    """[(abs_dest, project_id), ...]：别的项目声明的 $HOME 落点。"""
-    home = os.path.abspath(home) if home else ""
-    out = []
-    for _prio, pid, path, _pub in scan_projects(root, manifests_only=True):
-        if pid == exclude_id:
-            continue
-        errors, warnings = [], []
-        _meta, entries = parse_manifest(os.path.join(path, "wtool.xml"), path,
-                                        errors, warnings)
-        for entry in entries:
-            if entry.kind != "link":
-                continue
-            out.append((os.path.join(home, entry.home), pid))
-    return sorted(set(out))
-
-
 # --------------------------------------------------------------------------
 # pack-release：把项目打成 __release/ 里的分卷
 #
@@ -4531,16 +4795,22 @@ def do_check(args):
             bad(pid, "清单有问题: %s" % e)
         if meta is None:
             continue
+        journal = _journal_rows(state, pid)
+        installed = bool(journal) or os.path.isfile(os.path.join(state, pid, "meta.tsv"))
+
         verrors, vwarnings = [], []
-        validate_entries(entries, path, home, state, verrors, vwarnings)
+        # 装过的才查"产物在不在"（__output/ 是产物：没 build/download 过就没有它，
+        # 那不是错误 —— 见 validate_entries 的 require_disk）
+        validate_entries(entries, path, home, state, verrors, vwarnings,
+                         require_disk=installed)
         for e in verrors:
             bad(pid, "声明与磁盘对不上: %s" % e)
 
-        journal = _journal_rows(state, pid)
-        if not journal and not os.path.isfile(os.path.join(state, pid, "meta.tsv")):
+        if not installed:
             # 没装过**不是**"坏了"：扫全部项目时（wtool check）静默跳过，
             # 只有明确点了这个项目才提一句（那时候人是想知道它为什么没生效）。
-            if args.project and any(e.kind in ("link", "env") for e in entries):
+            if args.project and any(e.kind in ("export_bin", "export_usr",
+                                             "generate", "env") for e in entries):
                 bad(pid, "还没装过（wtool install <路径>）")
             continue
 
@@ -4560,20 +4830,31 @@ def do_check(args):
                         != os.path.normpath(target):
                     bad(pid, "%s 指向变了: %s（记录的是 %s）"
                         % (dest, os.readlink(dest), target))
+                elif not os.path.exists(dest):
+                    # ‼️ **悬空**：链在、指向也对，但目标没了（工作区搬走/项目被删）。
+                    #    `os.path.islink` 对悬空链**照样是 True**、`readlink` 也照样
+                    #    等于记录值 —— 只看前两条的话这里会"一切对得上"（假绿），
+                    #    而 L1 悬空 = `WTOOL_PROJECT_DIR` 指到空气，项目的 env 一行
+                    #    都 source 不进来。判据只能是"**目标在不在**"（DESIGN §5）。
+                    #
+                    #    `~/usr` 那条引擎自己的全局链豁免：它的生死归 wt_env_sync，
+                    #    不属于任何项目的账（而且是软链目录，目标可能还没建出来）。
+                    if os.path.abspath(dest) != os.path.join(home, "usr"):
+                        bad(pid, "%s 悬空了：它指向 %s，但那个路径不存在"
+                            % (dest, target))
             elif act == "sysfile":
                 if os.path.exists(dest) and os.path.exists(os.path.join(
                         state, pid, "system")):
                     pass
 
         # 声明里有、日志里没有 → 装的时候没带上（或者被人手工删过）
+        declared = {l1_path(home, pid): "L1（项目接入链）"}
         for entry in entries:
-            if entry.kind != "link" or getattr(entry, "skip", False):
-                continue
-            for dest, _want in _link_hops(entry, links_dir_for(home, pid)):
-                if dest not in owned and (os.path.lexists(dest) or
-                                          dest == entry.abs_dest):
-                    if dest == entry.abs_dest and not os.path.lexists(dest):
-                        bad(pid, "%s 没建（wtool repair 可以补）" % dest)
+            for dest, _item, _src in getattr(entry, "links", ()) or ():
+                declared[dest] = "L2（%s 导出）" % entry.kind
+        for dest, what in sorted(declared.items()):
+            if dest not in owned and not os.path.lexists(dest):
+                bad(pid, "%s 没建（%s；wtool repair 可以补）" % (dest, what))
 
         # env 块：声明了 zshrc/bashrc，state 里得有对应的块文件
         for entry in entries:
@@ -4940,11 +5221,6 @@ def build_parser():
     # 正在卸载的那个项目要从"还剩谁"里扣掉：它的 state 目录这会儿还在
     pe.add_argument("--exclude", default="")
 
-    cl = sub.add_parser("claimed")
-    cl.add_argument("--root", required=True)
-    cl.add_argument("--home", required=True)
-    cl.add_argument("--exclude-id", default="")
-
     pk = sub.add_parser("pack-plan")
     pk.add_argument("project")
     pk.add_argument("--scratch", required=True)
@@ -5090,12 +5366,14 @@ def main(argv):
             for w in res["warnings"]:
                 print("wtool: warning: %s" % w, file=sys.stderr)
             n_link = sum(1 for r in res["rows"] if r[0] == "link")
-            n_home = sum(1 for r in res.get("home_rows", []) if r[0] == "link")
+            n_reg = sum(1 for r in res["rows"] if r[0] == "reglink")
             n_rc = sum(1 for r in res["rows"] if r[0] in ("rc", "envblock"))
             n_prune = sum(1 for r in res["rows"] if r[0] in ("prune", "prune-dir"))
             print("project   : %s" % res["project_id"])
             print("root      : %s" % res["project_root"])
-            print("actions   : %d link, %d home-link, %d rc" % (n_link, n_home, n_rc))
+            print("l1        : %s" % res.get("l1", "-"))
+            print("actions   : %d 条链（%d 要新建 / %d 已在）, %d rc"
+                  % (n_link + n_reg, n_link, n_reg, n_rc))
             if n_prune:
                 print("prune     : %d 条（清单里已经没有）" % n_prune)
         elif args.cmd == "plan-uninstall":
@@ -5127,9 +5405,6 @@ def main(argv):
             rows = plan_env(args, args.scratch)
             _write_plan(args.scratch, rows)
             print("actions   : %d" % len(rows))
-        elif args.cmd == "claimed":
-            for dest, pid in claimed_homes(args.root, args.exclude_id, args.home):
-                print("%s\t%s" % (dest, pid))
         elif args.cmd == "pack-plan":
             res = pack_plan(args)
             print("source    : %d 个文件" % len(res["source"]))

@@ -2,7 +2,15 @@
 
 每个项目根目录放一份 `wtool.xml`。它是**纯声明**，不含逻辑。
 
+> 📌 **`$WTOOL_HOME` 指 `.wtool` 根目录**（ADR-0045 / D47 的新口径）。
+> 今天引擎里那个同名变量还是"**被管理的家目录**"（默认 `$HOME`）—— 整片改名是
+> 后面单独一块（DESIGN §7）。所以本文里写的 `$WTOOL_HOME/usr/bin/fzf`
+> **今天**就是 `~/.wtool/usr/bin/fzf`：**同一个地方**，只是名字还没换。
+
 ## 最小可用清单
+
+**① 纯源码（`kind="source"`，默认）**：源码即产物 —— **不写任何导出标签**。
+配置/脚本待在自己仓库里，运行时由 **L1 链**指过来（见下面「L1 / L2 两条链」）。
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -11,32 +19,52 @@
   <zshrc  src="env.zsh"/>
   <bashrc src="env.bash"/>
 
-  <link home="~/.tmux.conf"
-        wtool="~/.wtool/.tmux.conf"
-        subproject="tmux.conf"/>
+</wtool>
+```
+
+**②③ 类（`kind="muslbin"` / `kind="docker"`）**：产物在 `__output/` 下，
+用**精确语义**的标签导出（没有"任意落点"这回事）：
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" kind="muslbin" priority="60">
+
+  <zshrc  src="env.zsh"/>
+  <bashrc src="env.bash"/>
+
+  <muslbin url="https://github.com/junegunn/fzf/releases/download/v0.67.0/fzf-0.67.0-linux_amd64.tar.gz"
+           tag="v0.67.0" sha256="…64 位十六进制…"
+           member="fzf" dest="usr/bin/fzf" arch="x86_64"/>
+
+  <export_bin src="__output/usr/bin/fzf"/>      <!-- → $WTOOL_HOME/usr/bin/fzf -->
+  <generate dest="__output/fzf.zsh" cmd="fzf --zsh"/>
 
 </wtool>
 ```
 
 **标签总表**（不认识的标签 `wtool validate` 直接报错）：
 
-| 标签 | 用途 |
-|---|---|
-| `<zshrc src="env.zsh"/>` | 这份文件的内容进 `~/.wtool/.zshrc`（被 `~/.zshrc` 里的 loader 块 source） |
-| `<bashrc src="env.bash"/>` | 同上，进 `~/.wtool/.bashrc` |
-| `<link home= subproject= />` | 三段映射，见下（`wtool=` 可省，省了就按 `home=` 的镜像路径推） |
-| `<link home= produced-by="install.sh"/>` | 同上，但中间那一跳由项目 `install.sh` 产出 |
-| `<sudo-install src="provision/packages.yaml"/>` | 系统层：要跑的脚本 / playbook（要 sudo、要联网，不在 `install` 里跑） |
-| `<sudo-install src="x.conf" dest="/etc/x.conf"/>` | 系统层：`/etc` 下的文件（可逆，备份/还原） |
-| `<sudo-install kind="apt-mirror" mirror="ustc" dest="auto"/>` | 系统层：引擎按发行版生成内容（换源） |
-| `<source url= ref= />` | 上游源码：clone → 固定 ref → 建本地分支 → 铺 overlay |
-| `<build kind="local\|docker"/>` | 构建方式（ADR-025）：`local` 本地直接编（默认）、`docker` 每个发行版一个容器分层构建。可带 `min-cores=` / `min-mem=` / `min-disk=` 门槛 |
-| `<publish kind= to= />` | 怎么发布（默认 `source`）：推到本项目 remote，或 `to=` 指定的仓、`kind="none"` 不发布 |
-| `<include src= optional= />` | 拆清单 |
+| 标签 | 用途 | 适用类型 |
+|---|---|---|
+| `<wtool kind="source\|muslbin\|docker">` | **项目类型**（根元素），决定支持哪些命令 | 全部 |
+| `<zshrc src="env.zsh"/>` | 这份文件的内容并进 `$WTOOL_HOME/env.zsh` | 全部 |
+| `<bashrc src="env.bash"/>` | 同上，进 `$WTOOL_HOME/env.bash` | 全部 |
+| `<export_bin src="__output/…" [name=]/>` | 把**一个文件**导出到 `$WTOOL_HOME/usr/bin/<name>` | ②③ |
+| `<export_usr src="__output/usr" [part=]/>` | 把 `usr/`（或白名单子目录）下的**每个条目**各导出一条 | ③（② 需要时也行） |
+| `<muslbin url= tag= sha256= member= dest= arch=/>` | ② 类的**下载声明**（上游静态二进制） | ② |
+| `<generate dest="__output/…" cmd=\|script=/>` | **安装时**生成产物（如 `fzf --zsh`） | ②③ |
+| `<sudo-install …/>` | 系统层：要跑的脚本 / playbook / `/etc` 下的文件 / 换源 | 全部 |
+| `<source url= ref= />` | 上游源码：clone → 固定 ref → 建本地分支 → 铺 overlay | 全部 |
+| `<build kind="local\|docker"/>` | 构建方式（ADR-025）。可带 `min-cores=` / `min-mem=` / `min-disk=` 门槛 | ③ |
+| `<publish kind= to= />` | 怎么发布（默认 `source`）：推到本项目 remote，或 `to=` 指定的仓、`kind="none"` 不发布 | 全部 |
+| `<include src= optional= />` | 拆清单 | 全部 |
 
 <small>⚠️ 表外的标签**一律报错**，`x-*` 也不行 —— 见文末「自定义元素」。
-（旧版这张表里写过"`x-*` 自定义"，**那是错的**：`lib/wtool_plan.py:414-416` 对任何未知标签
+（旧版这张表里写过"`x-*` 自定义"，**那是错的**：`lib/wtool_plan.py` 对任何未知标签
 都拒绝，实测 `<x-note>` → `error: 未知元素 <x-note>`、退出码 1。）</small>
+
+<small>⚠️ **`<link>` 已经删掉**（ADR-0045 / D3，不留兼容期）：`$HOME` 里不再有 wtool 建的软链。
+它的下场与替代写法见文末「删掉的旧标签」。</small>
 
 ---
 
@@ -132,10 +160,10 @@
 所以：
 
 - 身份**只有一个来源** —— 项目目录相对工作区根的路径（`terminal/tmux` 这样的）。
-  它出现在 `~/.wtool/wtool-work-dir/links/<路径>`、`$WTOOL_STATE/<路径>/` 和 rc 块标记里。
+  它出现在 `$WTOOL_HOME/wtool/<路径>`（**L1 链**）、`$WTOOL_STATE/<路径>/` 和 rc 块标记里。
 - **改目录 = 换了一个项目**。想改名用 `wtool move <旧路径> <新路径>`
   （= 卸旧的 → mv → 装新的），别自己 `mv`。只 `mv` 会把旧路径那一套账
-  （state 目录、中转软链、env 块、registry 行）留在原地，而且它们**大多不报错、
+  （state 目录、L1 链、env 块、registry 行）留在原地，而且它们**大多不报错、
   只是静默失效**；`wtool check` 会把这类残渣报出来。
 - 路径里**不要**用 `..`，也别写成绝对路径 —— 项目要待在工作区里。
   工作区**外面**的目录也能 `wtool install /abs/path`，但那种项目拿不到合法的相对路径，
@@ -177,63 +205,141 @@ env.bash 的内容 ──► ~/.wtool/.bashrc  ──► ~/.bashrc 里一个 loa
 
 ---
 
-## `<link>` —— 三段映射
+## L1 / L2 两条链（装一个项目到底发生了什么）
 
-| 属性 | 必填 | 说明 | 写什么 |
-|---|---|---|---|
-| `home` | ✅ | `$HOME` 下的落点 | 写全，带 `~/` |
-| `wtool` | 否 | `~/.wtool`（影子 HOME）下的落点 | **省掉就按镜像路径推**（`$HOME` 里的路径在 `~/.wtool` 下同名，`lib/wtool_plan.py:482-493`）；想放别处才写出来 |
-| `subproject` | ✅ | 项目里的相对路径 | 内容从这儿来 |
-| `produced-by` | 否 | 内容由谁产出 | 目前只认 `install.sh`（这时不写 `subproject`） |
+`wtool install` 只做**两类链**，名字和职责分得很开（ADR-0045 §1.3）：
 
-所以下面两种写法等价，**短的那种就够**：
-
-```xml
-<link home="~/.foo.conf" wtool="~/.wtool/.foo.conf" subproject="foo.conf"/>
-<link home="~/.foo.conf"                         subproject="foo.conf"/>
-```
-
-2026-09-27 实测：只写 `home=` + `subproject=` 的清单 `wtool validate` → `ok`，退出码 0。
-`wtool=` 一旦写了，就必须落在 `~/.wtool/` 下面（写别处会被拒绝），
-所以它只在"刻意不镜像"时才有信息量。
-
-连起来是两跳：
+| | **L1「项目接入链」** | **L2「项目导出链」** |
+|---|---|---|
+| 形状 | `$WTOOL_HOME/wtool/<项目路径>` → **工作区里那个项目目录** | `$WTOOL_HOME/usr/<part>/<条目>` → 项目 `__output/` 里的东西 |
+| 回答什么 | **项目在哪** | **项目提供什么** |
+| 谁声明 | **引擎自动**（装了就建，惰性：只建装过的那个项目）；`wtool.xml` **不声明它** | `wtool.xml` 的 `<export_bin>` / `<export_usr>` |
+| 绝对/相对 | **绝对**（断了能一眼看懂它指哪） | **相对**（`../../wtool/<项目>/…`，两端都在 `.wtool` 里，整棵树搬走依然有效） |
+| 卸载 | 只删那一条链 | 按账本逆放 |
 
 ```
-<项目>/tmux.conf ──► ~/.wtool/.tmux.conf ──► ~/.tmux.conf
-                  中间那一跳（实体落点）    最后一跳（应用找的位置）
+$WTOOL_HOME/wtool/terminal/tmux  ──►  ~/self/wtool/terminal/tmux        （L1，绝对）
+$WTOOL_HOME/usr/bin/fzf          ──►  ../../wtool/tools/musl-bins/fzf/__output/usr/bin/fzf
+                                                                        （L2，相对）
 ```
 
-**为什么要有中间那一跳**：项目目录挪位置（换机器、改工作区路径）不会把 `$HOME` 里的
-链接弄断；而且 `~/.wtool/` 下看到的东西和 `$HOME` 一一对应，一眼就知道是谁装的。
+**L1 让 ① 类项目"源码即产物"成立**：配置/脚本不用渲染、不用拷进 `__output/`，
+直接读 `$WTOOL_HOME/wtool/<项目路径>/…` 就是源码本身。
 
-目录、内容由项目自己的 `install.sh` 产出时：
+**`$WTOOL_HOME/usr/` 是多项目共享的实体目录**：`usr/<part>` **永远是实体目录**，
+里面**一条一链**（否则 fzf 和 zsh 都要往 `usr/bin` 里放东西时会撞死）。
+`<part>` 只有 **6 个**白名单值：`bin` `lib` `libexec` `share` `include` `local`（D19）。
 
-```xml
-<link home="~/.config/astronvim_v5"
-      wtool="~/.wtool/.config/astronvim_v5"
-      produced-by="install.sh"/>
-```
-
-这条软链由引擎铺，实体由 `install.sh` 铺 —— 所以 **`install.sh` 先跑、软链后建**
-（见 `docs/spec.md` §4），顺序反了就是先建一堆悬空链接。
-
-### 声明链接 vs 稳定地址
-
-`<link>` 只声明"应用去找的"链接（如 `~/.tmux.conf`）。
-`~/.wtool/wtool-work-dir/links/<id>` 是引擎 install 时**自动创建**、指向整个项目根的
-"稳定地址"，**不要**在清单里声明。
-
-**项目内部文件互相引用时用稳定地址**，例如 `tmux.conf` 里引用 `bin/` 脚本：
-
-```
-#($HOME/.wtool/wtool-work-dir/links/terminal/tmux/bin/mem.sh)
-```
-
-不要用自定义 env 变量（如 `$WTOOL_TMUX_DIR`）——tmux 的 `#()` 执行时 `$HOME` 必然存在，
-而自定义变量只有启动 tmux server 的那个 shell 里有。详见 `docs/spec.md` §2。
+> ⚠️ 两条链都**进账本**（`$WTOOL_STATE/<项目>/journal.tsv`），`wtool check` 会逐条验
+> "链在不在、指向对不对、**目标还在不在**"——悬空的链（比如工作区搬走了）会被点名，
+> 不是"一切对得上"。详见 [`spec.md`](spec.md) §2。
 
 ---
+
+## `<export_bin>` —— 导出一个文件
+
+```xml
+<export_bin src="__output/usr/bin/fzf"/>              <!-- → usr/bin/fzf -->
+<export_bin src="__output/rg-dbg" name="rg"/>         <!-- → usr/bin/rg -->
+```
+
+| 属性 | 必填 | 默认 | 说明 |
+|---|---|---|---|
+| `src` | ✅ | — | **必须在项目的 `__output/` 之下**（那是"构建出来的 / 下载解压出来的"），而且**必须是一个文件** |
+| `name` | 否 | `src` 的 basename | 落点文件名，只能是一个文件名（不含 `/`） |
+
+落点**固定**是 `$WTOOL_HOME/usr/bin/<name>` —— **没有 `dest=` 这个口子**（D6）。
+指向目录、指到源码树、写 `dest=`、`name` 里带 `/`，都**报错**，不静默忽略。
+
+---
+
+## `<export_usr>` —— 逐条目导出一个 `usr/` 子树
+
+```xml
+<export_usr src="__output/usr"/>                  <!-- usr/ 下每个白名单子项各展开一条 -->
+<export_usr src="__output/usr" part="share"/>     <!-- 只要 usr/share/ -->
+```
+
+准确语义（**最容易写错的一条**，D7）：
+
+> 对 `src` 下的每个**直接子项** `X`：保证 `$WTOOL_HOME/usr/X` 是**实体目录**，
+> 再把 `X` 里的**每个条目**各建一条链（条目可以是文件，也可以是一整棵子目录）。
+
+| 情形 | 结果 |
+|---|---|
+| 不带 `part` | `src` 下每个直接子目录各展开一份；**遇到白名单外的子目录 → 报错并列出它**（要加白名单得先找用户拍板） |
+| 带 `part` | 只处理那一个；`part` 不在 6 个白名单里 → 报错 |
+| `src` 下有**散文件** | 警告（散文件不属于任何 part，不会被导出） |
+| `src` 还不存在（没 build / 没 download） | 报错，并给出 `download-release` / `unpack-release` / `build` 三条命令 |
+
+`$WTOOL_HOME/usr/<part>` **不是链，是实体目录** —— 它归所有项目共用。
+
+---
+
+## `<muslbin>` —— ② 类的下载声明
+
+```xml
+<muslbin url="https://github.com/junegunn/fzf/releases/download/v0.67.0/fzf-0.67.0-linux_amd64.tar.gz"
+         tag="v0.67.0" sha256="…64 位十六进制…"
+         member="fzf" dest="usr/bin/fzf" arch="x86_64"/>
+```
+
+| 属性 | 必填 | 默认 | 说明 |
+|---|---|---|---|
+| `url` | ✅ | — | 上游资产地址（`http(s)://`） |
+| `tag` | ✅ | — | 上游版本，**钉死**（不许浮动） |
+| `sha256` | ✅ | — | 下载后的校验值；不是 64 位十六进制 → 报错（写错等于没有校验） |
+| `dest` | ✅ | — | 解到 **`__output/` 下的相对路径**（例 `usr/bin/fzf`），**不写 `__output/` 前缀** |
+| `member` | 否 | `dest` 的 basename | tar 包里的成员名 |
+| `arch` | 否 | `x86_64` | 目前只做 `x86_64`（D32），写别的报错 |
+
+只对 `kind="muslbin"` 的项目有意义 —— 写在别的类型上**报错**。
+取二进制走 `wtool download-release` + `wtool unpack-release`（**开发机**命令，要联网）。
+⚠️ **本轮引擎只解析 + 校验这条声明**，下载链路的接线在后面的块里。
+
+---
+
+## `<generate>` —— 安装时生成产物
+
+```xml
+<generate dest="__output/fzf.zsh"  cmd="fzf --zsh"/>          <!-- 跑一条命令 -->
+<generate dest="__output/fzf.bash" script="scripts/gen-fzf.bash"/>  <!-- 或跑一个脚本 -->
+```
+
+| 属性 | 必填 | 说明 |
+|---|---|---|
+| `dest` | ✅ | **必须在 `__output/` 之下**（D41）：生成物是**安装期产物**，不进源码树、不进 git |
+| `cmd` | 二选一 | 要跑的命令（输出写进 `dest`） |
+| `script` | 二选一 | 项目里的相对路径脚本；文件不存在 → 报错 |
+
+`cmd` 与 `script` **都给 / 都不给** → 报错。生成物由该项目自己的
+`env.zsh` / `env.bash` 去 source（典型例子：fzf 的 `fzf --zsh`）。
+
+⚠️ **本轮引擎只解析 + 校验这条声明**，执行与记账（卸载时删掉生成物）在
+`install` 那一块接线。
+
+---
+
+## 删掉的旧标签
+
+| 旧 | 现在 |
+|---|---|
+| `<link home= wtool= subproject=/>` | **报错**（ADR-0045 / D3，不留兼容期）—— `$HOME` 里不再有 wtool 建的软链（D1）。<br>① 类：删掉这条即可（配置/脚本直接读 `$WTOOL_HOME/wtool/<项目路径>/…`）；<br>②③ 类：改用 `<export_bin>` / `<export_usr>` 导到 `$WTOOL_HOME/usr/…` |
+| `<link home= produced-by="install.sh"/>` | 同上 —— "实体由脚本铺、链由引擎建"这套不做了 |
+| `<link src= dest=/>`（更老的写法） | 同上 |
+| `<env src= shells=/>` | 用 `<zshrc src="env.zsh"/>` / `<bashrc src="env.bash"/>`。老写法**仍然认**，但每次解析都警告 |
+| `<provision>` / `<system-file>` | 并进 `<sudo-install>`（老写法仍然认，警告） |
+
+**`$HOME` 里现在只剩两行**（rc 的最后两行）：
+
+```sh
+export WTOOL_HOME=~/.wtool
+source ${WTOOL_HOME}/env.zsh        # bash 用户写 env.bash
+```
+
+要让用户敲到命令、拿到环境变量，写进**本项目的 `env.zsh` / `env.bash`**
+（比如包装函数 `tmux() { command tmux -f "$WTOOL_HOME/wtool/terminal/tmux/tmux.conf" "$@"; }`），
+而不是往 `$HOME` 里建软链。
 
 ## `<sudo-install>` —— 系统层（`/etc`、apt 包、要跑的脚本）
 
@@ -361,44 +467,58 @@ error: 未知元素 <x-note>（.../wtool.xml）；wtool.xml 没有自定义元�
 |---|---|
 | XML 可解析、根元素是 `<wtool>` | 拒绝 |
 | `schema` 已知 | 拒绝 |
-| `src` / `subproject` 相对、不含 `..`、存在、在本项目内 | 拒绝 |
-| `home` 带 `~/`、不含 `..`、不逃出 `$HOME` | 拒绝 |
-| `wtool` 写在 `~/.wtool/` 下面 | 拒绝 |
-| 同一清单内 `home` 不重复 | 拒绝 |
-| `home` 未被其他项目在 `registry.tsv` 里登记 | 拒绝（`--force` 降级为警告） |
-| 落点在磁盘上不存在，或已是正确的软链 | 拒绝（`--force` 备份后接管） |
+| `src` 相对、不含 `..`、存在、在本项目内 | 拒绝 |
+| `<export_*>` 的 `src` **在项目 `__output/` 之下**（D40；① 类根本不写这类标签） | 拒绝 |
+| `export_bin` 的 `src` 是**一个文件**（不是目录） | 拒绝 |
+| `export_usr part=` 在 6 个白名单里（`bin lib libexec share include local`） | 拒绝 |
+| `export_usr`（不带 `part`）遇到**白名单外的子目录** | 拒绝（**列出它**） |
+| `<generate>` 的 `dest` 在 `__output/` 之下；`cmd` / `script` **二选一** | 拒绝 |
+| `<muslbin>` 只用在 ② 类；`sha256` 是 64 位十六进制；`arch` 是 `x86_64` | 拒绝 |
+| 任何标签写了 `dest=`（`<export_*>` / `<muslbin>`） | 拒绝（D6：落点由标签决定） |
+| 两条声明指向**同一条 L2 落点**（同一个项目里，或跨项目撞 `registry.tsv`） | 拒绝（`--force` 降级为警告） |
+| L2 落点在磁盘上不存在，或已是正确的软链 | 拒绝（`--force` 备份后接管） |
+| 装过的项目里，`<export_*>` / `<generate>` 指的产物**不在磁盘上** | 拒绝（`wtool check` 报"声明与磁盘对不上"） |
 | 有 `build.sh` 就必须有非空的 `__output/` | 拒绝（`--force` 降级为警告） |
 | `<publish kind=…>` 只能是 `source` / `none`；不能有 `script=` | 拒绝 |
 | `<build kind=…>` 只能是 `local` / `docker`；`min-cores` / `min-mem` / `min-disk` 必须是正整数 | 拒绝 |
 | `<wtool kind=…>`（**根元素**）只能是 `source` / `muslbin` / `docker`；写别的值 → 报错（项目**仍然留在看板上**，但被门禁的命令一律拒，绝不悄悄当成 `source`） | 报错 |
-| 旧标签 | 警告（能装，但提醒改成新标签） |
+| `<link>`（任何写法） | **报错**（D3：解析已删，文案给出照做就行的改法） |
+| `<env src= shells=/>` / `<provision>` / `<system-file>` 这些老写法 | 警告（能装，但提醒改成新标签） |
+
+⚠️ **"产物在不在"分两种场合**（`check` 的假警报比不报更坏）：
+
+- `wtool validate <项目>`：**一律查**。它回答的就是"这份清单现在能不能装"，
+  产物没产出时那句"先 `download-release` / `build`"正是你要的下一步。
+- `wtool check`（扫全工作区）：**只查装过的项目**。一个刚 `repo sync` 完、
+  还没 `download-release`/`build` 的项目**本来就没有 `__output/`** ——
+  把那当成错误，`check` 会对着干净工作区一路报红。
 
 ---
 
 ## 完整示例
 
+**③ 类（要按发行版编）**：
+
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" kind="source" priority="20">   <!-- 根元素的 kind = 项目类型（默认 source） -->
+<wtool schema="1" kind="docker" priority="20">
 
-  <!-- 先于其它项目被 source -->
   <zshrc  src="env.zsh"  priority="20"/>
   <bashrc src="env.bash" priority="20"/>
 
-  <!-- 把整个 zsh 配置目录接到 ~/.config/zsh（两跳：项目 → 影子 HOME → $HOME） -->
-  <link home="~/.config/zsh"
-        wtool="~/.wtool/.config/zsh"
-        subproject="config"/>
+  <!-- 本发行版那一套产物 → $WTOOL_HOME/usr/{bin,share,lib,…}，逐条目一链 -->
+  <export_usr src="__output/ubuntu_24.04/usr"/>
 
-  <!-- 单个文件也行 -->
-  <link home="~/.zprofile"
-        wtool="~/.wtool/.zprofile"
-        subproject="zprofile"/>
+  <!-- 安装时生成的补全脚本（由 env.zsh 去 source） -->
+  <generate dest="__output/zsh.zsh" cmd="zsh --version"/>
 
   <!-- 机器本地覆盖，不入库 -->
   <include src="wtool.local.xml" optional="true"/>
 </wtool>
 ```
+
+**① 类（源码即产物）**：只有 `<zshrc>` / `<bashrc>`，什么导出都不写 ——
+运行时要读的文件直接走 L1（`$WTOOL_HOME/wtool/<项目路径>/…`）。
 
 要编译 / 要产出的项目，再加 `scripts/`（只有 `build.sh` 和 `install.sh` 两种，
 **按需，别留空壳**）和 `__output/`（产物，`.gitignore` 里）。
@@ -417,9 +537,12 @@ error: 未知元素 <x-note>（.../wtool.xml）；wtool.xml 没有自定义元�
 | 旧 | 新 | 备注 |
 |---|---|---|
 | `<env src= shells=/>` | `<zshrc src=/>` / `<bashrc src=/>` | `shells=` 靠扩展名推断的那套删了 |
-| `<link src= dest=/>` | `<link home= wtool= subproject=/>` | 没有中间那一跳；`force=` / `optional=` 一并删 |
+| ~~`<link home= wtool= subproject=/>`~~ | **没有了** —— 编译期就报错（D3） | `$HOME` 里不再有 wtool 建的软链（D1）。改法见「删掉的旧标签」 |
+| ~~`<link src= dest=/>`~~ | **没有了** —— 同上 | 它也一直没有中间那一跳 |
 | `<provision src= runner=/>` | `<sudo-install src=/>` | `runner=` 按扩展名判断 |
 | `<system-file …/>` | `<sudo-install … dest=/etc/…/>` | 属性名不变 |
+| ~~`produced-by="install.sh"`~~ | **没有了** —— 报错 | "实体由脚本铺、链由引擎建"这套不做了（`$HOME` 里不建链） |
 | `<publish kind="script" script=…/>` | **没有了** —— 报错 | 发布不再调项目脚本（ADR-023）。`<publish>` 本身**还在**，但只剩 `kind="source"`（默认）/ `kind="none"` / `to="owner/repo"`，见上文「`<publish>` —— 怎么发布」；构建逻辑归 `scripts/build.sh` |
 
-兼容分支在**所有项目迁完之后**删除（见 `harness/architecture.md` §3 的改名对照）。
+`<link>` 的兼容分支**已经删了**（ADR-0045 / D3：不留兼容期）—— 还写着它的清单
+`wtool validate` / `wtool install` 一律**报错**，并给出照做就行的改法。

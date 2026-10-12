@@ -29,7 +29,7 @@ newhome() {
     printf '# 用户自己的 zshrc\nsetopt auto_cd\nexport MY_STUFF=1\n' > "$h/home/.zshrc"
     # 项目都建在工作区里：**项目身份 = 它相对工作区根的路径**（ADR-0037），
     # 所以"项目放在哪个路径"就决定了它的身份，下面断言里那些 `wtool:<路径>`
-    # 和 `links/<路径>` 都是这么来的。
+    # 和 L1 链 `<dot>/wtool/<路径>` 都是这么来的。
     #
     # ‼️ 这里**不能** export WTOOL_ROOT：newhome 是在 `$(...)` 子 shell 里跑的，
     #    子 shell 里的 export 传不回父 shell（踩过：身份退化成目录名，
@@ -50,14 +50,20 @@ mkrepo() { # mkrepo <目录> <相对路径（就是身份）> <优先级>
     #    rm -rf 只删这条软链本身，不会跟着删目标。
     rm -rf "$d/.git"
     fi
+    _var=$(printf '%s' "$2" | tr -c 'A-Za-z0-9' _)
+    # ADR-0045：`<link>` 已删，$HOME 里不再建软链。这一组要验的"装了什么、
+    # 卸完能不能字节级回退"改成走 **L2 导出链**：
+    #   <项目>/__output/usr/bin/<名字>  →  $WTOOL_HOME/usr/bin/<名字>
+    # kind 必须是 ②③（① 类不写 <export_*>），所以给个 kind="docker" + __output/。
+    mkdir -p "$d/__output/usr/bin"
+    cp "$d/tmux.conf" "$d/__output/usr/bin/wtool-test-$_var.conf"
     cat > "$d/wtool.xml" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
-<wtool schema="1" priority="$3">
+<wtool schema="1" kind="docker" priority="$3">
   <env src="env.zsh" shells="zsh"/>
-  <link src="tmux.conf" dest=".wtool-test-$2.conf"/>
+  <export_bin src="__output/usr/bin/wtool-test-$_var.conf" name="wtool-test-$_var.conf"/>
 </wtool>
 EOF
-    _var=$(printf '%s' "$2" | tr -c 'A-Za-z0-9' _)
     printf '# env for %s\nexport WTOOL_TEST_%s=1\n' "$2" "$_var" > "$d/env.zsh"
     ( cd "$d" && git init -q && git add -A \
       && git -c user.email=t@example.com -c user.name=t commit -qm init )
@@ -74,10 +80,20 @@ before=$(snap "$h/home")
     bad "install 执行成功" "$(cat "$h/install.log")"; }
 after_install=$(snap "$h/home")
 
-[ -L "$h/home/.wtool-test-terminal/tmux.conf" ] \
-    && ok "软链已创建" || bad "软链已创建"
-[ -d "$h/home/.wtool/wtool-work-dir/links/terminal/tmux" ] \
-    && ok "中转链接已创建" || bad "中转链接已创建"
+[ -L "$h/home/.wtool/usr/bin/wtool-test-terminal_tmux.conf" ] \
+    && ok "L2 导出链已创建" || bad "L2 导出链已创建"
+[ -d "$h/home/.wtool/wtool/terminal/tmux" ] \
+    && ok "L1 接入链已创建" || bad "L1 接入链已创建"
+[ -d "$h/home/.wtool/wtool" ] && [ ! -L "$h/home/.wtool/wtool" ] \
+    && ok "\$WTOOL_HOME/wtool/ 是实体目录（L1 一条一链）" \
+    || bad "\$WTOOL_HOME/wtool/ 不是实体目录"
+[ "$(readlink "$h/home/.wtool/usr/bin/wtool-test-terminal_tmux.conf")" = \
+  "../../wtool/terminal/tmux/__output/usr/bin/wtool-test-terminal_tmux.conf" ] \
+    && ok "L2 是**相对**链（跟着 .wtool 走）" || bad "L2 不是相对链"
+case $(readlink "$h/home/.wtool/wtool/terminal/tmux") in
+    /*) ok "L1 是**绝对**链（断了能一眼看懂指哪）" ;;
+    *)  bad "L1 不是绝对链" "$(readlink "$h/home/.wtool/wtool/terminal/tmux")" ;;
+esac
 # 用户 rc 里只有**一个** loader 块；项目的块收在 ~/.wtool/.zshrc 里
 grep -q '^# >>> wtool >>>$' "$h/home/.zshrc" \
     && ok "用户 rc 里只有一个 loader 块" || bad "用户 rc 里没有 loader 块"
@@ -167,14 +183,14 @@ h=$(newhome)
 export WTOOL_HOME="$h/home" WTOOL_STATE="$h/state" WTOOL_ROOT="$h/ws"
 proj="$h/ws/terminal/tmux"; mkrepo "$proj" "terminal/tmux" 50
 "$boot/wtool.sh" install "$proj" > /dev/null 2>&1
-rm -f "$h/home/.wtool-test-terminal/tmux.conf"
-printf 'user data\n' > "$h/home/.wtool-test-terminal/tmux.conf"
+_l2="$h/home/.wtool/usr/bin/wtool-test-terminal_tmux.conf"
+rm -f "$_l2"
+printf 'user data\n' > "$_l2"
 "$boot/wtool.sh" uninstall "$proj" > "$h/u.log" 2>&1 || true
-if [ -f "$h/home/.wtool-test-terminal/tmux.conf" ] \
-   && [ ! -L "$h/home/.wtool-test-terminal/tmux.conf" ]; then
+if [ -f "$_l2" ] && [ ! -L "$_l2" ]; then
     ok "用户的真实文件被保留"
 else
-    bad "用户的真实文件被保留" "$(ls -l "$h/home/.wtool-test-terminal/" 2>&1)"
+    bad "用户的真实文件被保留" "$(ls -l "$(dirname "$_l2")" 2>&1)"
 fi
 rm -rf "$h"
 
@@ -215,7 +231,7 @@ proj="$h/ws/terminal/tmux"; mkrepo "$proj" "terminal/tmux" 50
 if command -v zsh >/dev/null 2>&1; then
     got=$(HOME="$h/home" zsh -c '. "$HOME/.zshrc" >/dev/null 2>&1; printf "%s|%s|%s" \
         "$WTOOL_TEST_terminal_tmux" "$WTOOL_PROJECT_DIR" "$WTOOL_PROJECT_ROOT"')
-    check "env 里的变量被导出" "1|$h/home/.wtool/wtool-work-dir/links/terminal/tmux|$proj" "$got"
+    check "env 里的变量被导出" "1|$h/home/.wtool/wtool/terminal/tmux|$proj" "$got"
 
     # 仓库**改名**：必须走 `wtool move`（= 卸旧的 + mv + 装新的，ADR-0037）。
     # 项目身份就是路径，所以"光 mv 再 install"会撞 registry 里的旧路径 ——
@@ -255,8 +271,8 @@ _real_boot_before=$(readlink -- "$HOME/.wtool/bootstrap" 2>/dev/null || echo 无
 
 "$bcopy/wtool.sh" install "$bcopy" > "$h/boot.log" 2>&1 || {
     bad "install bootstrap" "$(cat "$h/boot.log")"; }
-[ -d "$h/home/.wtool/wtool-work-dir/links/bootstrap" ] \
-    && ok "bootstrap 中转链接已创建" || bad "bootstrap 中转链接已创建"
+[ -d "$h/home/.wtool/wtool/bootstrap" ] \
+    && ok "bootstrap 的 L1 接入链已创建" || bad "bootstrap 的 L1 接入链已创建"
 grep -q '# >>> wtool:bootstrap' "$h/home/.wtool/.zshrc" \
     && ok "bootstrap 的块写进了汇总文件" || bad "bootstrap 的块没写进去"
 check "自举落在被管理的家目录里（\$WTOOL_HOME/.wtool/bootstrap）" "$bcopy" \
@@ -271,7 +287,7 @@ if command -v zsh >/dev/null 2>&1; then
     check "新 shell 里能拿到 PREFIX/OS_ID/ARCH 且 PATH 已含前缀" \
           "$h/home/.wtool/usr|ubuntu|x86_64|in-path" "$got"
     got2=$(HOME="$h/home" zsh -c '. "$HOME/.zshrc" >/dev/null 2>&1; command -v wtool')
-    check "wtool 命令在 PATH 上" "$h/home/.wtool/wtool-work-dir/links/bootstrap/bin/wtool" "$got2"
+    check "wtool 命令在 PATH 上" "$h/home/.wtool/wtool/bootstrap/bin/wtool" "$got2"
 else
     printf 'SKIP  zsh 不可用，跳过场景 9\n'
 fi

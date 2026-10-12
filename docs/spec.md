@@ -13,7 +13,7 @@
 | **完全配对** | install 之后 uninstall，`$HOME` 必须字节级回到 install 之前 |
 | **幂等** | 连续多次 install，结果与一次 install 完全相同（包括 rc 文件内容） |
 | **顺序无关** | 多个项目以任意顺序安装，`~/.zshrc` 的最终内容一致 |
-| **可迁移** | 仓库搬到任意路径，**用户 rc 里那个 loader 块**一个字都不用改（靠 `~/.wtool/wtool-work-dir/links/<路径>` 中转）。⚠️ 但项目身份就是路径，所以改名要 `wtool move` —— 见 ADR-0037 |
+| **可迁移** | 仓库搬到任意路径，**用户 rc 里那个 loader 块**一个字都不用改（靠 **L1 链** `$WTOOL_HOME/wtool/<路径>` 指过来）。⚠️ 但项目身份就是路径，所以改名要 `wtool move` —— 见 ADR-0037 |
 | **可撤销且可审计** | 撤销依据是 journal（"我做过什么"），不是"重新推导" |
 | **两层不越权** | `install`/`uninstall` 永不 sudo、永不联网；`sudo-install`/`sudo-uninstall` 永不碰 `$HOME` 里的软链 |
 
@@ -177,21 +177,60 @@ connection reset），pull 走 `skopeo`（它写 OCI 布局时会合并 `index.j
 > **别和另外两个 `kind` 混**：`<build kind="local|docker">`（怎么构建）与
 > `<publish kind="source|none">`（怎么发布）是**另一层**，见 [`manifest-schema.md`](manifest-schema.md)。
 
-### 两个角色：声明链接 vs 稳定地址
+### L1 / L2：两类链（ADR-0045 §1.3）
 
-很多疑问都源于把这两者混为一谈：
+引擎 install 时只建**两类链**，**名字与职责必须分开**（混着叫，两个问题就混成一个）：
 
-| 角色 | 谁创建 | 在清单里声明吗 | 用途 | 例子 |
-|---|---|---|---|---|
-| **声明链接** | `<link>` | ✅ | "应用去这个位置找配置" | `~/.tmux.conf` |
-| **稳定地址** | 引擎 install 时自动 | ❌ | "整个项目的稳定、防搬家路径"，供**配置内部互相引用** | `~/.wtool/wtool-work-dir/links/<路径>`（指向项目根） |
+| | **L1「项目接入链」** | **L2「项目导出链」** |
+|---|---|---|
+| 形状 | `$WTOOL_HOME/wtool/<项目路径>` → **工作区里那个项目目录** | `$WTOOL_HOME/usr/<part>/<条目>` → 项目 `__output/` 里的东西 |
+| 回答什么 | **项目在哪** | **项目提供什么** |
+| 谁创建 | **引擎**（装了就建，**按项目惰性**：只建装过的那个，不是一次把整棵工作区链进来） | **引擎**（按 `wtool.xml` 的 `<export_bin>` / `<export_usr>`） |
+| 判据 | 装了什么 | 项目声明 |
+| 绝对/相对 | **绝对**（断了能一眼看懂它指哪） | **相对**：`../../wtool/<项目路径>/__output/…` |
+| 卸载 | **只删那一条链** | 按账本逆放（连同 `<generate>` 的产物） |
 
-**规则**：
-- 清单只声明"应用去找的"链接；
-- 配置文件**内部**要引用本项目其它文件时，写 `$HOME/.wtool/wtool-work-dir/links/<路径>/...`（稳定地址），不要写仓库真实路径，也不要用 `$HOME` 之外的 env 变量（见下）。
-- 为什么不能只靠 env 变量（如 `WTOOL_TMUX_DIR`）：tmux 的 `#()` 命令在**渲染时**用 `sh -c` 执行，`$HOME` 必然存在；而自定义 env 变量只有"启动 tmux server 的那个 shell 里 source 过它"才在。**`$HOME/.wtool/wtool-work-dir/links/<路径>` 是唯一两者兼得的选择**（实测 tmux 3.4 验证）。
+```
+$WTOOL_HOME/wtool/terminal/tmux   ──►  ~/self/wtool/terminal/tmux         （L1，绝对）
+$WTOOL_HOME/usr/bin/fzf           ──►  ../../wtool/tools/musl-bins/fzf/__output/usr/bin/fzf
+                                                                          （L2，相对）
+```
 
-> 代价：**路径**因此成了**对外契约**，会同时出现在 `~/.wtool/wtool-work-dir/links/<路径>`、rc 块、和配置文件的引用里。所以**改目录 = 换身份**，要走 `wtool move`（卸旧的 + mv + 装新的）；只 `mv` 会留下一整套对不上的旧账（`wtool check` 会报）。见 ADR-0037。
+**`$WTOOL_HOME` 在这里指 `.wtool` 根目录**（ADR-0045 / D47 的新口径；今天引擎里的
+`WTOOL_HOME` 还是"被管理的家目录"，所以代码里走 `dot_dir(home)` 这一个入口算它 ——
+变量改名是后面单独一块，路径本身不动）。
+
+**为什么 L2 用相对**：两端**都在 `.wtool` 里面**。`tar` 整棵打包搬到另一台机器之后，
+相对链照样成立，不用重算（D45：bundle 里 **L1 实体化、L2 留链**）。
+
+**为什么 `$WTOOL_HOME/usr/` 必须是实体目录**：它是**所有项目共享**的。
+`usr/<part>` 一旦被某个项目整条替换成链，fzf 和 zsh 都要往 `usr/bin` 里放东西时就会撞死。
+所以 `<export_usr>` 的语义是「对每个直接子项 `X`：保证 `usr/X` 是**实体目录**，
+再把 `X` 里的**每个条目**各建一条链」——`usr/bin` 里永远是**一条一链**。
+白名单只有 6 个 `part`：`bin` `lib` `libexec` `share` `include` `local`。
+
+#### 记账：两条链都进 journal（**否则 `check` 会假绿**）
+
+L1 和 L2 都由 `plan.tsv` 的 **`reglink`** 动作落盘（`lib/wtool_fs.sh`）：
+**登记 + 记账**，链已经存在且指向正确时**不动磁盘**，但**账一定要记**。
+
+> ⚠️ 这是踩过的坑（DESIGN §2.8 的实测）：原来的写法是 `reg`（只登记）+ **按需** `link`。
+> 链已经存在且指向正确时**只发 `reg`** → journal 里**什么都没有** → 它悬空之后
+> `wtool check` **看不见**，照样报"一切对得上"、退出码 0。
+> L1 悬空的后果是 `WTOOL_PROJECT_DIR` 指到空气、项目的 env 一行都 source 不进来，
+> 而用户看到的是一切正常。所以判据只能是**"目标还在不在"**（`check` 逐条验可解析性）。
+
+#### 冲突：同一条 L2 落点只能有一个项目（D8 / D60）
+
+```
+wtool: 冲突：$WTOOL_HOME/usr/bin/fzf 已被 tools/musl-bins/fzf 占用，terminal/fzf 不能再导出同名条目。
+       如需抢占或调整设计，请找助手改设计（本项目暂不提供 --takeover）
+```
+
+**只报错**，退出码非 0，落点保持原样。用户 2026-10-13 的口径："遇到这个问题再说……
+**写成遇到就报错，到时候报错信息里头提醒我找你再看怎么改**" → **不设计 `--takeover`**
+（敲了就是"未知参数"）。上下级也算冲突：一条 `usr/share/man`（目录链）和别人的
+`usr/share/man/x` 会**写进对方的目录里**，同样报错。
 
 ---
 
@@ -209,8 +248,9 @@ wtool-bootstrap/            引擎（全机器唯一一份）
 ├── lib/wtool_fs.sh         执行器：软链、原子写、journal、registry（**受管**写入都走这里）
 ├── lib/wtool_zip.py        打包工具（zip 读写；中文名要 UTF-8 标志）
 ├── templates/*.tpl         项目脚本模板（wtool init --with-* 用）
-└── tests/                  7 组断言：pairing / sudo-install / publish / table /
-                            release-copy / release / contract
+└── tests/                  11 组断言：pairing / sudo-install / publish / table /
+                            release-copy / release / contract / layer /
+                            docker-build / install-env / export（ADR-0045 第 3 块）
 
 <项目>/                      数据（每个仓库一份）
 ├── wtool.xml               声明：shell 集成、链接表、系统层、优先级
@@ -252,25 +292,25 @@ install <项目>
   │
   ├─ sh: 前置检查（git 干净？拿到 HEAD；有 build.sh 就先要 __output/）
   │
-  ├─ py plan-install ──► scratch/plan.tsv       引擎基建（中转链接 + env 块）
-  │                     scratch/plan.home.tsv  声明面（$HOME 里的软链）
+  ├─ py plan-install ──► scratch/plan.tsv       引擎基建（L1 + L2 + env 块）
   │                     scratch/meta.tsv        project_id 等
   │
-  └─ sh: ① 执行 plan.tsv       （中转链接 + env 块）
+  └─ sh: ① 执行 plan.tsv       （L1 + L2 + env 块）
          ① 跑项目 install.sh  （__output/ → ~/.wtool）
-         ② 执行 plan.home.tsv （影子 HOME → $HOME）
-         ③ wt_env_sync        （汇总 + ~/usr 这条全局软链）
+         ② wt_env_sync        （env 汇总 + ~/usr 这条全局软链）
 ```
 
-**为什么拆成两张计划表**：`plan.home.tsv` 建的软链**指向**`install.sh` 铺出来的东西，
-所以它必须等脚本跑完（§4.2）。执行顺序反过来就是先建一堆悬空链接。
+⚠️ **从 ADR-0045 起只有一张计划表**：原来那张 `plan.home.tsv`（`<link>` 的第二跳，
+把东西链进 `$HOME`）随 `<link>` 一起删了 —— `$HOME` 里不再有 wtool 建的软链（D1）。
 
 `plan.tsv` 列（制表符分隔，无表头）：
 
 | action | kind | dest | source | sha256 | extra |
 |---|---|---|---|---|---|
 | `reg` | `dir`/`file` | 要登记的绝对路径 | — | — | — |
+| `reglink` | `dir`/`file` | 软链位置（**L1 / L2**） | 软链目标 | — | — |
 | `link` | `dir`/`file` | 软链位置 | 软链目标 | — | — |
+| `mkdir` | `dir` | 要保证存在的目录（如 `~/usr` 的目标 `<dot>/usr`） | — | — | — |
 | `rc` | `file` | rc 文件 | scratch 里的新内容 | 新内容 sha256 | 被替换掉的旧块 sha256 或 `-` |
 | `envblock` | `zsh`/`bash` | 状态目录里的块文件 | scratch 里的新内容 | 新内容 sha256 | 项目内的 env 相对路径 |
 | `unlink` | `dir`/`file` | 软链位置 | 期望指向（`-` = 不看） | — | — |
@@ -280,9 +320,11 @@ install <项目>
 | `write` / `remove` | `file` | 汇总文件 / loader 块 | scratch 里的新内容 | — | — |
 | `envblock-del` | `zsh`/`bash` | 状态目录里的块文件 | — | — | — |
 
-`link`/`reg` 出现在 `plan.tsv`（引擎基建）和 `plan.home.tsv`（声明面）两张表里；
+`reglink` = **登记 + 记账**，软链已对时不重复建（L1/L2 都走它 —— 理由见 §1「记账」）；
 `prune` / `prune-dir` **只有 `install --prune` 才会发**；`unlink` / `regdel` 是引擎收自己造的
 全局软链（`~/usr`）用的。
+`reglink` 行**不算"有变更"**：plan 里只剩 `reg` / `reglink` 时，`wt_print_plan` 照样打
+"没有需要变更的内容（已是最新）"——重复 install 仍然是 no-op。
 
 **为什么用 TSV 而不是 shell 代码**：py 生成 shell 代码需要自己做引号转义，路径里一个空格就出事故；TSV + `IFS='\t' read` 没有这个问题。
 
@@ -302,23 +344,27 @@ install <项目>
      或 `wtool build`（自己编）（`--force` 降级为警告）。
      理由：`install` 是断网也要能跑的，它不替你去编译或下载。
 2. **冲突检查**：
-   - `dest` 已存在于 registry 且属于别的项目 → 拒绝（`--force` 降级为警告）
+   - 同一条 **L2 落点**已存在于 registry 且属于别的项目 → 拒绝（`--force` 降级为警告）。
+     文案固定请用户"找助手改设计"，**没有 `--takeover`**（§1「冲突」）
    - `dest` 存在且不是软链 → 拒绝（`--force` 备份为 `*.wtool-bak.<时间戳>` 后接管）
    - `dest` 是软链但指向别处 → 拒绝（同上）
 3. **执行顺序（§4.2，别改回去）**：
    ```
-   ① 引擎基建：中转链接 ~/.wtool/wtool-work-dir/links/<路径> + 项目的 env 块
+   ① 引擎基建：L1（$WTOOL_HOME/wtool/<项目路径>）+ L2（$WTOOL_HOME/usr/<part>/<条目>）+ env 块
    ① 项目自己的 scripts/install.sh：__output/ → ~/.wtool
-   ② wtool.xml 的 link：~/.wtool/<wtool> → $HOME/<home>
-   ③ wt_env_sync：env 汇总 + ~/usr 这条全局软链
+   ② wt_env_sync：env 汇总 + ~/usr 这条全局软链
    ```
+
+   ⚠️ **L1/L2 建在项目脚本之前**：它们指向的是项目 `__output/` 里的**产物**
+   （那是 `build` / `download-release` 的活，不是 `install.sh` 的），
+   项目脚本要跑的时候 `WTOOL_PROJECT_DIR` 必须已经解析得出来。
 4. **落账**：写 `meta.tsv`、更新 `registry.tsv`、追加 journal（按 `(action,dest)` 去重）。
 
 重复 install = **restow**（等价于 GNU Stow 的 `stow -R`）：已正确的软链不重建，rc 块原地更新，plan 为空时打印"没有需要变更的内容"。
 
 #### `install --prune`（BL-15）
 
-从 `wtool.xml` 里**删掉**一条 `<link>` 之后重装，旧软链还留在磁盘上（journal 里也还在），
+从 `wtool.xml` 里**删掉**一条 `<export_bin>` / `<export_usr>` 之后重装，旧 L2 链还留在磁盘上（journal 里也还在），
 一直到 uninstall 才清 —— 这是默认行为（restow 不删别人没让它删的东西）。
 `--prune` 是显式的收尾清理，判据是 **journal**（"我做过什么"）而不是扫磁盘：
 
@@ -370,17 +416,17 @@ wtool:              WTOOL_ARTIFACTS=… WTOOL_STATE_DIR=…
 
 ### uninstall
 
-1. 先算出"**还有别的项目要这条软链吗**"：判据是磁盘上所有 wtool 项目的 `wtool.xml`
-   （不是 registry —— registry 一条落点只有一个主人，而"两个项目都要 `~/.gitconfig`"
-   完全合理）。有别人要用就留着，并把登记改到那个项目名下。
-2. 由 py 计算 rc 块移除后的内容；**先校验 journal 里记录的块 sha 与磁盘上现存的块 sha 是否一致**，不一致则拒绝（`--force` 强行移除）。
+1. 由 py 计算 rc 块移除后的内容；**先校验 journal 里记录的块 sha 与磁盘上现存的块 sha 是否一致**，不一致则拒绝（`--force` 强行移除）。
 3. 落盘 rc 新内容。
 4. **逆序重放 journal**：
-   - `link` → 仅当它仍是软链**且指向仍与记录一致**时删除；别人还要用的跳过；否则警告并跳过
+   - `link` → 仅当它仍是软链**且指向仍与记录一致**时删除；否则警告并跳过
+     （**L1 与 L2 都在这一支被拆掉**；落点是**独占**的 —— 同一条 L2 被两个项目要，
+     在 install 那一步就报错了，所以这里没有"留给别人"这回事）
    - `mkdir` → 仅当为空时 `rmdir`
    - `backup` → 若原文件已不存在则还原
    - `sysfile` → **不动**（系统文件归 `sudo-uninstall`，uninstall 不越权）
-5. **最后**跑项目自己的 `scripts/install.sh --uninstall`（②' 拆 `$HOME` 软链 → ①' 跑脚本）。
+5. **最后**跑项目自己的 `scripts/install.sh --uninstall`（②' 拆 L1/L2 → ①' 跑脚本）——
+   脚本跑的时候链已经拆完了（配对顺序，`tests/contract_test.sh` 场景 2b 守着这条）。
 6. 清理状态目录：**只删 install 自己的账**（`meta.tsv` / `journal.tsv` / `env.*` /
    `artifacts.tsv` / `actions.tsv` / `publish.tsv`）。系统层的账
    （`system.tsv` / `system/` / `apt.tsv` / `provisioned/`）**留着** ——
@@ -418,6 +464,9 @@ wtool: error: --id 已经删掉：项目身份就是它的路径，直接写路�
 - 有项目装着就保证它在；一个项目都不剩就收走（`wt_env_sync` 全量重算时决定）
 - **只删软链，不动 `~/.wtool/usr` 里的实体** —— 那是编译/下载产物，归 `uninstall` 和项目脚本管
 - 它**不进 registry**（进去的话，最后一个项目卸完它还挂着，`~/usr` 就永远收不走）
+- 目标目录 `<dot>/usr` **由 `plan_env` 发一条 `mkdir` 行保证存在**：`<dot>/usr/<part>`
+  现在是 **L2 的落点**，但一台机器上只有 ① 类项目时没有任何 L2 去建它 ——
+  不补这一条，`~/usr` 就是一条悬空链（`wtool check` 会正确地报出来）
 
 ### 全局写锁（BL-17）
 
@@ -446,7 +495,7 @@ wtool: error: --id 已经删掉：项目身份就是它的路径，直接写路�
 ```sh
 # >>> wtool:<路径> schema=1 engine=1.0.0 prio=50 head=<commit> manifest=<sha12> >>>
 WTOOL_PROJECT_ID='<路径>'
-WTOOL_PROJECT_DIR="$HOME/.wtool/wtool-work-dir/links/<路径>"
+WTOOL_PROJECT_DIR="$HOME/.wtool/wtool/<路径>"        # 就是 **L1 链**（ADR-0045）
 export WTOOL_PROJECT_ID WTOOL_PROJECT_DIR
 WTOOL_PROJECT_ROOT=$(readlink -f -- "$WTOOL_PROJECT_DIR" 2>/dev/null || printf '%s' "$WTOOL_PROJECT_DIR")
 export WTOOL_PROJECT_ROOT
@@ -467,12 +516,13 @@ export WTOOL_PROJECT_ROOT
 
 三个 `WTOOL_PROJECT_*` 变量**只在 source 期间有效**——多个项目的块会依次覆盖它们。
 env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_DIR="$WTOOL_PROJECT_DIR"`）。
-`WTOOL_PROJECT_ROOT` 在 source 时由中转链接实时解析，所以仓库搬家后它自动指向新位置。
+`WTOOL_PROJECT_ROOT` 在 source 时由 **L1 链**实时解析，所以仓库搬家后它自动指向新位置。
 
 四条设计要点：
 
 1. **`[ -r ... ] &&` 守卫**：仓库被删/搬走后，shell 不报错。
-2. **只走中转链接**：块里不出现仓库真实路径，所以仓库可以随便搬。
+2. **只走 L1 链**：块里不出现仓库真实路径（只有 `$HOME/.wtool/wtool/<路径>`），
+   所以仓库可以随便搬。
 3. **排序插入而非盲目 append**：插入点是"最后一个排序小于我的块之后"，因此与安装顺序无关。
 4. **块内容只依赖 `<路径>`**：搬仓库后 rc 文件字节不变（测试场景 8 验证）。
 
@@ -498,7 +548,7 @@ env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_
 | 未知 `schema` → 拒绝并提示升级 bootstrap | `SCHEMA_SUPPORTED` 白名单 |
 | 未知元素 → 报错（而不是静默忽略），**`x-*` 也一样报错** | 避免拼写错误悄悄生效。`<wtool>` 里**没有**"留给用户的自定义元素"这回事：`lib/wtool_plan.py` 对任何不认识的标签都拒绝（实测 `<x-note>` → `error: 未知元素 <x-note>`，退出码 1）。报错本身给出真出路（`<include src="wtool.local.xml" optional="true"/>`），**不再**教人写 `x-*`（那是它刚拒绝的东西，照做还是同一个错 —— BL-23） |
 | 未知属性 → 目前静默忽略 | 便于老引擎读新清单的"降级运行" |
-| **旧标签继续认，但一定警告** | `<env>` / `<link src= dest=>` / `<provision>` / `<system-file>` 解析照旧，`validate` 和每次解析都提示改成新标签；等所有项目迁完再删兼容分支 |
+| **旧标签：一部分删、一部分仍然认** | `<link>`（任何写法）**已经删掉解析**（ADR-0045 / D3，报错并给出照做就行的改法）；`<env src= shells=>` / `<provision>` / `<system-file>` 仍然认，但每次解析都警告 |
 | **删掉的命令不给兼容窗口** | `download` / `publish` 直接 `die` + 指路（语义变了，见 §1）；`provision` / `table` / `list` / `env` / `scaffold` 同理 |
 | `plan.tsv` 列只增不改 | sh 读取时用 `read -r a b c d e f`，多余列被忽略 |
 | 存根只依赖 `$WTOOL_BOOTSTRAP` 和 `wtool.sh` 的 `install|uninstall` 子命令 | 引擎内部重构不影响项目 |
@@ -1256,7 +1306,7 @@ blob 按内容命名所以父链天然只存一份。五条命令分工：
 | 列 | 能力有无（静态：看项目文件） | 做没做过 / 别的状态（动态：看状态目录、看磁盘） |
 |---|---|---|
 | `build` | `scripts/build.sh` 或 `build/layers.tsv` | `actions.tsv` 里有 `build` → `已完成` |
-| `install` | 有 `<link>`/`<zshrc>`/`<bashrc>`，或 `scripts/install.sh` | `journal.tsv`/`registry.tsv` 记着 → `已完成`；有 `build` 能力而 `__output/` 空 → `待产出` |
+| `install` | 有 `<export_bin>`/`<export_usr>`/`<generate>`/`<zshrc>`/`<bashrc>`，或 `scripts/install.sh` | `journal.tsv`/`registry.tsv` 记着 → `已完成`；有 `build` 能力而 `__output/` 空 → `待产出` |
 | `sudo` | 清单里有 `sysfile`/`source`/`task` | `provisioned/` mark 或 `system/` 或 `apt.tsv` → `已完成` |
 | `pack` | 永远可以（源码包谁都能打） | `__release/dist.json` 在 → `已完成`；有 `build` 能力而 `__output/` 空 → `待产出` |
 | `publish` | `<publish kind="none"/>` → `不支持` | `publish.tsv` 有记录 → `已完成` |
@@ -1322,7 +1372,7 @@ wtool _complete <正在敲的词> [已经敲过的词...]   # 内部命令（下
 
 ### `wtool repair [<项目>|all]`
 
-修 `check` 报出来的，**只重建、不删除**：补中转链接、补 `$HOME` 软链、重写 env 块与汇总、
+修 `check` 报出来的，**只重建、不删除**：补 L1 链、补 L2 链、重写 env 块与汇总、
 把 `~/usr` 重新接上。它**不跑项目自己的 `install.sh`** —— 那可能重新编译或联网下载，
 不是"修一下"该干的事；实体确实没了就告诉你跑 `wtool install`。
 

@@ -66,7 +66,8 @@ cat > "$P/wtool.xml" <<'EOF'
 <wtool schema="1" kind="docker" priority="50">
   <zshrc  src="env.zsh"/>
   <bashrc src="env.bash"/>
-  <link home="~/.tmux.conf" wtool="~/.wtool/.tmux.conf" subproject="tmux.conf"/>
+  <!-- ADR-0045：装什么由精确语义的导出标签说（<link> 已删） -->
+  <export_bin src="__output/ubuntu_24.04/bin/tmux"/>
 </wtool>
 EOF
 cat > "$P/.gitignore" <<'EOF'
