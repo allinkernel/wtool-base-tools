@@ -669,6 +669,27 @@ _rc=0
 "$WT" check "$CHX" >/dev/null 2>&1 || _rc=$?
 chk "⑤ .tar.xz 项目 check 干净" "$_rc" "0"
 
+# ★ ② 类的 `unpack-release` **不能**被自己的离线包堵死（2026-10-14 修的缺陷）
+#   症状：`pack-offline-release` 会给每个项目写一份 `scripts/release.json`（离线包的
+#   artifacts 对照表）；② 类因此从"没有 release.json → 走 `<muslbin dest=>`"变成
+#   "有 release.json → 走对照表"，而那张表里只有离线族那一个资产（会被 skip）→
+#   计划算不出来 → **② 类的升级路（download → unpack → install）整个失效**（实测撞到）。
+#   口径：② 类"解到哪"的权威声明是 `wtool.xml` 的 `<muslbin dest=>`（D50），
+#   所以这时回退到它。判据：先打一次离线包（它会写 release.json），**再 unpack 一次**
+#   必须照样成功，而且产物真的解出来。
+_rc=0
+"$WT" pack-offline-release "$CHX" >/dev/null 2>&1 || _rc=$?
+chk "① 先给 ② 类项目打一个离线自足包（它会写 scripts/release.json）" "$_rc" "0"
+[ -f "$CHX/scripts/release.json" ] \
+    && ok "① release.json 生成了" || bad "① release.json 没生成"
+rm -rf "$CHX/__output"
+_rc=0
+_out=$("$WT" unpack-release "$CHX" 2>&1) || _rc=$?
+chk "★② 有了离线包之后 unpack-release **照样能用**（回退到 <muslbin dest=>）" "$_rc" "0"
+[ -x "$CHX/__output/usr/bin/xztool" ] \
+    && ok "★② 产物真的解出来了（不是退化成空成功）" \
+    || bad "★② 产物没出来" "$_out"
+
 printf '\n----------------------------------------\n'
 printf 'muslbin_test: PASS %d  FAIL %d\n' "$pass" "$fail"
 [ "$fail" = 0 ]

@@ -5512,6 +5512,17 @@ def unpack_plan(args):
         rows.append(("verify", name, "-", "-", shas.get(name, "-"), volspec, "source"))
 
     if not any(r[0] in ("entry", "verify") for r in rows):
+        # ‼️ ② 类（muslbin）的**回退**（2026-10-14 修）：`pack-offline-release` 会给
+        #    每个项目都写一份 `scripts/release.json`（离线包的 artifacts 对照表），
+        #    ② 类项目因此从"没有 release.json → 走 `<muslbin member= dest=>`"变成
+        #    "有 release.json → 走对照表"，而那张表里**只有离线族那一个资产**（会被
+        #    skip）→ 计划算不出来 → `unpack-release` 整个失效 = **② 类的升级路
+        #    （download → unpack → install）被自己的离线包堵死**。实测就是这么撞到的。
+        #    口径：② 类"解到哪"的**权威声明**是 `wtool.xml` 的 `<muslbin dest=>`
+        #    （D50：② 不产产物包），所以这时回退到它，而不是报"一个都没有"。
+        mbs = _muslbin_entries(root)
+        if mbs:
+            return _unpack_plan_muslbin(mbs, pub)
         sys.stderr.write(
             "release.json 对照表里声明的资产，本地一个都没有 —— 先把包和 dist.json\n"
             "  放到同一个目录（默认 <项目>/__release/；--from=<目录> 可以指到别处；\n"

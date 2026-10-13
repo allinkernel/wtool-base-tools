@@ -76,8 +76,9 @@
                                                          整机迁移包 → **清单里 wtool-doc 那个仓**的 release 页
                                                          （§7.2 第 6 条；仓库名从清单查，不写死）
   wtool download-release [<项目>...|all] [--dry-run]      GitHub Release → __release/（**只下载**；②③）
-  wtool unpack-release <项目>... [--from=目录]             __release/ → 项目 __output/（**不联网**；
-                                                         解到哪读 release.json 的对照表 —— 声明式，D57）
+  wtool unpack-release <项目>...|all [--from=目录]         __release/ → 项目 __output/（**不联网**；
+                                                         解到哪读 release.json 的对照表 —— 声明式，D57；
+                                                         ② 类回退到 <muslbin member= dest=>，见下）
 
 层（第二条发布通道：容器镜像仓库，详见 §14）
   wtool _layer-save   <项目> --image=<镜像> [--target=<os_ver>] [--layer=<层名>]
@@ -628,7 +629,7 @@ env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_
 |---|---|---|---|
 | pairing | `tests/pairing_test.sh` | 35 | install → uninstall 字节级回退、幂等、顺序无关、脏仓库拒绝、dry-run、搬家、`doctor --quiet` 可 eval |
 | sudo-install | `tests/provision_test.sh` | 40 | `/etc` 写入与备份、`sudo-uninstall` 还原、`<source>` 编译型、task 的 marker 幂等、when 过滤 |
-| publish | `tests/publish_test.sh` | 192 | 源码包形状、相对软链不被改写、第三方仓保护、gh 抖动时的复用、同名 commit 重发（非交互拒绝 / `--force` 放行）、**资产名全是 ASCII**（`--dry-run` 打出的清单 + `release.json` 的 `assets[]` —— H27 / ADR-0040）、**建 release 带 `--target=<被打包的 commit>`**（打包后又提交也不许拿 HEAD 顶替；拿不到就警告 + 不传）、**下载表刷新认发布声明里的 tag**（正反两面 + 没发布过的退回模板 + 前缀防撞名 + `unzip`/`tar` 分发 + 幂等） —— ADR-0041 场景 16/17、**场景 19 离线族 `publish-offline-release`**（两个 release 页/tag 分开、只传离线族的文件、tag 不带 `offline` 就拒、两族 tags 在同一个 `release.json` 里各就各位 —— ADR-0045 / D54 / D56） |
+| publish | `tests/publish_test.sh` | 193 | 源码包形状、相对软链不被改写、第三方仓保护、gh 抖动时的复用、同名 commit 重发（非交互拒绝 / `--force` 放行）、**资产名全是 ASCII**（`--dry-run` 打出的清单 + `release.json` 的 `assets[]` —— H27 / ADR-0040）、**建 release 带 `--target=<被打包的 commit>`**（打包后又提交也不许拿 HEAD 顶替；拿不到就警告 + 不传）、**下载表刷新认发布声明里的 tag**（正反两面 + 没发布过的退回模板 + 前缀防撞名 + `unzip`/`tar` 分发 + 幂等） —— ADR-0041 场景 16/17、**场景 19 离线族 `publish-offline-release`**（两个 release 页/tag 分开、只传离线族的文件、tag 不带 `offline` 就拒、两族 tags 在同一个 `release.json` 里各就各位 —— ADR-0045 / D54 / D56） |
 | table | `tests/table_test.sh` | 106 | 能力表格（11 列的格子语义与列对齐）、图例逐条写全命令名、`__output/` 这个词、两张纯 ASCII 图（install 的 route 2 只写 unpack-release；release 图里 download 落 `__release/`、unpack 才到 `__output/`）|
 | release-copy | `tests/release_copy_test.sh` | 17 | 从发布包解压出来的工作区（没有 `.git`、没有 repo 客户端） |
 | release | `tests/release_test.sh` | 177 | pack-release 读 `.gitignore`、分卷、dist.json、unpack-release 往返与拒绝坏卷、**`unpack-release --dry-run` 不写 `__output/`**、**`--from=<目录>` 真被用上**（这两个原来都被静默忽略/无守卫）、**资产名全是 ASCII + 上一版留下的中文名报一声再删**（H27 / ADR-0040）、**下载块生成器按资产形状生成**（前缀防撞名 / `unzip` 与 `tar` 分发 / 分卷 `cat` 拼回 / `Expand-Archive`、`copy /b` / 块里的命令名与安装入口与现状一致 —— ADR-0041 场景 9）、**场景 10 离线族 `pack-offline-release`**（资产名按 kind / 自足包顶层 `wtool/` / 不放 `dist.json` / `.sha256` / 分卷 `check-hash.sh` 在干净 PATH 里直接跑且坏卷要报错 / 安装器包 `wtool-base-tools.tar.gz` 是 `.wtool/` 树且 `install.sh` 是相对软链 / ① 敲非离线族四条全被门禁拒 / **改对照表的 `to` 落点就跟着改** —— ADR-0045 / D50 / D51 / D54 / D57） |
@@ -1399,6 +1400,19 @@ wtool install shell/zsh                          # ⑤ 重新装
 > （L1 实体化 + L2 留链 + `--check` + 分卷 `wtool-all-ubuntu<版本>.tar.gz`，发到 wtool-doc），
 > `each` = 工作区里每个项目各产一个自足包（**这条就是 `all` 以前的意思**）。
 > 两者的对照表、判据、打包在哪打，见上一节「`all` vs `each`」。
+
+#### `unpack-release` 的落点：**对照表优先，② 类回退到 `<muslbin>`**（2026-10-14）
+
+- 有 `scripts/release.json` 的 `artifacts` 对照表 → 按它解（D57，**不猜**）；
+- 表里**全是离线族**的资产（`release-offline.zip` / 安装器包 —— 那些按设计是断网机
+  手工 `unzip` + `cp -a`，不走这条命令）**而且**项目自己有 `<muslbin member= dest=>`
+  → **回退到 `<muslbin>`**。
+  ⚠️ 为什么必须回退：`pack-offline-release` 会给**每个**项目写一份 `release.json`
+  （记离线包解到哪），② 类项目因此从"没有 release.json"变成"有"；如果这时只认对照表，
+  就会出现"本地一个都没有"→ 计划算不出来 → **② 类的升级路
+  （`download-release` → `unpack-release` → `install`）被自己的离线包堵死**（实测撞到，
+  `muslbin_test.sh` 里现在有这条回归断言）。
+  口径：② 类"解到哪"的**权威声明**是 `wtool.xml` 的 `<muslbin dest=>`（D50：② 不产产物包）。
 
 ### publish-release：只上传
 
