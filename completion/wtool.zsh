@@ -25,4 +25,12 @@ _wtool() {
 if ! (( $+functions[compdef] )); then
     autoload -Uz compinit 2>/dev/null && compinit -C -u 2>/dev/null
 fi
-(( $+functions[compdef] )) && compdef _wtool wtool
+# ‼️ 末行必须是**带 `if` 的**写法，不能写成 `(( … )) && compdef …`：
+#    这个文件是**被 source** 的，它的状态会一路传回 `$WTOOL_HOME/env.zsh` 的
+#    `source`（本项目 env.zsh 的最后一句就是 source 它）。compdef 拿不到时
+#    （实测：容器里 zsh 的 completion 模块不在它编译进去的路径上 → compinit 失败）
+#    那种写法短路成 1 → `source env.zsh` 返回 1 → install.sh 的 ⑤ 自检当场失败，
+#    用户看到的是"装完了但自检不过"。`if` 的假分支状态是 0。
+if (( $+functions[compdef] )); then
+    compdef _wtool wtool
+fi

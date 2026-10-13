@@ -434,6 +434,13 @@ fi
 # 退出码（非 0 = 这一步没过，install.sh 也跟着非 0）：
 #   3 = source env.<shell> 就失败   4 = source 之后找不到 wtool 命令
 #   5 = \$WTOOL_HOME/usr/bin 不在 PATH 里   6 = wtool check 报了问题
+#
+# ‼️ 子进程里**只摘 WTOOL_\***（而不是 `env -i` 清空一切）：容器验收里实测撞过 ——
+#    python3 是宿主挂进来的，靠 `LD_LIBRARY_PATH` 找 libexpat，`env -i` 一清就
+#    "error while loading shared libraries: libexpat.so.1"（引擎还没跑就死了）。
+#    "干净"要的是"**没有 wtool 的痕迹**"：所有引擎变量都是 `WTOOL_` 前缀，
+#    逐个 -u 掉即可；PATH 也换成摘掉 wtool 目录的那一份。这比 `env -i` 更像
+#    "用户新开一个终端"（新终端当然继承机器的库路径与 locale）。
 # ==========================================================================
 say "⑤ 自检：起新进程 source env.<shell> + wtool check"
 _selfcheck_ok=0
@@ -445,6 +452,11 @@ else
         | awk -v h="$WTOOL_HOME_DIR" -v p="$proj" \
               'length($0) && index($0,h)==0 && index($0,p)==0 {printf "%s%s", sep, $0; sep=":"}')
     [ -n "$_clean_path" ] || _clean_path=/usr/bin:/bin
+    # 要摘掉的变量（-u 列表）：环境里所有 WTOOL_ 开头的（引擎自己导出的那一批）
+    _unset_args=""
+    for _uv in $(env | sed -n 's/^\(WTOOL[A-Za-z_]*\)=.*/-u \1/p'); do
+        _unset_args="$_unset_args $_uv"
+    done
 
     for _sh in zsh bash; do
         if ! command -v "$_sh" >/dev/null 2>&1; then
@@ -464,11 +476,12 @@ case \":\$PATH:\" in *\":\$WTOOL_HOME/usr/bin:\"*) ;; *) echo 'SELFCHECK-FAIL PA
 echo \"SELFCHECK-OK wtool=\$_w\"
 wtool check || exit 6"
         _rc=0
-        env -i HOME="$HOME_DIR" PATH="$_clean_path" \
+        # shellcheck disable=SC2086
+        env $_unset_args HOME="$HOME_DIR" PATH="$_clean_path" \
             "$_sh" -c "$_code" _ "$WTOOL_HOME_DIR" > "$_log" 2>&1 || _rc=$?
         if [ "$_rc" = 0 ]; then
             say "  $_sh：✔ $(sed -n 's/^SELFCHECK-OK //p' "$_log" | head -1)"
-            say "        （PATH 是摘干净了 wtool 目录的 —— wtool 是 source env.$_sh 之后才有的）"
+            say "        （PATH 摘掉了 wtool 目录、WTOOL_* 也全摘了 —— wtool 是 source env.$_sh 之后才有的）"
             _selfcheck_ok=1
             continue
         fi
@@ -485,7 +498,8 @@ wtool check || exit 6"
         if [ "$_rc" = 6 ]; then
             # 分清"装坏了"和"工作区里别的项目有旧账"—— 后者不该让人以为安装器坏了
             _only=0
-            env -i HOME="$HOME_DIR" PATH="$_clean_path" "$_sh" -c \
+            # shellcheck disable=SC2086
+            env $_unset_args HOME="$HOME_DIR" PATH="$_clean_path" "$_sh" -c \
                 "WTOOL_HOME=\$1; export WTOOL_HOME; . \"\$WTOOL_HOME/env.$_sh\" >/dev/null 2>&1; wtool check \"\$2\"" \
                 _ "$WTOOL_HOME_DIR" "$proj_rel" >> "$_log" 2>&1 || _only=$?
             if [ "$_only" = 0 ]; then

@@ -22,4 +22,11 @@ _wtool_complete() {
     return 0
 }
 
-complete -o default -o bashdefault -F _wtool_complete wtool
+# ‼️ 末尾状态必须是 0：这个文件被 `env.bash` source，状态会一路传回
+#    `$WTOOL_HOME/env.bash` 的 source（同一个坑在 `wtool.zsh` 那边踩过：
+#    compdef 拿不到 → `(( … )) && compdef …` 短路成 1 → source 整条链返回 1 →
+#    install.sh 的 ⑤ 自检失败）。`complete` 是 bash 内建，正常都成功；
+#    万一不在（被非 bash 的 shell source），也别把非 0 传出去。
+if type complete >/dev/null 2>&1; then
+    complete -o default -o bashdefault -F _wtool_complete wtool
+fi
