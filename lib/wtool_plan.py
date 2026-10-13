@@ -4985,6 +4985,45 @@ def do_check(args):
             # 也可能只是拼错了。留给下面残渣那一节去认，认不出就一条也不报。
             want_id = project_id_of(want_abs, root)
 
+    # ---- 全局：账本本身（ADR-0045 §1.8 职责② / D42）--------------------------
+    # `$WTOOL_HOME/var/` 是账本落点：registry.tsv / <项目>/journal.tsv / meta.tsv /
+    # env 块。**它不能删** —— 而删掉之后，下面那些检查会**一条都不报**：因为
+    # "该有什么"本身就存在账本里，账本没了就无从对起。实测：
+    #     rm -rf "$WTOOL_HOME/var" && wtool check     # 旧行为 → "一切对得上"
+    # 判据只能反过来：**装过的痕迹还在不在**。`env.{zsh,bash}` / `wtool/` / `usr/`
+    # 里只要有一个还在，就说明这台机器上确实装过 wtool，账本不该凭空消失。
+    if not os.path.isdir(state):
+        traces = [p for p in (os.path.join(home, "env.zsh"),
+                              os.path.join(home, "env.bash"),
+                              os.path.join(home, WTOOL_SUBDIR),
+                              os.path.join(home, USR_SUBDIR))
+                  if os.path.lexists(p)]
+        if traces:
+            bad("-", "账本目录不见了：%s（就是 $WTOOL_HOME/var）—— 它是 check / "
+                     "uninstall 的**唯一依据**，删了之后\"该有什么\"就无从查起"
+                     "（这里看到装过的痕迹还在：%s）。"
+                     "重建：在 $WTOOL_HOME 里再跑一次 install.sh"
+                     % (state, "、".join(traces)))
+
+    # ---- 全局：安装器自己那两笔账（`$WTOOL_HOME/var/installer/`，§1.8 ①②）----
+    # `install.sh` 把两条入口链记在这儿（links.tsv）。**有记录才查**：只跑过
+    # `wtool install <项目>` 的机器（很多夹具就是这样）没有这两条链，不该报红。
+    _inst_links = os.path.join(state, "installer", "links.tsv")
+    if os.path.isfile(_inst_links):
+        for row in _read_tsv(_inst_links):
+            if len(row) < 2 or not row[0] or not row[1]:
+                continue
+            dest = os.path.join(home, row[0])
+            want = row[1]
+            if not os.path.islink(dest):
+                what = "那条链不在了" if not os.path.lexists(dest) \
+                    else "已经不是软链了（被换成了实体）"
+                bad("-", "%s %s —— install.sh 建的入口链（职责①）；"
+                         "在 $WTOOL_HOME 里再跑一次 install.sh 会补回来" % (dest, what))
+            elif os.readlink(dest) != want:
+                bad("-", "%s 指向变了: %s（记录的是 %s）—— 入口链（职责①）"
+                    % (dest, os.readlink(dest), want))
+
     # ---- 全局：~/usr 这条引擎自己造的软链（影子 prefix 的入口）
     # 新口径下 `~/usr` 和 `$WTOOL_HOME/usr` **不是一个目录**，所以落点得分开算：
     # `usr_dest` 靠被管理的家目录，`usr_target` 靠 `--home`（= `.wtool` 根）。
