@@ -269,6 +269,10 @@ ARTIFACT_ROOT = {
 # 都要往 `usr/bin` 里放东西）→ `usr/<part>` 必须是**实体目录**，里面**一条一链**。
 WTOOL_SUBDIR = "wtool"
 USR_SUBDIR = "usr"
+# 账本子目录（ADR-0045 §1.9 / 目录规范 §10.1）：
+# `$WTOOL_HOME/var/` —— registry.tsv / <项目>/journal.tsv / meta.tsv / env 块。
+# **跟着 `.wtool` 一起迁移**（没有它 check/uninstall 就瞎了）。
+STATE_VAR_SUBDIR = "var"
 # L2 白名单 6 个（D19）。写别的 part（`.config`、`.local/share`…）**报错** ——
 # 不留"任意 dest"的口子（D6/D9），要加得先找用户拍板。
 USR_PARTS = ("bin", "lib", "libexec", "share", "include", "local")
@@ -279,28 +283,32 @@ SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
 def dot_dir(home):
-    """`.wtool` 根目录 = 新模型里的 `$WTOOL_HOME`（D47）。
+    """`.wtool` 根目录 —— **就是 `$WTOOL_HOME` 本身**（ADR-0045 §1.1 / D47）。
 
-    = 今天引擎里 `WTOOL_PREFIX` 的父目录（`WTOOL_PREFIX` 永远是 `<dot>/usr`），
-    也是影子 HOME 的根。**L1/L2 的落点全从这一个函数算**。
+    ⚠️ 老口径（第 5a 块之前）：`home` 是「被管理的家目录」，`.wtool` 是它下面的
+    `SHADOW_ROOT_NAME`，所以这里要 `join(home, ".wtool")`。**同名不同义**，
+    新口径下 `home` 参数**已经是** `.wtool` 根 —— 本函数现在只是把那一层的
+    历史包袱收口（改名的涟漪只落在它一处，见 docs/wtool-home-rename.md）。
+
+    调用方（`wtool.sh` / `wtool_fs.sh`）传的是 `--home "$WTOOL_HOME"`。
     """
-    return os.path.join(os.path.abspath(home), SHADOW_ROOT_NAME)
+    return os.path.abspath(home)
 
 
 def l1_path(home, project_id):
-    """L1 在磁盘上的真实路径：`<dot>/wtool/<项目路径>`（D5：按项目惰性建）。"""
+    """L1 在磁盘上的真实路径：`$WTOOL_HOME/wtool/<项目路径>`（D5：按项目惰性建）。"""
     return os.path.join(dot_dir(home), WTOOL_SUBDIR, project_id)
 
 
 def l1_path_shell(project_id):
-    """写进 env 块的写法：`$HOME`/`$WTOOL_HOME` 留到 source 时再展开。
+    """写进 env 块的写法：`$WTOOL_HOME` 留到 source 时再展开。
 
-    ⚠️ 这里故意写 `$HOME/.wtool/…` 而不是 `$WTOOL_HOME/…`：今天 `WTOOL_HOME`
-    指的是**被管理的家目录**（默认就是 `$HOME`），写成 `$WTOOL_HOME/wtool/…`
-    会在老口径下解析成 `$HOME/wtool/…`（错的）。改名那一轮把 `$HOME/.wtool`
-    换成 `$WTOOL_HOME` 即可 —— 路径本身不动。
+    ⚠️ 老口径这里写的是 `"$HOME/.wtool/wtool/<项目>"`（因为那时 `WTOOL_HOME`
+    是**被管理的家目录**，写 `$WTOOL_HOME/wtool/…` 会解析成 `$HOME/wtool/…`）。
+    D48 之后 rc 里 `export WTOOL_HOME=~/.wtool`，所以现在**就该**写
+    `$WTOOL_HOME/wtool/<项目>`：`.wtool` 搬到别处时 env 块一个字都不用改。
     """
-    return '"$HOME/%s/%s/%s"' % (SHADOW_ROOT_NAME, WTOOL_SUBDIR, project_id)
+    return '"$%s/%s/%s"' % ("WTOOL_HOME", WTOOL_SUBDIR, project_id)
 
 
 def l2_dir(home, part):
@@ -2999,39 +3007,179 @@ def table_summary(projects):
 
 
 # --------------------------------------------------------------------------
-# 环境变量汇总
+# env.zsh / env.bash —— `$WTOOL_HOME` 下那两个汇总文件（ADR-0045 §1.2 / D48）
 #
-# 每个项目的 env 块单独存在 $WTOOL_STATE/<id>/env.<shell>，
-# 这里把它们按 (priority, id) 拼成一个文件，再由用户 rc 里的**唯一一个**
-# loader 块 source 进去。
+# 用户的 rc 里**只有两行**（rc 的最后两行）：
+#
+#     export WTOOL_HOME=~/.wtool
+#     source ${WTOOL_HOME}/env.zsh        # bash 用户写 env.bash
+#
+# `$WTOOL_HOME/env.zsh`（和逐字等价的 `env.bash`）长这样：
+#
+#     ① 校验片段：WTOOL_HOME 空 / 目录不在 → 打印"请在你的 rc 里加这两行"，
+#        然后 `return 1 2>/dev/null || exit 1`（被 source 时 return，被 sh 跑时 exit）；
+#     ② 按 (priority, 项目路径) 顺序 source 各项目的 env 块
+#        （块文件在账本里：`$WTOOL_HOME/var/<项目 id>/env.<shell>`）。
 #
 # 为什么不让每个项目往用户的 rc 里各写一段：
 #   * 用户 rc 会被 N 个项目改来改去，脏且危险（要在别人的文件里做排序插入）
 #   * 想彻底撤销得逐个块删，漏一个就留垃圾
-# 现在用户的 rc 里只有一个块，删掉它 wtool 对环境的影响就没了。
+# 现在用户的 rc 里只有那两行，删掉它们 wtool 对环境的影响就没了。
+#
+# 旧形态（wtool 维护的 `# >>> wtool >>>` 块 / 老的 per-project 块）仍然**认**，
+# 但只用于**迁移**：`render_rc` 会把它们换成那两行（幂等）。
 # --------------------------------------------------------------------------
 LOADER_BEGIN = "# >>> wtool >>>"
 LOADER_END = "# <<< wtool <<<"
 LOADER_OLD_RE = re.compile(r"^# >>> wtool:(\S+) .* >>>\s*$")
 
-AGG_HEADER = """# 由 wtool 生成 —— 不要手改，改了下次 install/uninstall 会被覆盖。
+# 校验片段：zsh / bash **逐字等价**（ADR-0045 §1.2 的文案，一个字都不许漂）。
+# `return 1 2>/dev/null || exit 1`：被 source 时 `return` 生效（`2>/dev/null`
+# 吞掉"不在函数里"的两种 shell 的抱怨）；被 `sh env.zsh` 直接跑时 `return`
+# 失败 → 走 `exit 1`。**两种用法都非 0**。
+ENV_CHECK_LINES = [
+    'if [ -z "${WTOOL_HOME:-}" ] || [ ! -d "$WTOOL_HOME" ]; then',
+    '  echo "wtool: WTOOL_HOME 未设置或不存在（当前值：\'${WTOOL_HOME:-}\'）。" >&2',
+    '  echo "       请在你的 ~/.zshrc 最后加上这两行（bash 用 env.bash）：" >&2',
+    '  echo "         export WTOOL_HOME=~/.wtool" >&2',
+    '  echo "         source \\${WTOOL_HOME}/env.zsh" >&2',
+    '  return 1 2>/dev/null || exit 1',
+    'fi',
+]
+
+ENV_AGG_HEADER = """# 由 wtool 生成 —— 不要手改，改了下次 install/uninstall 会被覆盖。
 #
-# 每个项目的环境变量按 priority 排在这里；要改内容请去改各自项目里的
-# env 文件（见每段开头的 # >>> wtool:<项目> 注释）。
+# 每个项目的环境变量按 (priority, 项目路径) 升序 source 在下面。
+# 要改内容请去改各自项目里的 env 文件（见每段开头的 # >>> wtool:<项目> 注释）。
 #
-# 这个文件被 ~/.{shell}rc 里的一小段托管块 source。想彻底去掉 wtool
-# 对环境的影响，删掉那里的 # >>> wtool >>> 块即可。
+# rc 里只有两行（`export WTOOL_HOME=…` + `source ${WTOOL_HOME}/env.{zsh,bash}`）——
+# 想彻底去掉 wtool 对环境的影响，删掉那两行即可。
+#
+# 这个文件**不是**日志、也不是账本：它是从账本
+# （$WTOOL_HOME/var/<项目>/env.<shell>）现算出来的。删了它 wtool check 会报，
+# 重新 install/uninstall 一次就回来了。
 """
 
+# rc 里那两行的判据（幂等用）。允许行尾注释、允许 `~`。
+RC_EXPORT_RE = re.compile(
+    r"""^export\s+WTOOL_HOME=(\S+?)\s*(?:\#.*)?$""")
+RC_SOURCE_RE = re.compile(
+    r"""^(?:source|\.)\s+\$\{?WTOOL_HOME\}?/env\.(zsh|bash)\s*(?:\#.*)?$""")
 
-def _loader_block(shell):
+
+def rc_export_line(home):
+    """rc 里第一行：`export WTOOL_HOME=~/.wtool`。
+
+    `$HOME` 下就用 `~`（D48 的口径：`.wtool` 搬到别处**只改这一行**）；
+    装在别处就写绝对路径（`python3` 只算不写，展开 `~` 是 shell 的事，
+    这里**不展开** —— 展开成 `/home/x` 会让"换个用户名"的迁移失效）。
+    """
+    home = os.path.abspath(home)
+    managed = _managed_home()
+    if managed and os.path.abspath(managed) == os.path.dirname(home) \
+            and os.path.basename(home) == SHADOW_ROOT_NAME:
+        return "export WTOOL_HOME=~/%s" % SHADOW_ROOT_NAME
+    return "export WTOOL_HOME=%s" % home
+
+
+def rc_lines_for(home, shell):
+    """rc 最后两行的**全文**（含注释）。"""
     return [
-        LOADER_BEGIN,
-        "# wtool 装的东西都从这里生效。所有项目的环境变量都收在下面这个文件里，",
-        "# 这里只是把它 source 进来 —— 想彻底去掉 wtool 的影响，删掉这个块即可。",
-        '[ -f "$HOME/.wtool/.%src" ] && . "$HOME/.wtool/.%src"' % (shell, shell),
-        LOADER_END,
+        rc_export_line(home),
+        "source ${WTOOL_HOME}/env.%s" % shell,
     ]
+
+
+def rc_has_lines(text, shell):
+    """rc 里已经有了那两行（幂等判据）。
+
+    两行都在就算 —— 不要求它们紧挨着、也不要求它们是文件的最后两行：
+    用户可能在自己那行 `source` 后面又加了别的，重新 install 不该去动它。
+
+    第一行的值不比对（rc 里的 `export` 是**用户**声明的路径，可以是任意位置）；
+    只要求那是一条 `export WTOOL_HOME=…`。
+    """
+    if not text:
+        return False
+    have_export = have_source = False
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if RC_EXPORT_RE.match(stripped):
+            have_export = True
+        m = RC_SOURCE_RE.match(stripped)
+        if m and m.group(1) == shell:
+            have_source = True
+    return have_export and have_source
+
+
+def rc_strip_legacy(text):
+    """剥掉 rc 里**所有** wtool 的旧块（老的 per-project 块 + `# >>> wtool >>>`）。
+
+    返回 (新内容, 剥掉了吗)。老机器迁移用：剥干净之后再补那两行。
+    """
+    lines = (text or "").split("\n")
+    kept, skipping, stripped_any = [], False, False
+    for line in lines:
+        stripped = line.strip()
+        if stripped == LOADER_BEGIN or LOADER_OLD_RE.match(stripped):
+            skipping = True
+            stripped_any = True
+            continue
+        if skipping:
+            if stripped == LOADER_END or re.match(r"^# <<< wtool:\S+ <<<\s*$", stripped):
+                skipping = False
+            continue
+        kept.append(line)
+    if not stripped_any:
+        return text, False
+    while kept and not kept[-1].strip():
+        kept.pop()
+    body = "\n".join(kept).rstrip("\n")
+    return (body + "\n" if body else ""), True
+
+
+def render_rc(home, shell, old, want_lines):
+    """算出用户 rc 的新内容（None = 这个文件不该存在）。
+
+    `want_lines=True`：还有项目装着 → rc 最后两行**应该**是那两行。
+    `want_lines=False`：一个项目都不剩 → 把 wtool 的东西剥干净（恢复原样）。
+
+    三种输入：
+      * 旧形态（`# >>> wtool >>>` 块 / per-project 块）→ **替换**成那两行（幂等）；
+      * 已经是那两行 → 原样返回（**跑两次只两行**）；
+      * 什么都没有（新机器）→ 什么都不写（**默认只打印**：谁写这两行是
+        `install.sh` 问过用户之后的事，见 DESIGN §1.8 ⑥ / D31）。
+    """
+    if old is None and not want_lines:
+        return None
+    text = old or ""
+    body, had_legacy = rc_strip_legacy(text)
+    if not want_lines:
+        # 一个项目都没装：剥干净，空了就删文件
+        if not had_legacy:
+            return None if old is None else text
+        return body or None
+    if rc_has_lines(body, shell):
+        # 已经是新形态：不动它（幂等）
+        return old
+    if old is None and not had_legacy:
+        return None                     # 新机器：默认只打印，不代写
+    if body:
+        return body.rstrip("\n") + "\n" + "\n".join(rc_lines_for(home, shell)) + "\n"
+    return "\n".join(rc_lines_for(home, shell)) + "\n"
+
+
+def _managed_home():
+    """被管理的家目录（`$HOME` 本身）—— `~/usr` 那条全局软链的落点靠它。
+
+    新口径下这个值和 `$WTOOL_HOME`（= `.wtool` 根）**不是一回事**，所以不能再
+    从 `--home` 推。引擎（`wtool.sh`）把它导成 `WTOOL_MANAGED_HOME`；
+    纯 Python 单测里拿不到就返回 ""（调用方跳过"影子 HOME"那几条检查，
+    否则 `~` 不存在时会报一堆假警报）。
+    用 `HOME` 是安全的：`do_check` 的 `--home`/`--state` 是显式参数，不读 HOME。
+    """
+    return os.environ.get("WTOOL_MANAGED_HOME") or os.environ.get("HOME") or ""
+
 
 
 def collect_env_blocks(state, shell, exclude=""):
@@ -3062,63 +3210,48 @@ def collect_env_blocks(state, shell, exclude=""):
     return found
 
 
+def render_env_file(home, state, shell, exclude=""):
+    """算出 `$WTOOL_HOME/env.<shell>` 的新内容（None = 不该存在，要删）。
+
+    结构（两个 shell **只有文件后缀不同**，正文一模一样）：
+
+        ① `ENV_CHECK_LINES`（校验片段，逐字等价）
+        ② 按 (priority, 项目路径) 升序 source 各项目的 env 块 —— 用
+           `${WTOOL_HOME}` 相对写法（`.wtool` 搬位置时一个字都不用改）
+    """
+    home = os.path.abspath(home)
+    blocks = collect_env_blocks(state, shell, exclude=exclude)
+    if not blocks:
+        return None
+    parts = [ENV_AGG_HEADER]
+    for _prio, pid, text in blocks:
+        src = os.path.join(home, STATE_VAR_SUBDIR, pid, "env.%s" % shell)
+        rel = os.path.relpath(src, home)
+        parts.append("")
+        parts.append("# >>> wtool:%s >>> (priority %d)" % (pid, _prio))
+        parts.append('if [ -f "${WTOOL_HOME}/%s" ]; then . "${WTOOL_HOME}/%s"; fi'
+                     % (rel, rel))
+        parts.append("# <<< wtool:%s <<<" % pid)
+        body = text.rstrip("\n")
+        if body:
+            parts.append(body)
+    return "\n".join(ENV_CHECK_LINES + parts).rstrip("\n") + "\n"
+
+
 def render_env(home, state, shell, exclude=""):
-    """算出两个文件的新内容：用户的 rc，和汇总文件。
+    """算出两个文件的新内容：用户的 rc，和 `$WTOOL_HOME/env.<shell>`。
 
     返回 (rc_path, rc_text|None, agg_path, agg_text|None)
     None 表示这个文件不该存在（要删掉）。
     """
     home = os.path.abspath(home)
-    rc_path = os.path.join(home, ".%src" % shell)
-    agg_path = os.path.join(home, ".wtool", ".%src" % shell)
+    rc_path = os.path.join(_managed_home() or home, ".%src" % shell)
+    agg_path = os.path.join(home, "env.%s" % shell)
 
-    blocks = collect_env_blocks(state, shell, exclude=exclude)
-
-    # 汇总文件
-    if blocks:
-        parts = [AGG_HEADER.format(shell=shell)]
-        for _prio, pid, text in blocks:
-            parts.append("")
-            parts.append(text.rstrip("\n"))
-        agg_text = "\n".join(parts).rstrip("\n") + "\n"
-    else:
-        agg_text = None
-
-    # 用户的 rc：先把它里面所有 wtool 的块（老的 per-project 块 + 新的 loader）
-    # 全部剥掉，再按需要补上 loader。这样迁移是自动的，也不会堆积。
+    agg_text = render_env_file(home, state, shell, exclude=exclude)
     old = read_text(rc_path)
-    if old is None and agg_text is None:
-        return rc_path, None, agg_path, None
-
-    lines = (old or "").split("\n")
-    kept, skipping = [], False
-    for line in lines:
-        stripped = line.strip()
-        if stripped == LOADER_BEGIN or LOADER_OLD_RE.match(stripped):
-            skipping = True
-            continue
-        if skipping:
-            if stripped == LOADER_END or re.match(r"^# <<< wtool:\S+ <<<\s*$", stripped):
-                skipping = False
-            continue
-        kept.append(line)
-
-    while kept and not kept[-1].strip():
-        kept.pop()
-
-    if agg_text is None:
-        # 一个项目都没装：rc 恢复成剥掉块之后的样子
-        new_rc = "\n".join(kept)
-        new_rc = new_rc + "\n" if new_rc else ""
-        if old is None:
-            return rc_path, None, agg_path, None
-        if new_rc == "":
-            return rc_path, None, agg_path, None      # 文件空了就删掉
-        return rc_path, new_rc, agg_path, None
-
-    body = "\n".join(kept).rstrip("\n")
-    new_rc = (body + "\n\n" if body else "") + "\n".join(_loader_block(shell)) + "\n"
-    return rc_path, new_rc, agg_path, agg_text
+    rc_text = render_rc(home, shell, old, want_lines=agg_text is not None)
+    return rc_path, rc_text, agg_path, agg_text
 
 
 def plan_env(args, scratch):
@@ -3198,11 +3331,16 @@ def _installed_ids(state, exclude="", home=""):
 def plan_usr_link(home, state, exclude=""):
     """~/usr → ~/.wtool/usr 这条全局软链的动作行。
 
-    有项目装着就保证它在；一个都不剩就收走 —— 但**只删软链，不碰实体**：
-    ~/.wtool/usr 里是编译/下载产物，删了就没法卸干净了（那是 uninstall 的事）。
+    两个落点**不是一回事**（新口径，ADR-0045）：
+      * `dest`   = `~/usr`（`$HOME` 里那条链）—— 由 `_managed_home()` 算；
+      * `target` = `$WTOOL_HOME/usr`（影子 prefix 的实体目录）—— 由 `--home` 算。
+    拿不到被管理的家目录时（纯 Python 单测）整条跳过，不报假警报。
     """
     home = os.path.abspath(home)
-    dest = os.path.join(home, "usr")
+    managed = _managed_home()
+    if not managed:
+        return []
+    dest = os.path.join(os.path.abspath(managed), "usr")
     target = os.path.join(dot_dir(home), USR_SUBDIR)
     rows = []
     if _installed_ids(state, exclude, home):

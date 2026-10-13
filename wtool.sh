@@ -100,21 +100,50 @@ self=$(readlink -f -- "$0" 2>/dev/null || echo "$0")
 here=$(dirname -- "$self")
 
 WTOOL_BOOTSTRAP=${WTOOL_BOOTSTRAP:-$here}
-WTOOL_HOME=${WTOOL_HOME:-$HOME}
-if [ -z "${WTOOL_STATE:-}" ]; then
-    if [ -n "${XDG_STATE_HOME:-}" ]; then
-        WTOOL_STATE="$XDG_STATE_HOME/wtool"
-    else
-        WTOOL_STATE="$WTOOL_HOME/.local/state/wtool"
-    fi
-fi
+
+# --------------------------------------------------------------------------
+# $WTOOL_HOME —— **`.wtool` 根目录**（ADR-0045 §1.1 / D47 / D48）
+#
+# ⚠️ 旧语义（本轮之前）= 「被管理的家目录」（默认 `$HOME`），影子 HOME 是
+#    `$WTOOL_HOME/.wtool`、前缀是 `$WTOOL_HOME/.wtool/usr` —— **同名不同义**。
+#    整轮改名见 docs/wtool-home-rename.md（引用点清单 + 改法）。
+#
+# 新口径下：
+#   * `WTOOL_HOME` 就是 `.wtool` 本身（位置任意：`~/.wtool`、`~/wangshaowei/.wtool`…）；
+#   * `WTOOL_PREFIX = $WTOOL_HOME/usr`（影子 prefix，多项目共享）；
+#   * **账本**在 `$WTOOL_HOME/var/`（跟着目录迁移）；
+#   * **日志**在本机 `~/.local/state/wtool/wtool-logs-<年>-<月日>-<时分>-<编号>/`
+#     （不跟着迁移，随便删；见 wt_log_dir_new）。
+#
+# 「从环境变量取、不自己推」（D48）：rc 里那两行 `export WTOOL_HOME=…` +
+# `source ${WTOOL_HOME}/env.zsh` 是**唯一**的声明处。这里没有"从 $0 反推"那套 ——
+# 引擎装在 `$WTOOL_HOME/wtool/…` 下也一样，**不去猜**。
+#
+# 兜底默认值 `~/.wtool` 只服务一种场景：**还没写过 rc 的新机器**上直接跑
+# `sh install.sh`（它要在建 rc 之前就能算出目标态）。老口径的机器（rc 里是
+# `# >>> wtool >>>` 块、`$HOME/.wtool` 是影子 HOME）会由 wtool_rc_doctor 认出来
+# 并提示换成那两行 —— 不靠猜路径。
+WTOOL_HOME=${WTOOL_HOME:-$HOME/.wtool}
+# 账本落点（registry.tsv / <项目>/journal.tsv / meta.tsv …）。
+# `WTOOL_STATE` 仍然可以显式覆盖（测试夹具用），但**默认就是 `$WTOOL_HOME/var`**。
+WTOOL_STATE=${WTOOL_STATE:-$WTOOL_HOME/var}
 # 必须 export：planner 和项目脚本都要读它。
 # 不导出的话 Python 侧读不到，会退化用 basename 当项目 id。
 WTOOL_ROOT=${WTOOL_ROOT:-$(dirname -- "$here")}
 export WTOOL_ROOT
 WTOOL_REGISTRY="$WTOOL_STATE/registry.tsv"
-WTOOL_SRC=${WTOOL_SRC:-$WTOOL_HOME/.wtool/src}
-WTOOL_PREFIX=${WTOOL_PREFIX:-$WTOOL_HOME/.wtool/usr}
+WTOOL_SRC=${WTOOL_SRC:-$WTOOL_HOME/src}
+WTOOL_PREFIX=${WTOOL_PREFIX:-$WTOOL_HOME/usr}
+# 日志根（本机、不迁移）：默认 XDG state，`WTOOL_LOG_ROOT` 可覆盖。
+# 每次"安装/装东西"的动作建一个**新**目录 `wtool-logs-<年>-<月日>-<时分>-<编号>/`，
+# 编号在同一分钟内递增，**永不覆盖**；`wtool` 永远读最新那个（wt_log_dir_latest）。
+WTOOL_LOG_ROOT=${WTOOL_LOG_ROOT:-${XDG_STATE_HOME:-$HOME/.local/state}/wtool}
+WTOOL_LOG_DIR=""
+# 被管理的家目录（`$HOME` 本身）。新口径下 `WTOOL_HOME` 是 `.wtool` 根，
+# 两者**不再是一回事** —— 唯一还需要它的地方是 `~/usr` 那条影子 prefix 软链，
+# 以及"rc 里那两行写进哪个文件"（`~/.zshrc`）。导出给 planner。
+WTOOL_MANAGED_HOME=${WTOOL_MANAGED_HOME:-$HOME}
+export WTOOL_MANAGED_HOME
 WTOOL_FORCE=0
 WTOOL_DRY_RUN=0
 # --rebuild：无视"已经编好了"的跳过判据（只对 kind=docker 的引擎驱动构建有意义，

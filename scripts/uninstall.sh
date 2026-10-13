@@ -3,7 +3,7 @@
 #
 # 只做可逆的事：
 #   1. 让 wtool 把各项目的 install 逆着做一遍（wtool uninstall）
-#   2. 删掉引擎自举软链 ~/.wtool/bootstrap
+#   2. 删掉引擎自举软链 $WTOOL_HOME/bootstrap（默认 ~/.wtool/bootstrap）
 #
 # 不碰系统依赖（apt 装的东西可能别的软件也在用），也不删工作区本身。
 #
@@ -26,7 +26,8 @@ say() { printf 'wtool-bootstrap: %s\n' "$*"; }
 die() { printf 'wtool-bootstrap: 错误: %s\n' "$*" >&2; exit 1; }
 
 HOME_DIR=${HOME:-/root}
-BOOT_DST=${WTOOL_BOOTSTRAP_DST:-$HOME_DIR/.wtool/bootstrap}
+# `$WTOOL_HOME` = `.wtool` 根目录（ADR-0045 / D47）；没有才退回 `$HOME/.wtool`
+BOOT_DST=${WTOOL_BOOTSTRAP_DST:-${WTOOL_HOME:-$HOME_DIR/.wtool}/bootstrap}
 DRY=0
 NO_SCRIPT=0
 for arg in "$@"; do
