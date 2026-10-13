@@ -196,9 +196,22 @@ echo "== 5. 自检（职责⑤）：**新进程 + 干净 PATH** 里 wtool 可用
 for _sh in zsh bash; do
     command -v "$_sh" >/dev/null 2>&1 || { ok "$_sh：这台机器上没有，跳过"; continue; }
     _got=$(env -i HOME="$F/home" PATH="$FIX_PATH" "$_sh" -c \
-        'WTOOL_HOME=$1; export WTOOL_HOME; . "$WTOOL_HOME/env.'"$_sh"'" >/dev/null 2>&1; command -v wtool' \
+        'WTOOL_HOME=$1; export WTOOL_HOME; . "$WTOOL_HOME/env.'"$_sh"'" >/dev/null 2>&1; printf "%s|%s" "$?" "$(command -v wtool)"' \
         _ "$B" 2>/dev/null || true)
-    chk "★$_sh：source env.$_sh 之后 wtool 可解析（新进程 + 干净 PATH）" "$_got" "$B/wtool/bootstrap/bin/wtool"
+    chk "★$_sh：source env.$_sh **返回 0** 且 wtool 可解析（新进程 + 干净 PATH）" \
+        "$_got" "0|$B/wtool/bootstrap/bin/wtool"
+done
+# ‼️ "source 返回 0"单独守一条：这条链的**末尾状态**会一路传回去 ——
+#    实测（容器验收）：`completion/wtool.zsh` 末行写成 `(( … )) && compdef …`，
+#    compdef 拿不到时短路成 1 → `source env.zsh` 返回 1 → install.sh 的 ⑤ 自检失败，
+#    用户看到的是"装完了但自检不过"。修法是把末行改成 `if …; then …; fi`。
+for _sh in zsh bash; do
+    command -v "$_sh" >/dev/null 2>&1 || continue
+    _src=0
+    env -i HOME="$F/home" PATH="$FIX_PATH" "$_sh" -c \
+        'WTOOL_HOME=$1; export WTOOL_HOME; . "$WTOOL_HOME/env.'"$_sh"'" >/dev/null 2>&1' \
+        _ "$B" 2>/dev/null || _src=$?
+    chk "$_sh：source env.$_sh 的退出码（末尾状态必须是 0）" "$_src" "0"
 done
 
 echo
