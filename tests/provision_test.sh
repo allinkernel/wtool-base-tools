@@ -182,8 +182,10 @@ check "本地分支为 wsw" "wsw" "$(git -C "$srcdir" rev-parse --abbrev-ref HEA
 [ -f "$srcdir/wsw.sh" ] && ok "overlay 已铺进源码树" || bad "overlay 已铺进源码树"
 check "任务写到了 \$WTOOL_PREFIX" "built" "$(cat "$H/prefix/built.txt" 2>/dev/null)"
 check "任务拿到了 WTOOL_SOURCE_REF" "v1.0" "$(cat "$H/prefix/ref.txt" 2>/dev/null)"
-[ -f "$H/state/build/test/provisioned/test-{ref}" ] \
-    && ok "marker 已记录（幂等）" || bad "marker 已记录（幂等）" "$(ls "$H/state/build/test" 2>/dev/null)"
+# 账本在 `$WTOOL_STATE`（= `$WTOOL_HOME/var`，新口径）—— 路径别写死 $H/state。
+[ -f "$WTOOL_STATE/build/test/provisioned/test-{ref}" ] \
+    && ok "marker 已记录（幂等）" \
+    || bad "marker 已记录（幂等）" "$(ls "$WTOOL_STATE/build/test" 2>/dev/null)"
 
 # 第二次：marker 命中应跳过任务
 rm -f "$H/prefix/built.txt"
@@ -359,9 +361,12 @@ check "WTOOL_PROJECT_DIR = 项目目录（脚本写文件的地方对）" \
       "DIR=$_prj" "$(sed -n '1p' "$p/dirs.txt" 2>/dev/null)"
 check "WTOOL_PROJECT_ROOT 也是项目目录" "ROOT=$_prj" "$(sed -n '2p' "$p/dirs.txt" 2>/dev/null)"
 check "状态目录改叫 WTOOL_PROJECT_STATE_DIR" \
-      "STATE=$H/state/dirs/test" "$(sed -n '3p' "$p/dirs.txt" 2>/dev/null)"
-[ -f "$H/state/dirs/test/dirs.txt" ] && bad "脚本按老含义写进了状态目录" \
-    || ok "状态目录里没有误写的文件"
+      "STATE=$WTOOL_STATE/dirs/test" "$(sed -n '3p' "$p/dirs.txt" 2>/dev/null)"
+if [ -f "$WTOOL_STATE/dirs/test/dirs.txt" ]; then
+    bad "脚本按老含义写进了状态目录"
+else
+    ok "状态目录里没有误写的文件"
+fi
 rm -rf "$H"
 
 # --------------------------------------------------------------------------

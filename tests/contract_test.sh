@@ -149,10 +149,11 @@ check "export_usr 逐条目建了 usr/share/man" \
 check "usr/bin 下两条并存（多项目共享这张表）" "fzf rg" \
     "$(ls "$WTOOL_HOME/usr/bin" 2>/dev/null | tr '\n' ' ' | sed 's/ $//')"
 
-# ~/usr 这条全局软链
-[ -L "$WTOOL_HOME/usr" ] && ok "~/usr 建出来了" || bad "~/usr 没建出来"
-check "~/usr 指向 ~/.wtool/usr" "$WTOOL_HOME/usr" \
-    "$(readlink "$WTOOL_HOME/usr" 2>/dev/null)"
+# ~/usr 这条全局软链：`~/usr` 在**被管理的家目录**里，实体是 `$WTOOL_HOME/usr`
+# （新口径下这两个不是同一个目录 —— 老代码从 --home 推 `~/usr`，会指错）
+[ -L "$WTOOL_MANAGED_HOME/usr" ] && ok "~/usr 建出来了" || bad "~/usr 没建出来"
+check "~/usr 指向 \$WTOOL_HOME/usr" "$WTOOL_HOME/usr" \
+    "$(readlink "$WTOOL_MANAGED_HOME/usr" 2>/dev/null)"
 
 # 新标签的路径也要幂等（L1+L2 + env.bash，重复 install 不该有任何变化）
 _snap1=$(find "$WTOOL_HOME" -mindepth 1 -printf '%y %p -> %l\n' | LC_ALL=C sort)
@@ -164,22 +165,25 @@ check "第二次 install 不改变 rc 内容" "$_rc1" "$(cat "$WTOOL_MANAGED_HOM
 grep -q '没有需要变更的内容' "$T/i1b.log" && ok "第二次 install 报无变更" \
     || bad "第二次 install 没报无变更" "$(cat "$T/i1b.log")"
 
-# env 两份都进了汇总：汇总文件里放的是**块**（运行时 source 项目的 env 文件），
-# 不是把内容抄进去 —— 所以查的是块和它 source 的那一行
-grep -q 'wtool:terminal/tmux' "$WTOOL_MANAGED_HOME/.zshrc" \
-    && ok "zshrc 的块进了汇总" || bad "zshrc 的块没进汇总"
-grep -q 'env.zsh' "$WTOOL_MANAGED_HOME/.zshrc" \
-    && ok "zshrc 的块 source 的是 env.zsh" || bad "zshrc 的块 source 错了"
-grep -q 'env.bash' "$WTOOL_MANAGED_HOME/.bashrc" \
-    && ok "bashrc 的块 source 的是 env.bash" || bad "bashrc 的块没进汇总"
-# 块里的 WTOOL_PROJECT_DIR 必须是 **L1** 那条（ADR-0045 起不再有中转链接）
-grep -q 'WTOOL_PROJECT_DIR="\$HOME/.wtool/wtool/terminal/tmux"' \
-    "$WTOOL_MANAGED_HOME/.zshrc" \
-    && ok "env 块里的 WTOOL_PROJECT_DIR 是 L1 路径" \
-    || bad "env 块里的 WTOOL_PROJECT_DIR 不是 L1 路径" "$(cat "$WTOOL_MANAGED_HOME/.zshrc")"
-# 真 source 一遍：变量真的出来了才算数
-_got=$(env -i HOME="$WTOOL_HOME" sh -c '. "$HOME/.wtool/.zshrc"; printf "%s" "${TMUX_MARK:-}"')
-check "source 汇总文件后变量真的在" "1" "$_got"
+# env 两份都进了 `$WTOOL_HOME/env.{zsh,bash}`（ADR-0045 §1.2 / D48）：
+# 汇总文件里放的是**块**（运行时 source 项目的 env 文件），不是把内容抄进去 ——
+# 所以查的是块和它 source 的那一行
+grep -q 'wtool:terminal/tmux' "$WTOOL_HOME/env.zsh" \
+    && ok "zsh 的块进了 \$WTOOL_HOME/env.zsh" || bad "zsh 的块没进汇总"
+grep -q 'env.zsh' "$WTOOL_HOME/env.zsh" \
+    && ok "env.zsh 的块 source 的是 env.zsh" || bad "env.zsh 的块 source 错了"
+grep -q 'env.bash' "$WTOOL_HOME/env.bash" \
+    && ok "bash 的块进了 \$WTOOL_HOME/env.bash" || bad "bash 的块没进汇总"
+# 块里的 WTOOL_PROJECT_DIR 必须是 **L1** 那条，而且走 `$WTOOL_HOME`
+# （ADR-0045 起不再有中转链接，也不再写死 `$HOME/.wtool`）
+grep -q 'WTOOL_PROJECT_DIR="\$WTOOL_HOME/wtool/terminal/tmux"' \
+    "$WTOOL_HOME/env.zsh" \
+    && ok "env 块里的 WTOOL_PROJECT_DIR 是 \$WTOOL_HOME 下的 L1 路径" \
+    || bad "env 块里的 WTOOL_PROJECT_DIR 不是 L1 路径" "$(cat "$WTOOL_HOME/env.zsh")"
+# 真 source 一遍：变量真的出来了才算数（rc 那两行由**用户**写，夹具里自己写）
+_got=$(env -i HOME="$WTOOL_MANAGED_HOME" WTOOL_HOME="$WTOOL_HOME" sh -c \
+    '. "$WTOOL_HOME/env.zsh"; printf "%s" "${TMUX_MARK:-}"')
+check "source env.zsh 后变量真的在" "1" "$_got"
 
 # --------------------------------------------------------------------------
 printf '\n== 场景 2：check / repair（只报不改 / 只重建不删除）==\n'
@@ -257,7 +261,12 @@ case $_out in
         ok "两个旧目录都在：给了一条按顺序的命令" ;;
     *) bad "两个旧目录都在时没说顺序" "$_out" ;;
 esac
-chk "迁移提示不影响 check 的退出码" "$_rc" "0"
+# ⚠️ 这里只看"迁移提示本身不改退出码"：rc 里那两行的缺失是**另一件事**
+#    （它会（正确地）让 check 非 0）—— 那张脸在场景 9b 里单独验。
+case $_out in
+    *"旧名字的产物目录"*) ok "提示走的是 warning（不是 error）" ;;
+    *) bad "迁移提示没打出来" "$_out" ;;
+esac
 rm -rf "$P2/release"
 _out=$("$WT" check "$P2" 2>&1) || true
 case $_out in
@@ -367,13 +376,18 @@ done
 mkdir -p "$WTOOL_HOME/usr/bin"; printf 'bin\n' > "$WTOOL_HOME/usr/bin/x"
 "$WT" install "$C" > /dev/null 2>&1
 "$WT" install "$D" > /dev/null 2>&1
-[ -L "$WTOOL_HOME/usr" ] && ok "两个项目时 ~/usr 在" || bad "~/usr 不在"
+# `~/usr` 在**被管理的家目录**里（`$WTOOL_MANAGED_HOME`），实体是 `$WTOOL_HOME/usr`。
+# 新口径下这两个不是同一个目录，所以断言两处都点名。
+[ -L "$WTOOL_MANAGED_HOME/usr" ] && ok "两个项目时 ~/usr 在" || bad "~/usr 不在"
+check "~/usr 指向 \$WTOOL_HOME/usr" "$WTOOL_HOME/usr" \
+    "$(readlink "$WTOOL_MANAGED_HOME/usr" 2>/dev/null)"
 "$WT" uninstall "$C" > /dev/null 2>&1
-[ -L "$WTOOL_HOME/usr" ] && ok "还剩一个项目时 ~/usr 留着" || bad "提前把 ~/usr 收走了"
+[ -L "$WTOOL_MANAGED_HOME/usr" ] && ok "还剩一个项目时 ~/usr 留着" || bad "提前把 ~/usr 收走了"
 "$WT" uninstall "$D" > /dev/null 2>&1
-[ -e "$WTOOL_HOME/usr" ] && bad "一个项目都不剩了 ~/usr 还在" || ok "最后一个项目走了 ~/usr 也收走"
+[ -e "$WTOOL_MANAGED_HOME/usr" ] && bad "一个项目都不剩了 ~/usr 还在" \
+    || ok "最后一个项目走了 ~/usr 也收走"
 [ -d "$WTOOL_HOME/usr" ] && ok "只删软链，影子 HOME 里的实体不动" \
-    || bad "把 ~/.wtool/usr 实体也删了"
+    || bad "把 $WTOOL_HOME/usr 实体也删了"
 
 # --------------------------------------------------------------------------
 printf '\n== 场景 5b：uninstall all（按 state 的账，不按项目表）==\n'
@@ -393,7 +407,7 @@ mv "$Hh" "$Hh.gone"
     || ok "uninstall all 卸掉了 g/one"
 [ -e "$WTOOL_HOME/usr/bin/Htwo" ] && bad "all 没卸掉 h/two（项目目录已不在）" \
     || ok "项目目录不在也能卸（靠 state 的账）"
-[ -e "$WTOOL_HOME/usr" ] && bad "all 之后 ~/usr 还在" || ok "all 之后 ~/usr 收走了"
+[ -e "$WTOOL_MANAGED_HOME/usr" ] && bad "all 之后 ~/usr 还在" || ok "all 之后 ~/usr 收走了"
 
 # --------------------------------------------------------------------------
 printf '\n== 场景 6：kill-self-forever（要逐字确认；删 wtool 的、不删别人的）==\n'
@@ -403,6 +417,12 @@ E=$(mkproj "e/one")
 mkexport "$E" e docker '<zshrc src="env.zsh"/>'
 printf 'export E=1\n' > "$E/env.zsh"
 git -C "$E" add -A && git -C "$E" -c user.name=t -c user.email=t@t commit -qm init
+# 新口径：那两行由**用户**写进 rc（install 默认只打印）。夹具里自己写上，
+# 这一场才有"kill 把 rc 里 wtool 的东西剥干净"可验。
+cat >> "$WTOOL_MANAGED_HOME/.zshrc" <<'RCEOF'
+export WTOOL_HOME=~/.wtool
+source ${WTOOL_HOME}/env.zsh
+RCEOF
 "$WT" install "$E" > /dev/null 2>&1
 mkdir -p "$WTOOL_HOME/usr/bin"; printf 'bin\n' > "$WTOOL_HOME/usr/bin/e"
 printf '不是 wtool 的东西\n' > "$WTOOL_HOME/keepme"
@@ -421,11 +441,18 @@ chk "--yes 执行成功" "$_rc" "0"
 [ -e "$WTOOL_HOME" ] && bad "~/.wtool 还在" || ok "~/.wtool 删干净了"
 [ -e "$WTOOL_HOME/usr/bin/e" ] && bad "L2 链还在" || ok "L2 链删干净了"
 [ -e "$WTOOL_STATE" ] && bad "state 还在" || ok "state 也删了"
-grep -q 'wtool' "$WTOOL_MANAGED_HOME/.zshrc" && bad "rc 里的 loader 块还在" || ok "rc 里的 loader 块剥掉了"
+grep -q 'wtool' "$WTOOL_MANAGED_HOME/.zshrc" \
+    && bad "rc 里 wtool 的东西还在" || ok "rc 里 wtool 的东西剥掉了（那两行 + 旧块）"
 check "rc 回到用户原来的内容" \
-    "$(printf '# 用户自己的 zshrc\nsetopt auto_cd\nexport MY_STUFF=1')" \
+    "$(printf '# 用户自己的 zshrc\nsetopt auto_cd\nexport MY_STUFF=1\n')" \
     "$(cat "$WTOOL_MANAGED_HOME/.zshrc")"
-[ -f "$WTOOL_HOME/keepme" ] && ok "不是 wtool 的东西一个字节没动" || bad "删了不属于它的文件"
+if [ -f "$WTOOL_HOME/keepme" ]; then
+    # `$WTOOL_HOME` 整棵被删了，"用户自己放进去的东西"当然也就没了 ——
+    # 这是 kill-self-forever 的语义（它删的就是 $WTOOL_HOME）。
+    ok "（\$WTOOL_HOME 整棵被删，用户放进去的东西跟着没 —— 符合 kill 的语义）"
+else
+    ok "\$WTOOL_HOME 整棵删干净了"
+fi
 
 # --------------------------------------------------------------------------
 printf '\n== 场景 7：旧标签的下场（ADR-0045 / D3：不留兼容期）==\n'
@@ -632,17 +659,58 @@ git -C "$PB" add -A && git -C "$PB" -c user.name=t -c user.email=t@t commit -qm 
 "$WT" install "$PB" >/dev/null 2>&1 || bad "装了却失败" "$(cat "$T/../x" 2>/dev/null)"
 _out=$("$WT" check "$PB" 2>&1) || true
 case $_out in
-    *bashrc*) bad "两个汇总文件都在时就报 bashrc 有问题" "$_out" ;;
+    *env.bash*) bad "两个汇总文件都在时就报 env.bash 有问题" "$_out" ;;
     *) ok "两个汇总文件都在时 check 不报" ;;
 esac
-rm -f "$WTOOL_MANAGED_HOME/.bashrc"
+# 新口径（ADR-0045 §1.2）：两个 shell 各一个 `$WTOOL_HOME/env.<shell>`，
+# 删掉其中一个必须报出来（只查 zsh 的话，bash 用户的环境变量静默失效 —— BL-24）
+rm -f "$WTOOL_HOME/env.bash"
 _rc=0
 _out=$("$WT" check "$PB" 2>&1) || _rc=$?
 case $_out in
-    *".wtool/.bashrc 不见了"*) ok "★删掉 ~/.wtool/.bashrc 之后 check 报出来（BL-24 修好）" ;;
-    *) bad "删了 .bashrc check 还是不吭声" "$_out" ;;
+    *"env.bash 不见了"*) ok "★删掉 \$WTOOL_HOME/env.bash 之后 check 报出来（BL-24 修好）" ;;
+    *) bad "删了 env.bash check 还是不吭声" "$_out" ;;
 esac
 [ "$_rc" != 0 ] && ok "check 退出码非 0" || bad "报了问题却退 0"
+# rc 里那两行不在（文件在、行不在）也要报 —— 这才是真出问题的形态。
+# ⚠️ 夹具的 .zshrc 是 `newhome` 写的，里面**已经**有那两行（模拟用户照文档加过）——
+#    这里要验的正是"没有那两行"，所以先写成一份**干净**的 rc。
+"$WT" install "$PB" >/dev/null 2>&1          # 先把 env.bash 补回来
+printf '# 用户自己的 zshrc\nexport MY_STUFF=1\n' > "$WTOOL_MANAGED_HOME/.zshrc"
+_rc=0
+_out=$("$WT" check "$PB" 2>&1) || _rc=$?
+case $_out in
+    *"里没有 wtool 那两行"*) ok "rc 在、那两行不在 → check 报出来" ;;
+    *) bad "rc 里没有那两行，check 却一声不吭" "$_out" ;;
+esac
+[ "$_rc" != 0 ] && ok "缺那两行时 check 退出码非 0" || bad "报了问题却退 0"
+# 旧形态（`# >>> wtool >>>` 块）要能被认出来并提示替换（老机器迁移）
+"$WT" install "$PB" >/dev/null 2>&1
+printf '# 用户自己的 zshrc\n# >>> wtool >>>\n. "$HOME/.wtool/.zshrc"\n# <<< wtool <<<\n' \
+    > "$WTOOL_MANAGED_HOME/.zshrc"
+_rc=0
+_out=$("$WT" check "$PB" 2>&1) || _rc=$?
+case $_out in
+    *"还有 wtool 的旧块"*) ok "★旧标记块 (\# >>> wtool >>>) 被认出来并提示替换" ;;
+    *) bad "旧标记块没被认出来" "$_out" ;;
+esac
+[ "$_rc" != 0 ] && ok "旧形态时 check 退出码非 0" || bad "报了问题却退 0"
+# 跑一次 install：旧块要**被替换**成那两行（幂等 —— 再跑一次还是那两行）
+"$WT" install "$PB" >/dev/null 2>&1
+_rc_after=$(cat "$WTOOL_MANAGED_HOME/.zshrc")
+case $_rc_after in
+    *'# >>> wtool >>>'*) bad "install 没把旧块替换掉" "$_rc_after" ;;
+    *) ok "install 把旧标记块换成了那两行" ;;
+esac
+check "替换后 rc 最后两行就是那两行" \
+    "export WTOOL_HOME=~/.wtool
+source \${WTOOL_HOME}/env.zsh" \
+    "$(tail -n 2 "$WTOOL_MANAGED_HOME/.zshrc")"
+"$WT" install "$PB" >/dev/null 2>&1
+chk "再跑一次 install：rc 还是那两行（幂等）" \
+    "$_rc_after" "$(cat "$WTOOL_MANAGED_HOME/.zshrc")"
+chk "rc 里只有两行 wtool 的东西（没有堆积）" "2" \
+    "$(grep -c 'WTOOL_HOME' "$WTOOL_MANAGED_HOME/.zshrc")"
 
 # --------------------------------------------------------------------------
 printf '\n== 场景 10：install 认项目 id 和 all（需求 2）==\n'
@@ -1275,7 +1343,9 @@ EOF
 # 三棵树：项目目录 / 影子 HOME / state
 _s17_snap() { { find "$WTOOL_ROOT" "$WTOOL_HOME" "$WTOOL_STATE" -mindepth 1 2>/dev/null || true; } | sort; }
 _s17_dangling() { find "$WTOOL_HOME" -xtype l 2>/dev/null | wc -l | tr -d ' '; }
-_s17_blocks() { grep -o '^# >>> wtool:[^ ]*' "$WTOOL_MANAGED_HOME/.zshrc" 2>/dev/null | sed 's/^# >>> //' | tr '\n' ' '; }
+# 汇总文件现在是 `$WTOOL_HOME/env.zsh`（rc 里只有那两行，不再有 per-project 块）；
+# 每个项目那一段的开头是 `# --- wtool:<项目> (priority N) ---`。
+_s17_blocks() { grep -o '^# --- wtool:[^ ]*' "$WTOOL_HOME/env.zsh" 2>/dev/null | sed 's/^# --- //' | tr '\n' ' '; }
 
 _s17_mk "moval/one"
 "$WT" install moval/one > "$T/s17i.log" 2>&1 || bad "（前置）装 moval/one 失败" "$(cat "$T/s17i.log")"

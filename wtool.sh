@@ -518,7 +518,16 @@ wt_check_build_env() {   # <项目目录> <项目 id> → 不满足返回 1
 
     _ce_have_cores=$(nproc 2>/dev/null || echo 1)
     _ce_have_mem=$(awk '/^MemTotal:/ {printf "%d", $2/1048576}' /proc/meminfo 2>/dev/null || echo 0)
-    _ce_have_disk=$(df -Pk "$WTOOL_HOME" 2>/dev/null | awk 'NR==2 {printf "%d", $4/1048576}' || echo 0)
+    # ⚠️ 磁盘算在**产物真正落地的分区**上。新口径下 `$WTOOL_HOME` 是 `.wtool` 根
+    #    —— 它可能**还不存在**（第一次 build，账本都没建），`df` 那时什么都不输出，
+    #    awk 拿到空串 → `[ "" -ge 1 ]` 报 "Illegal number"（实测）并判成"磁盘不够"，
+    #    于是干净的机器上 `wtool build` **一个项目都编不了**。所以：按
+    #    `$WTOOL_HOME` → `$WTOOL_MANAGED_HOME` → `$HOME` 找到**第一个存在的**再量。
+    _ce_probe=$WTOOL_HOME
+    [ -d "$_ce_probe" ] || _ce_probe=${WTOOL_MANAGED_HOME:-$HOME}
+    [ -d "$_ce_probe" ] || _ce_probe=/
+    _ce_have_disk=$(df -Pk "$_ce_probe" 2>/dev/null | awk 'NR==2 {printf "%d", $4/1048576}')
+    [ -n "$_ce_have_disk" ] || _ce_have_disk=0
 
     _ce_bad=""
     [ "$_ce_have_cores" -ge "$_ce_cores" ] || _ce_bad="$_ce_bad
@@ -526,7 +535,7 @@ wt_check_build_env() {   # <项目目录> <项目 id> → 不满足返回 1
     [ "$_ce_have_mem" -ge "$_ce_mem" ] || _ce_bad="$_ce_bad
     内存：有 ${_ce_have_mem}G，需要 ${_ce_mem}G"
     [ "$_ce_have_disk" -ge "$_ce_disk" ] || _ce_bad="$_ce_bad
-    磁盘（\$HOME 所在分区）：有 ${_ce_have_disk}G，需要 ${_ce_disk}G"
+    磁盘（$_ce_probe 所在分区）：有 ${_ce_have_disk}G，需要 ${_ce_disk}G"
 
     [ -z "$_ce_bad" ] && return 0
 

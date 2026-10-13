@@ -3151,6 +3151,33 @@ def rc_strip_legacy(text):
     return (body + "\n" if body else ""), True
 
 
+def rc_strip_new_lines(text, shell):
+    """剥掉 rc 里**新形态**的那两行（`export WTOOL_HOME=` + `source …/env.<shell>`）。
+
+    返回 (新内容, 剥掉了吗)。只在"还有那两行"时动；`source` 那行必须
+    **正好**指的是这个 shell 的 `env.<shell>`（`export WTOOL_HOME=` 单独一行
+    太泛了 —— 用户可能自己在别处 export 了同名的变量，那不该被我们删）。
+    """
+    lines = (text or "").split("\n")
+    idx = [i for i, l in enumerate(lines)
+           if (m := RC_SOURCE_RE.match(l.strip())) and m.group(1) == shell]
+    if not idx:
+        return text, False
+    drop = set(idx)
+    for i in idx:
+        for j in range(i - 1, -1, -1):
+            if not lines[j].strip():
+                continue
+            if RC_EXPORT_RE.match(lines[j].strip()):
+                drop.add(j)
+            break
+    kept = [l for i, l in enumerate(lines) if i not in drop]
+    while kept and not kept[-1].strip():
+        kept.pop()
+    body = "\n".join(kept).rstrip("\n")
+    return (body + "\n" if body else ""), True
+
+
 def render_rc(home, shell, old, want_lines):
     """算出用户 rc 的新内容（None = 这个文件不该存在）。
 
@@ -3168,12 +3195,16 @@ def render_rc(home, shell, old, want_lines):
     text = old or ""
     body, had_legacy = rc_strip_legacy(text)
     if not want_lines:
-        # 一个项目都没装：剥干净，空了就删文件
-        if not had_legacy:
+        # 一个项目都没装：wtool 的东西**全**剥干净（旧块 + 新形态那两行），
+        # 空了就删文件。新形态那两行也要剥 —— 否则 `wtool uninstall all` /
+        # `kill-self-forever` 之后 rc 里还留着 `source …/env.zsh`，
+        # 而那个文件已经没了（下一次开 shell 报 source 失败）。
+        body2, had_new = rc_strip_new_lines(body, shell)
+        if not had_legacy and not had_new:
             return None if old is None else text
-        return body or None
+        return body2 or None
     if rc_has_lines(body, shell):
-        # 已经是新形态：不动它（幂等）
+        # 已经是新形态：不动它（幂等）—— **跑两次只有两行**
         return old
     if old is None and not had_legacy:
         return None                     # 新机器：默认只打印，不代写
@@ -3375,8 +3406,13 @@ def plan_usr_link(home, state, exclude=""):
         if os.path.islink(dest) and os.path.normpath(os.readlink(dest)) \
                 == os.path.normpath(target):
             rows.append(("unlink", "dir", dest, target, "", ""))
-        # 登记表里那条也清掉（link 动作登记过它）
-        rows.append(("regdel", "dir", dest, "", "", ""))
+    # ‼️ 登记表里那条**无条件**清掉（link 动作登记过它）—— 所以它必须写在 else
+    #    **外面**：`~/usr` 的登记行 owner 是"最后一个装它的项目"，而
+    #    `_installed_ids` 读到这一行就会以为"还有项目装着" → `~/usr` 永远收不走、
+    #    `env.{zsh,bash}` 永远重生成、账本目录也永远不空（实测：两个项目先后
+    #    卸载之后整棵 `.wtool` 都留着）。`~/usr` 还是软链时，这句话严格是 no-op
+    #    （那条登记行只能由这条链自己带出来）。
+    rows.append(("regdel", "dir", dest, "", "", ""))
     return rows
 
 
@@ -4933,13 +4969,21 @@ def do_check(args):
     for shell in ("zsh", "bash"):
         blocks = collect_env_blocks(state, shell)
         agg = os.path.join(home, "env.%s" % shell)
-        if blocks and not os.path.isfile(agg):
-            bad("-", "$WTOOL_HOME/env.%s 不见了，但还有 %d 个项目的 env 块"
-                % (shell, len(blocks)))
+        # 判据用"还有没有项目装着"，**不是**"这个 shell 有没有块"：某个 shell 的
+        # 块可能一个都没有（项目只声明了 zsh），但文件照样该在 —— 它至少带着校验
+        # 片段（D42 职责④）。只按 blocks 判的话，`env.bash` 被误删时 check 一声不吭。
+        if _installed_ids(state) and not os.path.isfile(agg):
+            bad("-", "$WTOOL_HOME/env.%s 不见了（还有项目装着，它该在；"
+                "跑一次 wtool install/uninstall 会重建）" % shell)
         rc = os.path.join(os.path.abspath(managed), ".%src" % shell) if managed else ""
         text = read_text(rc) if rc else None
         if text is None:
-            continue                    # 没有 rc（测试夹具 / 别处跑）：不猜
+            # **没有这个 rc 文件**（用户用别的 shell / 还没建 / 测试夹具）：不猜。
+            # 这里原来把"没有 rc"当成"rc 里没有那两行"来报 —— 那是最典型的假警报：
+            # 干净容器里还没建 `~/.zshrc`，`wtool check` 就红着说"env 不会生效"，
+            # 而用户其实只是还没照文档写那两行（`wtool doctor` 会打印给他）。
+            # 真出问题的是"文件在、行不在"，那一条照报。
+            continue
         legacy = bool(rc_strip_legacy(text)[1])
         has_lines = rc_has_lines(text, shell)
         if blocks and not has_lines:

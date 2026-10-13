@@ -71,18 +71,25 @@ EOF
 
 echo "== 1. 解压副本不带 .git，install 必须认发布标记放行 =="
 H="$T/home"; mkdir -p "$H"
-env HOME="$H" WTOOL_ROOT="$WS" WTOOL_STATE="$T/state" \
+# 新口径：WTOOL_HOME = .wtool 根；WTOOL_MANAGED_HOME = 假 $HOME（rc 落点）。
+env HOME="$H" WTOOL_ROOT="$WS" WTOOL_HOME="$H/.wtool" \
+    WTOOL_STATE="$T/state" WTOOL_MANAGED_HOME="$H" WTOOL_LOG_ROOT="$T/logs" \
     "$WT" install "$WS/terminal/tmux" > "$T/log1" 2>&1 || {
     bad "install 失败"; sed 's/^/     /' "$T/log1"; }
 grep -q '发布副本' "$T/log1" && ok "认出了这是发布副本" || bad "没认出发布副本"
 grep -q 'd0a872a12345' "$T/log1" && ok "版本取自标记里的 commit" || bad "没取到 commit"
 has "L1 接入链建好了" "$H/.wtool/wtool/terminal/tmux"
-has "用户 rc 里写了 loader 块" "$H/.zshrc"
-has "环境变量汇总文件也写了" "$H/.wtool/.zshrc"
-grep -q '^# >>> wtool >>>$' "$H/.zshrc" \
-    && ok "用户 rc 里只有 loader 块" || bad "用户 rc 里的块不对"
-grep -q 'TMUX_DEMO\|terminal/tmux' "$H/.wtool/.zshrc" \
-    && ok "项目的 env 收在 ~/.wtool/.zshrc 里" || bad "汇总文件里没有这个项目"
+# 新口径（ADR-0045 §1.2 / D48）：install **默认不写**用户的 rc（只打印那两行）；
+# 项目 env 并进 `$WTOOL_HOME/env.zsh`。
+has "环境变量汇总文件 env.zsh 生成了" "$H/.wtool/env.zsh"
+has "环境变量汇总文件 env.bash 也生成了" "$H/.wtool/env.bash"
+if [ -e "$H/.zshrc" ]; then
+    bad "install 不该往用户 rc 里写东西（默认只打印那两行）" "$(cat "$H/.zshrc")"
+else
+    ok "用户 rc 一个字都没被动（默认只打印那两行）"
+fi
+grep -q 'TMUX_DEMO\|terminal/tmux' "$H/.wtool/env.zsh" \
+    && ok "项目的 env 收在 \$WTOOL_HOME/env.zsh 里" || bad "汇总文件里没有这个项目"
 
 echo "== 2. 没有标记的目录仍然拒绝（别把门开太大）=="
 mkdir -p "$WS/plain"
