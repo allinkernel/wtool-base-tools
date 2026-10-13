@@ -124,6 +124,16 @@ mk_targz() {   # <输出文件> <包内路径> <内容>
     ( cd "$_d" && tar czf "$_o" "$_in" )
     rm -rf -- "$_d"
 }
+# 现打一个 tar.xz（watchexec / csvlens 那种形状；第 ⑦.3 块加的格式）
+mk_tarxz() {   # <输出文件> <包内路径> <内容>
+    _o=$1; _in=$2; _c=$3
+    _d=$(mktemp -d "$T/stage.XXXXXX")
+    mkdir -p "$_d/$(dirname -- "$_in")"
+    printf '%s' "$_c" > "$_d/$_in"
+    chmod 755 "$_d/$_in"
+    ( cd "$_d" && tar cJf "$_o" "$_in" )
+    rm -rf -- "$_d"
+}
 # 现打一个 zip（权限位自己写：python 的 zipfile 默认不给可执行位）
 mk_zip() {     # <输出文件> <包内路径> <内容>
     python3 - "$1" "$2" "$3" <<'PY'
@@ -267,14 +277,15 @@ case $_out in
 esac
 
 # ---- 不认识的压缩格式：报错，不静默当裸文件 ----
-XZ=$(mkproj "tools/musl-bins/xz")
-wxml "$XZ" muslbin \
-    '<muslbin url="https://github.com/fake/demo/releases/download/v1.0/tool-1.0.tar.xz"' \
+# （`.tar.xz` 在第 ⑦.3 块转了正，这里换成仍然不支持的 `.tar.zst`）
+ZS=$(mkproj "tools/musl-bins/zstd")
+wxml "$ZS" muslbin \
+    '<muslbin url="https://github.com/fake/demo/releases/download/v1.0/tool-1.0.tar.zst"' \
     "         tag=\"v1.0\" sha256=\"$SHA_TOOL\" member=\"tool\" dest=\"usr/bin/tool\" arch=\"x86_64\"/>"
-gitci "$XZ"
+gitci "$ZS"
 _rc=0
-_out=$("$WT" validate "$XZ" 2>&1) || _rc=$?
-[ "$_rc" != 0 ] && ok "★.tar.xz（不支持的压缩）→ 非 0" || bad ".tar.xz 被放行了" "$_out"
+_out=$("$WT" validate "$ZS" 2>&1) || _rc=$?
+[ "$_rc" != 0 ] && ok "★.tar.zst（不支持的压缩）→ 非 0" || bad ".tar.zst 被放行了" "$_out"
 case $_out in
     *"只认"*) ok "报错里列了支持的格式" ;;
     *) bad "没说支持哪些格式" "$_out" ;;
@@ -338,6 +349,26 @@ _out=$("$WT" unpack-release "$RAW" 2>&1) || _rc=$?
 chk "★裸文件资产解包退出码 0" "$_rc" "0"
 has "★裸文件资产落到 __output/usr/bin/rawbin" "$RAW/__output/usr/bin/rawbin"
 chk "裸文件资产能跑" "$("$RAW/__output/usr/bin/rawbin" 2>&1)" "raw 1.0"
+
+# .tar.xz：成员带一层目录前缀（watchexec / csvlens 那种形状，第 ⑦.3 块）
+mk_tarxz "$T/fix/xztool-1.0-x86_64-unknown-linux-musl.tar.xz" \
+         "xztool-1.0-x86_64-unknown-linux-musl/xztool" "$TOOL_SH"
+SHA_XZ=$(sha "$T/fix/xztool-1.0-x86_64-unknown-linux-musl.tar.xz")
+X=$(mkproj "tools/musl-bins/xztool")
+wxml "$X" muslbin \
+    '<muslbin url="https://github.com/fake/demo/releases/download/v1.0/xztool-1.0-x86_64-unknown-linux-musl.tar.xz"' \
+    "         tag=\"v1.0\" sha256=\"$SHA_XZ\" member=\"xztool-1.0-x86_64-unknown-linux-musl/xztool\" dest=\"usr/bin/xztool\" arch=\"x86_64\"/>" \
+    '<export_bin src="__output/usr/bin/xztool"/>'
+gitci "$X"
+_rc=0
+_out=$("$WT" download-release "$X" 2>&1) || _rc=$?
+chk "★.tar.xz 也能下（第 ⑦.3 块）" "$_rc" "0"
+_rc=0
+_out=$("$WT" unpack-release "$X" 2>&1) || _rc=$?
+chk "★.tar.xz 解包退出码 0" "$_rc" "0"
+has "★.tar.xz 解到 __output/usr/bin/xztool" "$X/__output/usr/bin/xztool"
+chk ".tar.xz 里的成员能跑（解出来是那个二进制本身）" \
+    "$("$X/__output/usr/bin/xztool" --version 2>&1)" "tool 1.0"
 
 # member 缺省 = dest 的 basename
 mk_targz "$T/fix/plain-1.0.tar.gz" "plain" "$TOOL_SH"
@@ -612,6 +643,31 @@ chk "★<generate> 在安装时用上了那份二进制" "$(cat "$CH/__output/to
 _rc=0
 "$WT" check "$CH" >/dev/null 2>&1 || _rc=$?
 chk "⑤ check 干净" "$_rc" "0"
+
+# `.tar.xz` 走同一段全链（第 ⑦.3 块加的格式：watchexec / csvlens 的资产就是它）
+CHX=$(mkproj "tools/musl-bins/chainxz")
+wxml "$CHX" muslbin \
+    '<muslbin url="https://github.com/fake/demo/releases/download/v1.0/xztool-1.0-x86_64-unknown-linux-musl.tar.xz"' \
+    "         tag=\"v1.0\" sha256=\"$SHA_XZ\" member=\"xztool-1.0-x86_64-unknown-linux-musl/xztool\" dest=\"usr/bin/xztool\" arch=\"x86_64\"/>" \
+    '<export_bin src="__output/usr/bin/xztool"/>' \
+    '<generate dest="__output/xztool.zsh" cmd="xztool --version"/>'
+gitci "$CHX"
+_rc=0
+"$WT" download-release "$CHX" >/dev/null 2>&1 || _rc=$?
+chk "① .tar.xz download-release" "$_rc" "0"
+_rc=0
+"$WT" unpack-release "$CHX" >/dev/null 2>&1 || _rc=$?
+chk "② .tar.xz unpack-release" "$_rc" "0"
+_rc=0
+"$WT" install "$CHX" >/dev/null 2>&1 || _rc=$?
+chk "③ .tar.xz install" "$_rc" "0"
+chk "★④ .tar.xz 全链：$WTOOL_HOME/usr/bin/xztool --version" \
+    "$("$WTOOL_HOME/usr/bin/xztool" --version 2>&1)" "tool 1.0"
+chk "★<generate> 用的是刚链上的那份 xz 二进制" \
+    "$(cat "$CHX/__output/xztool.zsh")" "tool 1.0"
+_rc=0
+"$WT" check "$CHX" >/dev/null 2>&1 || _rc=$?
+chk "⑤ .tar.xz 项目 check 干净" "$_rc" "0"
 
 printf '\n----------------------------------------\n'
 printf 'muslbin_test: PASS %d  FAIL %d\n' "$pass" "$fail"

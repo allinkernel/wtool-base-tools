@@ -283,18 +283,22 @@ MUSLBIN_ARCHES = ("x86_64",)
 SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 
 # ---------------------------------------------------------------------------
-# ② muslbin 的**资产形状**（ADR-0045 第 ⑦.2 块 / D32）
+# ② muslbin 的**资产形状**（ADR-0045 第 ⑦.2 块 / D32；`.tar.xz` 是第 ⑦.3 块加的）
 #
 # 上游资产只有两种形状，判据是 **URL 的扩展名**（不猜内容，也不联网去看）：
-#   · 归档：`.zip` / `.tar.gz` / `.tgz` / `.tar` → 用 `member` 从里面取一个成员
+#   · 归档：`.zip` / `.tar.gz` / `.tgz` / `.tar` / `.tar.xz` / `.txz`
+#     → 用 `member` 从里面取一个成员
 #   · 裸文件：其余一律当"**资产本身就是那个二进制**"
 #     （`jq` / `yq` / `shfmt` / `b3sum` 就是这种：release 页上挂的就是可执行文件本身）
 #
-# ‼️ 认得出是压缩包、但不是上面那四种的（`.tar.xz` 之类）**必须报错**，
+# ‼️ 认得出是压缩包、但不是上面那几种的（`.tar.zst` 之类）**必须报错**，
 #    绝不能静默当裸文件 —— 那样会装出一个敲了就 `exec format error` 的"二进制"，
 #    而 sha256 还是对的，最难查。
-MUSLBIN_ARCHIVE_EXTS = (".zip", ".tar", ".tar.gz", ".tgz")
-MUSLBIN_ARCHIVE_LIKE_EXTS = (".tar.xz", ".txz", ".tar.bz2", ".tbz2", ".tar.zst",
+#
+# `.tar.xz` 为什么加：上游只发 `.tar.xz` 的有好几家（`watchexec`、`csvlens`），
+# 而解压本身不需要新依赖 —— python 的 `tarfile` 用 `r:*` 自动认（lzma 是标准库）。
+MUSLBIN_ARCHIVE_EXTS = (".zip", ".tar", ".tar.gz", ".tgz", ".tar.xz", ".txz")
+MUSLBIN_ARCHIVE_LIKE_EXTS = (".tar.bz2", ".tbz2", ".tar.zst",
                              ".tzst", ".7z", ".rar", ".lz4", ".lz", ".zst")
 
 

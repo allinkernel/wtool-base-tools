@@ -39,10 +39,12 @@
 #                             （ADR-0045 第 ⑦.2 块）：download-release 读 <muslbin>
 #                             （sha256 不匹配非 0 且不留半成品 / --dry-run 不下 /
 #                             幂等跳过）、unpack-release 认 member=/dest=（.tar.gz /
-#                             .zip / 裸文件三种资产、member 写错列出归档成员）、
+#                             .zip / .tar.xz / 裸文件四种资产、member 写错列出归档成员）、
 #                             <generate>（cmd+script、进 journal、uninstall 删、
 #                             重复 install 幂等、失败/空产物/--dry-run 零副作用非 0、
-#                             cmd 里的制表符两种写法两种结果）（104 条）
+#                             cmd 里的制表符两种写法两种结果）（114 条 —— 2026-10-13
+#                             第 ⑦.3 块 104→114：+10 条 `.tar.xz`（下载 / 解包 / 全链 /
+#                             check），原来那条"不支持的压缩"从 `.tar.xz` 换成 `.tar.zst`）
 #   tests/layer_test.sh       __layer/<target>/ 那棵 OCI 镜像目录（打桩 docker/skopeo，不联网）（50 条）
 #   tests/docker_build_test.sh kind=docker 的引擎驱动构建（打桩 docker，不联网）；构建日志落在
 #                             **本机日志** $WTOOL_LOG_DIR/<项目>/build-logs/，账本里不再有它（102 条）
@@ -55,7 +57,12 @@
 #                             pty 答 y 才写 / 写了也只有两行"、--dry-run 零副作用
 #                             含 uninstall.sh 对称收尾那两场
 #                             （89 条 —— 2026-10-13，第 5b 块新加）
-#                             —— 十三组共 1372 条（2026-10-13 实测；ADR-0045 第 ⑦.2 块：
+#                             —— 十三组共 **1382** 条（2026-10-13 第 ⑦.3 块之后的账；
+#                             本机跑出来的是 **1384 行 PASS** —— 差 2 是头里那两个
+#                             手写数（pairing 写 56 实为 57、sudo-install 写 40 实为 41，
+#                             这一行自己就写着"以跑出来的 PASS 行为准"）：
+#                             1372→1382 = muslbin 104→114（+10 条 `.tar.xz`：下载 / 解包 /
+#                             全链 / check），其余 12 组逐条不变。ADR-0045 第 ⑦.2 块：
 #                             1267→1372 = 新增 muslbin 104 条 + export 场景 1 拆出
 #                             一条"validate 不执行 <generate>"（77→78）。其余 11 组
 #                             逐条不变（pairing 56 / sudo-install 40 / publish 192 /

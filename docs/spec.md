@@ -1250,8 +1250,10 @@ wtool download-release all                    # 上面两种都算
    · 取出来的落点权限一律 **0755**（它就是那个要敲的二进制）
    · `member` 写错 / 归档里没有这个成员 → 报错并**列出归档里有哪些成员**（人能直接照抄）
    · `member` 缺省 = `dest` 的 basename；**裸文件资产写 `member=` → 解析期报错**
-   · 支持的归档：`.zip` / `.tar` / `.tar.gz` / `.tgz`（**按扩展名认，不猜内容**）；
-     `.tar.xz` 这类认得出是压缩包但不支持的 → **报错**，绝不静默当裸文件
+   · 支持的归档：`.zip` / `.tar` / `.tar.gz` / `.tgz` / `.tar.xz` / `.txz`
+     （**按扩展名认，不猜内容**；`.tar.xz` 是第 ⑦.3 块加的 —— 上游只发它的有
+     `watchexec` / `csvlens`，而 python 的 `tarfile` 本来就认 xz，不需要外部 `xz` 命令）；
+     `.tar.zst` 这类认得出是压缩包但不支持的 → **报错**，绝不静默当裸文件
      （那会装出一个敲了就 `exec format error` 的"二进制"，而 sha256 还是对的）
    · sha256 用清单里钉的那个：下载那步已经把过关，这一步再对一次（`__release/` 里被手工换过也能拦住）
 4. **离线族的包不归它管**：`source-offline.zip` / `release-offline.zip` /

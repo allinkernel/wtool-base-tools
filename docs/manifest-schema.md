@@ -297,9 +297,9 @@ $WTOOL_HOME/usr/bin/fzf          ──►  ../../wtool/tools/musl-bins/fzf/__ou
 
 | 形状 | `url` 的样子 | `member` | 引擎怎么取 |
 |---|---|---|---|
-| **归档** | `.zip` / `.tar` / `.tar.gz` / `.tgz` | 缺省 = `dest` 的 basename | 从里面取**那一个**成员，写到 `__output/<dest>`，权限 0755 |
+| **归档** | `.zip` / `.tar` / `.tar.gz` / `.tgz` / `.tar.xz` / `.txz` | 缺省 = `dest` 的 basename | 从里面取**那一个**成员，写到 `__output/<dest>`，权限 0755 |
 | **裸文件** | 其余（release 页上挂的就是那个二进制：`jq` / `yq` / `shfmt` / `b3sum` 那种） | **不许写**（写了 → 报错） | 下到的东西**本身就是**那个二进制，直接落到 `__output/<dest>` |
-| 认得出是压缩包但不支持的（`.tar.xz` …） | —— | —— | **报错**（不静默当裸文件 —— 那会装出一个 `exec format error` 的"二进制"） |
+| 认得出是压缩包但不支持的（`.tar.zst` …） | —— | —— | **报错**（不静默当裸文件 —— 那会装出一个 `exec format error` 的"二进制"） |
 
 只对 `kind="muslbin"` 的项目有意义 —— 写在别的类型上**报错**。
 

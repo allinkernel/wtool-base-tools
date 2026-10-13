@@ -26,7 +26,7 @@
   wtool_zip.py extract <zip> <dest-dir>
       按 zip 里的路径铺开；拒绝 .. 与绝对路径；还原 unix 权限位；
       软链条目按软链建（跟随软链打包的包不受影响）。
-  wtool_zip.py extract-tree <zip|tar.gz> <dest-dir> --from=<glob>
+  wtool_zip.py extract-tree <zip|tar.gz|tar.xz> <dest-dir> --from=<glob>
       **声明式解包**（ADR-0045 / D57）：只取归档里匹配 <glob> 的成员，并把 glob 里
       **第一个通配符之前的目录前缀**剥掉，余下部分铺到 dest-dir 下。
       例：--from='__output/**'、dest=<项目>/__output
@@ -36,12 +36,13 @@
   wtool_zip.py extract-member <资产> <dest-file> [--member=<归档内成员>]
       **② muslbin 的取货口**（ADR-0045 第 ⑦.2 块 / `<muslbin member= dest=>`）：
       从上游资产里取出**一个成员**，写到 dest-file（父目录自动建，权限 0755）。
-        · 资产是 `.zip` / `.tar.gz` / `.tgz` / `.tar` → 必须有 --member=<成员名>；
-          找不到那个成员 → 报错并列出归档里**有哪些**（不静默成功）。
+        · 资产是 `.zip` / `.tar.gz` / `.tgz` / `.tar` / `.tar.xz` / `.txz` →
+          必须有 --member=<成员名>；找不到那个成员 → 报错并列出归档里**有哪些**
+          （不静默成功）。
         · 资产是**裸文件**（jq / yq / shfmt / b3sum 那种没有归档的）→ 不带 --member，
           资产本身就是那个二进制。
-      ⚠️ 归档只按**扩展名**认（不猜内容）；认得出是归档、但不是这三种压缩的
-      （如 `.tar.xz`）→ 报错，绝不静默当成裸文件（那会装出一个敲了就
+      ⚠️ 归档只按**扩展名**认（不猜内容）；认得出是归档、但不是上面这几种压缩的
+      （如 `.tar.zst`）→ 报错，绝不静默当成裸文件（那会装出一个敲了就
       `exec format error` 的"二进制"）。
 """
 
@@ -62,9 +63,12 @@ FIXED_DATE = (1980, 1, 1, 0, 0, 0)
 # ③ 的 release.zip、离线自足包 release-offline.zip / source-offline.zip 是 zip；
 # ② 的上游资产绝大多数是 .tar.gz（29 个里 23 个），两个是 .zip，
 # 四个（jq/yq/shfmt/b3sum）**根本没有归档**，资产本身就是二进制。
-ARCHIVE_EXTS = (".zip", ".tar", ".tar.gz", ".tgz")
+# `.tar.xz` / `.txz` 是第 ⑦.3 块加的：上游只发 `.tar.xz` 的有好几家
+# （watchexec、csvlens），而解压不需要新依赖 —— `tarfile.open(…, "r:*")`
+# 按内容自动认，lzma 是 python 标准库（没有外部 `xz` 命令也能解）。
+ARCHIVE_EXTS = (".zip", ".tar", ".tar.gz", ".tgz", ".tar.xz", ".txz")
 # 认得出是压缩包、但今天不支持的：**报错**，不静默当裸文件（见 extract-member 的说明）
-ARCHIVE_LIKE_EXTS = (".tar.xz", ".txz", ".tar.bz2", ".tbz2", ".tar.zst",
+ARCHIVE_LIKE_EXTS = (".tar.bz2", ".tbz2", ".tar.zst",
                      ".tzst", ".7z", ".rar", ".lz4", ".lz", ".zst")
 
 
@@ -74,11 +78,11 @@ def die(msg):
 
 
 def archive_kind(path):
-    """`.zip` → "zip"；`.tar` / `.tar.gz` / `.tgz` → "tar"；其余 → ""。"""
+    """`.zip` → "zip"；`.tar` / `.tar.gz` / `.tgz` / `.tar.xz` / `.txz` → "tar"；其余 → ""。"""
     low = path.lower()
     if low.endswith(".zip"):
         return "zip"
-    if low.endswith((".tar", ".tar.gz", ".tgz")):
+    if low.endswith((".tar", ".tar.gz", ".tgz", ".tar.xz", ".txz")):
         return "tar"
     return ""
 
@@ -317,7 +321,7 @@ def do_extract_tree(archive, dest, glob):
     try:
         names = [n for n, _d, _l, _m, _o in iter_members(archive)]
     except (ValueError, zipfile.BadZipFile, tarfile.TarError) as exc:
-        return die("解不开 %s：%s\n  支持 .zip / .tar.gz / .tgz / .tar 四种（按扩展名认）"
+        return die("解不开 %s：%s\n  支持 .zip / .tar.gz / .tgz / .tar / .tar.xz / .txz 六种（按扩展名认）"
                    % (archive, exc))
     if not any(fnmatch.fnmatchcase(n.replace("\\", "/"), glob) for n in names):
         return die("归档里没有一个成员匹配 --from=%s（%s）—— release.json 的对照表对不上包"
@@ -384,7 +388,7 @@ def do_extract_member(asset, dest_file, member):
     try:
         names = [n for n, _d, _l, _m, _o in iter_members(asset)]
     except (ValueError, zipfile.BadZipFile, tarfile.TarError) as exc:
-        return die("解不开 %s：%s\n  支持 .zip / .tar.gz / .tgz / .tar 四种（按扩展名认）"
+        return die("解不开 %s：%s\n  支持 .zip / .tar.gz / .tgz / .tar / .tar.xz / .txz 六种（按扩展名认）"
                    % (asset, exc))
     if not any(_norm_member(n) == want for n in names):
         return die("在 %s 里找不到成员 [%s]（清单 <muslbin member=> 写错了？）\n%s"
