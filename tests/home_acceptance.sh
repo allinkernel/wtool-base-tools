@@ -59,7 +59,16 @@ WORK=/work; HOME_DIR=/root
 export HOME="$HOME_DIR"
 rm -rf "$WORK"; mkdir -p "$WORK"
 # 工作区只读挂着 → 拷一份出来当"满血工作区"
-cp -a /wtool/wtool-base-tools "$WORK/wtool-base-tools"
+#
+# ‼️ **过渡窗口**（2026-10-13）：引擎项目在 GitHub / 清单 / 代码里已经叫
+#    `wtool-base-tools`，但**本地目录改名是用户的一次性切换**，还没做 ——
+#    所以磁盘上可能还是 `bootstrap/`。两个名字都认，哪个在就用哪个
+#    （挂载命令不必跟着改名走；判据：随便哪一边存在都跑得起来）。
+_eng_src=/wtool/wtool-base-tools
+[ -d "$_eng_src" ] || _eng_src=/wtool/bootstrap
+[ -d "$_eng_src" ] || { echo "找不到引擎目录（/wtool/wtool-base-tools 或 /wtool/bootstrap）" >&2; exit 1; }
+echo "  引擎目录: $_eng_src"
+cp -a "$_eng_src" "$WORK/wtool-base-tools"
 rm -rf "$WORK/wtool-base-tools/lib/__pycache__" "$WORK/wtool-base-tools/.git"
 BOOT="$WORK/wtool-base-tools"
 WS="$WORK/ws"

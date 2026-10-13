@@ -76,7 +76,13 @@ echo "代理    : $http_proxy"
 
 WORK=/work; rm -rf "$WORK"; mkdir -p "$WORK"
 # 引擎：工作区是只读挂载 → 拷一份出来当"满血工作区"
-cp -a /wtool/bootstrap "$WORK/wtool-base-tools"
+# ‼️ **过渡窗口**（2026-10-13）：本地目录可能还叫 `bootstrap/`，也可能已经改成
+#    `wtool-base-tools/`（改名是用户的一次性切换）—— 两个名字都认。
+_eng_src=/wtool/wtool-base-tools
+[ -d "$_eng_src" ] || _eng_src=/wtool/bootstrap
+[ -d "$_eng_src" ] || { echo "找不到引擎目录（/wtool/wtool-base-tools 或 /wtool/bootstrap）" >&2; exit 1; }
+echo "  引擎目录: $_eng_src"
+cp -a "$_eng_src" "$WORK/wtool-base-tools"
 rm -rf "$WORK/wtool-base-tools/lib/__pycache__" "$WORK/wtool-base-tools/.git"
 BOOT="$WORK/wtool-base-tools"
 WT="sh $BOOT/wtool.sh"

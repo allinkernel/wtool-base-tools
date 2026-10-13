@@ -216,7 +216,9 @@ fi
 # 用真工作区里的 os/ubuntu 出一次计划：有记录就该是 dedup（跳过），没记录才是 replace
 WT_S=$( [ -f "$WTOOL_STATE/mirror.txt" ] && echo "$WTOOL_STATE" || echo "$HOME/.local/state/wtool" )
 mkdir -p /tmp/wtool-accept-sc
-python3 /wtool/wtool-base-tools/lib/wtool_plan.py plan-provision /wtool/os/ubuntu \
+# 过渡窗口：本地目录可能还叫 bootstrap/（改名是用户的一次性切换）
+_eng=/wtool/wtool-base-tools; [ -d "$_eng" ] || _eng=/wtool/bootstrap
+python3 "$_eng/lib/wtool_plan.py" plan-provision /wtool/os/ubuntu \
     --home "$HOME" --state "$WT_S" --scratch /tmp/wtool-accept-sc \
     --os-id ubuntu --os-codename noble --arch x86_64 2>&1 | grep -E "已经换过源|选了官方源|actions" | head -4
 _act=$(cut -f1 /tmp/wtool-accept-sc/sysfiles.tsv 2>/dev/null | head -1)
