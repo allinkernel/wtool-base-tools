@@ -1065,6 +1065,23 @@ case $_upload in
         bad "★开发机那一族的文件串到离线 release 页上了" "$_upload" ;;
     *) ok "★开发机那一族（release.zip / dist.json / source.zip）一个都没传" ;;
 esac
+# ★ 传给 gh 的必须是**完整路径**（2026-10-14 修的缺陷）
+#   判据：`gh release upload` 按**当前工作目录**解析文件名，而这条命令是从工作区根
+#   跑的 → 只给文件名时它永远找不到那个文件；打桩的假 gh 不在乎路径，所以这条断言
+#   是唯一能挡住回归的东西。要求：资产参数都以项目 __release/ 的**绝对路径**开头。
+_bare=0
+for _a in $_upload; do
+    case $_a in
+        *.zip|*.zip.sha256|*.tar.gz|*.tar.gz.sha256|*.part-??|check-hash*.sh)
+            case $_a in
+                "$P19/__release/"*) ;;
+                *) _bare=$((_bare + 1)) ;;
+            esac ;;
+    esac
+done
+[ "$_bare" = 0 ] \
+    && ok "★传给 gh 的资产是**绝对路径**（工作目录不是 __release/ 也找得到）" \
+    || bad "★有 $_bare 个参数只是文件名 —— gh 会在当前目录找不到它" "$_upload"
 # ★ tag 必须明显带 offline，而且和开发机那个 tag **不同**
 _otag=$(grep -oE 'release (create|view) [^ ]+' "$T/gh.log" | awk '{print $3}' | head -1)
 case $_otag in

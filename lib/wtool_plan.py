@@ -4393,6 +4393,11 @@ def offline_assets(args):
     （`<包名>.part-*`）、以及分卷时那份 `check-hash.sh`。**开发机那一族的
     （`release.zip` / `dist.json` / `.source`…）一个都不传** —— 两族落在两个
     release 页上（D56），传串了用户就会在两边的页面上都看到不该看到的包。
+
+    ‼️ 打印的是**完整路径**（2026-10-14 修）：`gh release upload` 是按**当前工作目录**
+    解析文件名的，而这个命令是从工作区根跑的 —— 原来这里只打文件名，于是
+    `publish-offline-release` **永远传不上去**（gh 报 "no such file"），而打桩的测试
+    看不出来（假 gh 不在乎路径）。`dev_assets` 一直是完整路径，这里对齐。
     """
     rel = os.path.abspath(args.release_dir)
     found = []
@@ -4402,10 +4407,11 @@ def offline_assets(args):
                 continue
             if not is_offline_asset(name):
                 continue
-            if os.path.isfile(os.path.join(rel, name)):
-                found.append(name)
-    for name in found:
-        print(name)
+            fp = os.path.join(rel, name)
+            if os.path.isfile(fp):
+                found.append(fp)
+    for path in found:
+        print(path)
     return 0 if found else 1
 
 
