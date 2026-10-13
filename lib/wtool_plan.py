@@ -4990,18 +4990,24 @@ def do_check(args):
     # env 块。**它不能删** —— 而删掉之后，下面那些检查会**一条都不报**：因为
     # "该有什么"本身就存在账本里，账本没了就无从对起。实测：
     #     rm -rf "$WTOOL_HOME/var" && wtool check     # 旧行为 → "一切对得上"
-    # 判据只能反过来：**装过的痕迹还在不在**。`env.{zsh,bash}` / `wtool/` / `usr/`
-    # 里只要有一个还在，就说明这台机器上确实装过 wtool，账本不该凭空消失。
+    # 判据只能反过来：**wtool 生成的那些"痕迹文件"还在不在**。
+    # ⚠️ 只认**跟着最后一个项目一起消失**的东西（`env.{zsh,bash}`）和
+    #    **uninstall 不收**的东西（install.sh 的两条入口链 + manifest 三件套）——
+    #    `wtool/` 与 `usr/` **不能**当判据：`wtool uninstall all` 之后它们照样在
+    #    （空目录），拿它们判会把"刚卸干净"误报成"账本丢了"（实测踩过：
+    #    export_test 场景 3 "uninstall 之后 check 干净" 当场红）。
     if not os.path.isdir(state):
         traces = [p for p in (os.path.join(home, "env.zsh"),
                               os.path.join(home, "env.bash"),
-                              os.path.join(home, WTOOL_SUBDIR),
-                              os.path.join(home, USR_SUBDIR))
+                              os.path.join(home, "install.sh"),
+                              os.path.join(home, WTOOL_SUBDIR, "install.sh"),
+                              os.path.join(home, WTOOL_SUBDIR, ".repo", "manifests",
+                                           "default.xml"))
                   if os.path.lexists(p)]
         if traces:
             bad("-", "账本目录不见了：%s（就是 $WTOOL_HOME/var）—— 它是 check / "
                      "uninstall 的**唯一依据**，删了之后\"该有什么\"就无从查起"
-                     "（这里看到装过的痕迹还在：%s）。"
+                     "（这里看到 wtool 装过的东西还在：%s）。"
                      "重建：在 $WTOOL_HOME 里再跑一次 install.sh"
                      % (state, "、".join(traces)))
 
