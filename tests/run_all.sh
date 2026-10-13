@@ -5,7 +5,8 @@
 #    数字对不上时先数 PASS 行，再回来改这里（括号里就是 2026-10-13 的实测真值）。
 #   tests/pairing_test.sh     install/uninstall 的完全配对；rc 里那两行**不由 install 写**
 #                             （默认只打印）、最后一卸两行跟着剥、source $WTOOL_HOME/env.zsh
-#                             之后项目变量真的在（42 条 —— ADR-0045 第 5a 块：35→42）
+#                             之后项目变量真的在；本机日志：每次装一个新目录、编号递增、
+#                             删了 check 照样干净（54 条 —— ADR-0045 第 5a 块：35→54）
 #   tests/provision_test.sh   sudo-install 层：系统文件 / source / task（40 条）
 #   tests/publish_test.sh     publish-release：打包 / 只上传 / release.json / 拒收下载包，
 #                             含"资产名必须 ASCII"（H27）、"建 release 带 --target"
@@ -35,10 +36,10 @@
 #   tests/docker_build_test.sh kind=docker 的引擎驱动构建（打桩 docker，不联网）；构建日志落在
 #                             **本机日志** $WTOOL_LOG_DIR/<项目>/build-logs/，账本里不再有它（102 条）
 #   tests/install_env_test.sh install.sh 第 0 步：镜像测速 / 挑源 / 换源与退路（打桩，不联网）（67 条）
-#                             —— 十一组共 1148 条（2026-10-13 实测）。数字和上一块**碰巧**一样：
-#                             ADR-0045 第 5a 块现场重写掉了一批旧断言（rc 块 / 影子 HOME /
-#                             ~/.wtool/.zshrc 那些），同时新增 contract +9、pairing +4、
-#                             docker-build +1。要数字请以**跑出来的 PASS 行**为准。
+#                             —— 十一组共 1174 条（2026-10-13 实测；ADR-0045 第 5a 块：
+#                             1148→1174 = pairing +16（本机日志那一场）、contract +9、
+#                             docker-build +1，同时现场重写掉一批旧断言（rc 块 / 影子 HOME /
+#                             ~/.wtool/.zshrc 那些）。要数字请以**跑出来的 PASS 行**为准。
 #   tests/docker_build_real.sh 同一件事的**真 docker** 冒烟测试（人工跑，见文件头）
 #   tests/container_test.sh   容器里从零装一遍（需要 docker，见文件头注释）
 #   tests/container_acceptance.sh  人工总验收：把它喂给容器里的 container-raw.sh（见文件头）

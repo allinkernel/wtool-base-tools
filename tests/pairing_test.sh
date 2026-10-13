@@ -18,6 +18,10 @@ fail=0
 
 ok()   { pass=$((pass + 1)); printf 'PASS  %s\n' "$1"; }
 bad()  { fail=$((fail + 1)); printf 'FAIL  %s\n' "$1"; [ $# -gt 1 ] && printf '      %s\n' "$2"; }
+chk()   { # chk <描述> <期望> <实际> —— 和 contract_test 同名同义
+    if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "期望: $2
+实际: $3"; fi
+}
 check() { # check <描述> <期望> <实际>
     if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "期望: $2
 实际: $3"; fi
@@ -365,6 +369,69 @@ for _dead in env list table; do
         *) bad "$_dead 提示已删掉并指向替代命令" "$_msg" ;;
     esac
 done
+
+# --------------------------------------------------------------------------
+printf '\n== 场景 11：本机日志 —— 每次安装一个新目录、编号递增、删了照样工作 ==\n'
+#   ADR-0045 §1.9：**账本**进 `$WTOOL_HOME/var`（跟着 .wtool 走），**日志**留本机
+#   `$WTOOL_LOG_ROOT/wtool-logs-<年>-<月日>-<时分>-<编号>/`（不跟着走、随便删）。
+#   ‼️ 这一场是**容器验收里发现的洞**：`install` 原来根本不建日志目录
+#      （惰性建，而 install 这条链上没人记账）—— 那时候容器里装完一遍，
+#      `~/.local/state/wtool` 压根不存在。
+h=$(newhome)
+export WTOOL_HOME="$h/home/.wtool" WTOOL_STATE="$h/home/.wtool/var" \
+    WTOOL_MANAGED_HOME="$h/home" WTOOL_LOG_ROOT="$h/logs" WTOOL_ROOT="$h/ws"
+proj="$h/ws/terminal/tmux"; mkrepo "$proj" "terminal/tmux" 50
+
+"$boot/wtool.sh" install "$proj" > "$h/i1.log" 2>&1
+_n1=$(ls -1d "$h"/logs/wtool-logs-* 2>/dev/null | wc -l | tr -d ' ')
+[ "$_n1" = 1 ] && ok "install 建了第一个日志目录" \
+    || bad "install 没建日志目录" "$(ls -1d "$h"/logs/* 2>/dev/null | paste -sd' ' -)"
+_d1=$(ls -1d "$h"/logs/wtool-logs-* 2>/dev/null | tail -1)
+[ -f "$_d1/terminal/tmux/install.log" ] \
+    && ok "日志里有这次 install 的一行（install.log）" \
+    || bad "日志目录里没有 install.log" "$(find "$h/logs" -type f 2>/dev/null | paste -sd' ' -)"
+grep -q '日志' "$h/i1.log" && ok "install 把日志路径打印出来了" \
+    || bad "install 没说日志落在哪" "$(cat "$h/i1.log")"
+# 账本里**不该**有日志（日志不跟着 .wtool 迁移）
+[ -e "$WTOOL_STATE/terminal/tmux/build-logs" ] \
+    && bad "账本里出现了日志目录" || ok "账本里没有日志（日志和账本分开了）"
+
+sleep 1
+"$boot/wtool.sh" install "$proj" > /dev/null 2>&1
+_n2=$(ls -1d "$h"/logs/wtool-logs-* 2>/dev/null | wc -l | tr -d ' ')
+[ "$_n2" = 2 ] && ok "第二次 install 又建一个新目录（同一分钟内编号 +1，永不覆盖）" \
+    || bad "第二次 install 没建新目录（现在 $_n2 个）" \
+           "$(ls -1d "$h"/logs/* 2>/dev/null | paste -sd' ' -)"
+_d2=$(ls -1d "$h"/logs/wtool-logs-* 2>/dev/null | tail -1)
+[ "$_d1" != "$_d2" ] && ok "两个目录不是同一个（不覆盖）" || bad "两次装进同一个日志目录"
+case $_d2 in
+    *-002) ok "编号递增（…-001 → …-002）" ;;
+    *) bad "编号没有递增" "$_d2" ;;
+esac
+# doctor 认的是**最新**那个
+"$boot/wtool.sh" doctor 2>/dev/null | grep -q "log latest  : $_d2" \
+    && ok "doctor 认的最新日志目录是编号最大的那个" \
+    || bad "doctor 认错了最新日志目录" "$("$boot/wtool.sh" doctor 2>/dev/null | grep 'log ')"
+# 旧目录**可以删**，删了 wtool 照常工作（只丢历史）
+rm -rf "$_d1"
+_rc=0
+"$boot/wtool.sh" check "$proj" > "$h/c.log" 2>&1 || _rc=$?
+chk "删掉旧日志之后 check 还是干净（退出 0）" "$_rc" "0"
+_rc=0
+"$boot/wtool.sh" install "$proj" > /dev/null 2>&1 || _rc=$?
+chk "删掉旧日志之后 install 照常（退出 0）" "$_rc" "0"
+# 连最新那个也删掉：check 不该因此报错（日志不是账本）
+rm -rf "$h"/logs/wtool-logs-*
+_rc=0
+"$boot/wtool.sh" check "$proj" > /dev/null 2>&1 || _rc=$?
+_out=$("$boot/wtool.sh" check "$proj" 2>&1) || true
+chk "★日志一个不剩，check 照样干净（日志可删，账本不可删）" "$_rc" "0"
+case $_out in
+    *wtool-logs*) bad "check 拿日志目录说事（日志不该进 check 的判据）" "$_out" ;;
+    *) ok "check 没提日志目录（它不是账本）" ;;
+esac
+"$boot/wtool.sh" uninstall "$proj" > /dev/null 2>&1
+rm -rf "$h"
 
 # --------------------------------------------------------------------------
 printf '\n----------------------------------------\n'
