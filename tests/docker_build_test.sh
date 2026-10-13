@@ -39,10 +39,14 @@ chk()  { [ "$2" = "$3" ] && ok "$1" || bad "$1" "期望 [$3]  实际 [$2]"; }
 T=$(mktemp -d "${TMPDIR:-/tmp}/wtool-dbuild.XXXXXX")
 trap 'rm -rf -- "$T"' EXIT INT TERM
 for _v in $(env | grep -o '^WTOOL_[A-Za-z_]*'); do unset "$_v"; done
+# ‼️ 固定"这一轮的日志目录"必须在这里定死（那个 unset 循环之后）——
+#    留给引擎自己 `date` 的话，中间几次 build 会各建一个新目录，桩里那个
+#    `$LOG_DIR` 就指到别处去了（实测：整场 build 全红，报 "Directory nonexistent"）。
+export WTOOL_LOG_DIR="$T/logs/wtool-logs-2026-1013-1200-001"
 export WTOOL_ROOT="$T/ws" WTOOL_HOME="$T/home/.wtool" \
     WTOOL_STATE="$T/home/.wtool/var" WTOOL_MANAGED_HOME="$T/home" \
     WTOOL_LOG_ROOT="$T/logs"
-mkdir -p "$WTOOL_STATE" "$WTOOL_HOME" "$T/bin" "$T/fix" "$T/diff" "$T/fakeroot"
+mkdir -p "$WTOOL_STATE" "$WTOOL_HOME" "$T/bin" "$T/fix" "$T/diff" "$T/fakeroot" "$WTOOL_LOG_DIR"
 
 P="$WTOOL_ROOT/editor/demo"
 mkdir -p "$P/build" "$P/scripts"
@@ -129,7 +133,9 @@ for m in json.load(sys.stdin).get("manifests", []):
     exec)
         # exec -d <容器> sh -c "sh /log/<slug>.run > /log/<slug>.log 2>&1; echo EXIT=$? >> ..."
         _ctr=$3; _script=$6
-        # 引擎给的是**容器里的**路径（/log/…）—— 桩在宿主机上，映射到 $LOG_DIR
+        # 引擎给的是**容器里的**路径（/log/…）—— 桩在宿主机上，映射到本机日志目录。
+        # 现算（不缓存）：引擎每一轮自己决定用哪个 `wtool-logs-…` 目录。
+        LOG_DIR="$WTOOL_LOG_DIR/editor/demo/build-logs/ubuntu_24.04"
         _run="$LOG_DIR/$(basename "$(printf '%s' "$_script" | sed 's/^sh //; s/ > .*//')")"
         _out="$LOG_DIR/$(basename "$(printf '%s' "$_script" | sed 's/^.*> //; s/ 2>&1.*//')")"
         : > "$_out"
@@ -181,12 +187,24 @@ exit 0
 DEOF
 chmod +x "$T/bin/docker"
 PATH="$T/bin:$PATH"; export PATH
+# ‼️ 桩里的 `LOG_DIR` **按执行时的 `$WTOOL_LOG_DIR` 现算**，不在文件头缓存。
+#    缓存过一次（`LOG_DIR="$WTOOL_LOG_DIR/…"`）就会跟引擎那一轮的目录脱钩：
+#    引擎第一次真要记日志时才建目录（`wt_log_dir_ensure`），桩拿到的却是旧值 →
+#    往一个不存在的目录写 `one.log`，整场 build 全红（实测报 "Directory nonexistent"）。
+export LOG_DIR="$WTOOL_LOG_DIR/editor/demo/build-logs/ubuntu_24.04"
+# ‼️ 断言用的日志路径**按当时的值现算**：引擎自己决定用哪个 `wtool-logs-…` 目录
+#    （`wt_log_dir_ensure`），文件头缓存一份会在"引擎那一轮算出来的目录和这里
+#    不一样"时静默指错地方（实测踩过：8 条断言全红，而日志其实好好地写在别处）。
+dbgl() { ls -1d "$WTOOL_LOG_ROOT"/*/editor/demo/build-logs/ubuntu_24.04/*.wtool.log \
+             2>/dev/null | tail -n 1 | sed 's|/editor/demo/build-logs/ubuntu_24.04/.*||'; }
+dbgd() { printf '%s/editor/demo/build-logs/ubuntu_24.04' "$(dbgl)"; }
 export DOCKER_LOG="$T/docker.log" DOCKER_IMAGES="$T/images.txt" DOCKER_PS="$T/ps.txt"
 export DOCKER_FIX="$T/fix" DOCKER_DIFF="$T/diff" DOCKER_PROJ="$P" DOCKER_TAR="$T/save.tar"
 export WTOOL_TEST_SLOW="${WTOOL_TEST_SLOW:-}"
-# 日志落点：项目 id 里的 `/` **保留**（和 artifacts.tsv / actions.tsv 同一个拼法，
-# B3 之前这里是 `editor_demo` —— 同一个项目在 state 下有两个家）
-export LOG_DIR="$T/state/editor/demo/build-logs/ubuntu_24.04" DOCKER_TIMELINE="$T/timeline.tsv"
+# 日志落点（ADR-0045 §1.9）：**本机日志**目录 `$WTOOL_LOG_DIR/<项目>/build-logs/<target>/`，
+# 不再是账本（`$WTOOL_STATE`）里。项目 id 里的 `/` **保留**（B3 之前是 `editor_demo`
+# —— 同一个项目有两个家）。`$WTOOL_LOG_DIR` 在文件开头就定死了（见那段注释）。
+export DOCKER_TIMELINE="$T/timeline.tsv"
 # 桩是子进程，只认导出的变量 —— $T 是测试里的局部变量，桩里读不到（踩过：路径变成 /fake…）
 export DOCKER_TMP="$T"
 export WTOOL_TEST_ROOT="$T/fakeroot"
@@ -450,8 +468,8 @@ chk "★② __layer/ 里已有这一层也重存（4 次 docker save）" "4" \
     "$(grep -c '^save ' "$DOCKER_LOG" || true)"
 # ①③ 的提示打在**那一层自己的日志**里：wt_docker_layer 在后台子 shell 里跑
 # （并行调度），输出进 <state>/<项目>/build-logs/<target>/<层>.wtool.log，不进主日志。
-grep -q '无视 docker 里已有的镜像' "$LOG_DIR"/*.wtool.log && ok "说了它在无视①" || bad "没提①"
-grep -q '无视 __output/ 里的旧产物' "$LOG_DIR"/*.wtool.log && ok "说了它在无视③" || bad "没提③"
+grep -q '无视 docker 里已有的镜像' "$(dbgd)"/*.wtool.log && ok "说了它在无视①" || bad "没提①"
+grep -q '无视 __output/ 里的旧产物' "$(dbgd)"/*.wtool.log && ok "说了它在无视③" || bad "没提③"
 # ③ 旧产物是**换掉**不是叠在上面：塞一个标记文件，重导之后它必须没了
 : > "$P/__output/ubuntu_24.04/one/STALE-MARKER"
 "$WT" build editor/demo --target=ubuntu_24.04 --rebuild > "$T/rb2.log" 2>&1 \
@@ -508,10 +526,10 @@ case $_runline in *'-e NO_PROXY'*) ok "传了 NO_PROXY（不走代理的域名�
 case $_runline in *'-e ALL_PROXY'*) ok "传了 ALL_PROXY" ;; *) bad "没传 ALL_PROXY" ;; esac
 chk "宿主没有那个目录时不挂 /mirror" "0" \
     "$(printf '%s\n' "$_runline" | grep -c '/mirror:ro' || true)"
-grep -q '本地镜像: 无' "$LOG_DIR"/*.wtool.log && ok "日志说了没挂本地镜像" \
-    || bad "日志没说不挂" "$(grep -m2 '本地镜像' "$LOG_DIR"/*.wtool.log)"
-grep -q '代理 : ' "$LOG_DIR"/*.wtool.log && ok "日志说了这次构建用的代理" \
-    || bad "日志没说代理" "$(grep -m2 '代理' "$LOG_DIR"/*.wtool.log)"
+grep -q '本地镜像: 无' "$(dbgd)"/*.wtool.log && ok "日志说了没挂本地镜像" \
+    || bad "日志没说不挂" "$(grep -m2 '本地镜像' "$(dbgd)"/*.wtool.log)"
+grep -q '代理 : ' "$(dbgd)"/*.wtool.log && ok "日志说了这次构建用的代理" \
+    || bad "日志没说代理" "$(grep -m2 '代理' "$(dbgd)"/*.wtool.log)"
 mkdir -p "$T/mirror/github"
 : > "$DOCKER_LOG"
 WTOOL_MIRROR_DIR="$T/mirror" "$WT" build editor/demo --target=ubuntu_24.04 --rebuild \
@@ -519,8 +537,8 @@ WTOOL_MIRROR_DIR="$T/mirror" "$WT" build editor/demo --target=ubuntu_24.04 --reb
 _mirline=$(grep -m1 '^run -d' "$DOCKER_LOG")
 case $_mirline in *"-v $T/mirror:/mirror:ro"*) ok "★本地镜像目录只读挂进 /mirror" ;;
     *) bad "没有挂 /mirror" "$_mirline" ;; esac
-grep -q "本地镜像: $T/mirror → /mirror:ro" "$LOG_DIR"/*.wtool.log && ok "日志里说了挂了什么" \
-    || bad "日志没说本地镜像" "$(grep -m2 '本地镜像' "$LOG_DIR"/*.wtool.log)"
+grep -q "本地镜像: $T/mirror → /mirror:ro" "$(dbgd)"/*.wtool.log && ok "日志里说了挂了什么" \
+    || bad "日志没说本地镜像" "$(grep -m2 '本地镜像' "$(dbgd)"/*.wtool.log)"
 
 
 echo "== 12. B1：导出被拒的层，不许被下一轮当成『已经导出好了』 =="
@@ -546,8 +564,8 @@ _rc=0
 [ -e "$P/__output/ubuntu_24.04/esc" ] \
     && bad "被拒之后 __output/ 里留了残骸" \
     || ok "★被拒之后不留残骸（连 payload/ 都没有）"
-grep -q '悬空' "$LOG_DIR/esc.wtool.log" && ok "说清了原因（换台机器必然悬空）" \
-    || bad "没说原因" "$(tail -4 "$LOG_DIR/esc.wtool.log" 2>/dev/null)"
+grep -q '悬空' "$(dbgd)/esc.wtool.log" && ok "说清了原因（换台机器必然悬空）" \
+    || bad "没说原因" "$(tail -4 "$(dbgd)/esc.wtool.log" 2>/dev/null)"
 # 镜像已经 commit 进 __layer/ 了（这是"构建成功、导出失败"的正常形状）——
 # 留着它下一轮只重试导出，不用重编（③ 才是这里的关键判据）
 chk "这一层在 __layer/ 里有（commit 成功了，失败的是导出）" "esc" \
@@ -619,16 +637,21 @@ cp "$T/layers.bak3" "$P/build/layers.tsv"
 rm -f "$P/scripts/ok.sh" "$P/scripts/bad.sh"
 
 
-echo "== 14. B3：构建日志落在 <state>/<项目路径>/build-logs/（保留 /） =="
-#   项目身份 = 路径（ADR-0037）：state 下别的东西（artifacts.tsv / actions.tsv…）
-#   都是 `$WTOOL_STATE/editor/demo/…`，日志不能另起一个 `editor_demo` 的家。
-[ -d "$WTOOL_STATE/editor/demo/build-logs/ubuntu_24.04" ] \
-    && ok "★日志目录保留项目 id 里的 /（和账本同一个家）" \
-    || bad "日志没落在 \$WTOOL_STATE/editor/demo/build-logs/ 下" \
-           "$(ls -d "$WTOOL_STATE"/*/ 2>/dev/null | paste -sd' ' -)"
-[ -e "$WTOOL_STATE/editor_demo" ] && bad "state 里还有 editor_demo 这种另起的拼法" \
+echo "== 14. B3：构建日志落在本机日志目录（\$WTOOL_LOG_DIR/<项目路径>/build-logs/，保留 /）=="
+#   项目身份 = 路径（ADR-0037）：日志目录里别的东西（actions.tsv / script-*.log…）
+#   都是 `…/editor/demo/…`，构建日志不能另起一个 `editor_demo` 的家。
+#   落点是**本机日志**（ADR-0045 §1.9）：不在账本 `$WTOOL_STATE` 里 ——
+#   日志跟着 `.wtool` 迁移没有意义（那是"这台机器上装过几次"的历史）。
+[ -d "$(dbgd)" ] \
+    && ok "★日志目录保留项目 id 里的 /（和账本同一个拼法）" \
+    || bad "日志没落在最新那个 \$WTOOL_LOG_DIR/editor/demo/build-logs/ 下" \
+           "$(ls -d "$WTOOL_LOG_ROOT"/*/editor/ 2>/dev/null | paste -sd' ' -)"
+[ -e "$(dbgl)/editor_demo" ] && bad "日志目录里还有 editor_demo 这种另起的拼法" \
     || ok "没有 editor_demo（/ → _）那种拼法了"
-[ -f "$WTOOL_STATE/editor/demo/build-logs/ubuntu_24.04/plan.tsv" ] \
+[ -e "$WTOOL_STATE/editor/demo/build-logs" ] \
+    && bad "构建日志还写在账本 \$WTOOL_STATE 里（那会跟着 .wtool 迁移）" \
+    || ok "账本里没有构建日志（日志和账本分开了）"
+[ -f "$(dbgd)/plan.tsv" ] \
     && ok "plan.tsv 也在同一个家（看日志不用猜路径）" || bad "plan.tsv 不在"
 
 

@@ -145,8 +145,10 @@ grep -q 'setopt auto_cd' "$h/home/.zshrc" \
     bad "uninstall 执行成功" "$(cat "$h/uninstall.log")"; }
 after_uninstall=$(snap "$h/home")
 check "uninstall 后 $HOME 与安装前一致" "$before" "$after_uninstall"
-check "rc 内容回到原样（只剩用户那两行，wtool 的东西剥干净）" \
-      "$(printf '# 用户自己的 zshrc\nsetopt auto_cd\nexport MY_STUFF=1\nexport WTOOL_HOME=~/.wtool\nsource ${WTOOL_HOME}/env.zsh\n')" \
+# 最后一个项目也卸了 → rc 里 wtool 的东西**全**剥掉（旧块 + 新形态那两行），
+# 回到"没装过 wtool"的样子（那两行本来就是 wtool 让用户加的，跟着一起走）
+check "rc 回到原样（一个项目都不剩，那两行也剥掉）" \
+      "$(printf '# 用户自己的 zshrc\nsetopt auto_cd\nexport MY_STUFF=1\n')" \
       "$(cat "$h/home/.zshrc")"
 rm -rf "$h"
 
