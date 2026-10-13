@@ -1582,6 +1582,15 @@ install 不替你做这个决定 —— 它永不联网。"
     # 顺带保证 ~/usr → ~/.wtool/usr 这条全局软链在（§8）。
     wt_env_sync
 
+    # 这次 install 的**本机日志目录**（ADR-0045 §1.9）：每次装一个新目录，
+    # 编号在同一分钟内递增、**永不覆盖**。没有项目脚本的 install（比如 ① 类
+    # 纯源码项目）也要有一个 —— 否则"历史上装过几次、每次装了什么"就断了。
+    if wt_log_dir_ensure; then
+        wt_project_log "$WTOOL_PROJECT_ID" "install.log" \
+            "install	$(wt_now)	$WTOOL_PROJECT_ROOT"
+        wt_info "日志        : $WTOOL_LOG_DIR/$WTOOL_PROJECT_ID/install.log"
+    fi
+
     wt_info "install 完成"
 }
 

@@ -3,7 +3,9 @@
 #
 # ⚠️ 下面括号里的条数**以跑出来的 PASS 行为准** —— 这行注释是手写的，会过期；
 #    数字对不上时先数 PASS 行，再回来改这里（括号里就是 2026-10-13 的实测真值）。
-#   tests/pairing_test.sh     install/uninstall 的完全配对（35 条）
+#   tests/pairing_test.sh     install/uninstall 的完全配对；rc 里那两行**不由 install 写**
+#                             （默认只打印）、最后一卸两行跟着剥、source $WTOOL_HOME/env.zsh
+#                             之后项目变量真的在（42 条 —— ADR-0045 第 5a 块：35→42）
 #   tests/provision_test.sh   sudo-install 层：系统文件 / source / task（40 条）
 #   tests/publish_test.sh     publish-release：打包 / 只上传 / release.json / 拒收下载包，
 #                             含"资产名必须 ASCII"（H27）、"建 release 带 --target"
@@ -22,18 +24,21 @@
 #   tests/contract_test.sh    新契约：新标签、L1/L2 两类链、执行顺序、check/repair、kill、
 #                             --dry-run 不跑项目脚本、uninstall 认 id 也跑项目脚本、
 #                             补全表与参数解析对得上、--id 老写法指路、wtool move、
-#                             改名残渣 check 报得出来（302 条 —— ADR-0045 第 3 块：
-#                             <link> 换成 <export_bin>/<export_usr>，两跳变 L1+L2）
+#                             改名残渣 check 报得出来；rc 那两行：缺→报、旧标记块→
+#                             替换、替换完→幂等；~/usr 在**被管理的家目录**里（311 条 ——
+#                             ADR-0045 第 3 块 + 第 5a 块：302→311）
 #   tests/export_test.sh      新标签 + L1/L2 两类链（ADR-0045 第 3 块）：15 条坏输入
 #                             各报错非 0、L1 绝对且**进账本**（悬空 check 必须报出来）、
 #                             L2 相对且 usr/<part> 是实体目录、冲突文案含"找助手"
 #                             （77 条）
 #   tests/layer_test.sh       __layer/<target>/ 那棵 OCI 镜像目录（打桩 docker/skopeo，不联网）（50 条）
-#   tests/docker_build_test.sh kind=docker 的引擎驱动构建（打桩 docker，不联网）（101 条）
+#   tests/docker_build_test.sh kind=docker 的引擎驱动构建（打桩 docker，不联网）；构建日志落在
+#                             **本机日志** $WTOOL_LOG_DIR/<项目>/build-logs/，账本里不再有它（102 条）
 #   tests/install_env_test.sh install.sh 第 0 步：镜像测速 / 挑源 / 换源与退路（打桩，不联网）（67 条）
-#                             —— 十一组共 1148 条（2026-10-13 实测；1051→1148 = ADR-0045
-#                             第 3 块：新标签 + L1/L2。contract 286→302、pairing 35→38、
-#                             export 新增 77；table 106→106（"中转链接"那条换成 L1））
+#                             —— 十一组共 1148 条（2026-10-13 实测）。数字和上一块**碰巧**一样：
+#                             ADR-0045 第 5a 块现场重写掉了一批旧断言（rc 块 / 影子 HOME /
+#                             ~/.wtool/.zshrc 那些），同时新增 contract +9、pairing +4、
+#                             docker-build +1。要数字请以**跑出来的 PASS 行**为准。
 #   tests/docker_build_real.sh 同一件事的**真 docker** 冒烟测试（人工跑，见文件头）
 #   tests/container_test.sh   容器里从零装一遍（需要 docker，见文件头注释）
 #   tests/container_acceptance.sh  人工总验收：把它喂给容器里的 container-raw.sh（见文件头）
