@@ -27,6 +27,102 @@ wt_run() {
 }
 
 # --------------------------------------------------------------------------
+# 日志目录 —— **本机、不迁移、随便删**（ADR-0045 §1.9 / P4）
+#
+#   $WTOOL_LOG_ROOT/wtool-logs-<年>-<月日>-<时分>-<编号>/      例 2026-1013-1901-001
+#
+# 判据（用户口径）："迁移之后，没有它还能不能正常查询子项目状态、回退？"
+#   → 不能 → 那是**账本**，进 `$WTOOL_HOME/var/`（跟着目录走）；
+#   → 能   → 那是**日志**，留在本机（这里），删掉只丢历史。
+#
+# 三条硬口径：
+#   * **每次安装一个新目录**：同一分钟内跑两次 = 两个目录，编号 +1，**永不覆盖**；
+#   * `wtool` **永远读最新那个**（wt_log_dir_latest）；
+#   * 旧目录**可以随便删**，删了 wtool 照常工作（删了 `var/` 才会报错）。
+#
+# 谁建：第一次真要记日志时惰性建（`wt_record_action` / `wt_project_log` 都会调
+# `wt_log_dir_ensure`）——这样 `--dry-run` 和只读命令一个字节都不写。
+# --------------------------------------------------------------------------
+# 下一个编号 = 同一分钟内已有的最大编号 + 1。
+# 用 `ls -d` 扫（不用通配符展开）——**编号不是定宽的**：测试里手写 `-001`、
+# `-002`，而 `sort -n` 才排得对（`-010` 在字典序里会跑到 `-009` 前面）。
+wt_log_dir_next_seq() {   # <年> <月日> <时分>
+    _ns_prefix="wtool-logs-$1-$2-$3-"
+    _ns_max=0
+    for _ns_d in $(ls -1d -- "$WTOOL_LOG_ROOT/${_ns_prefix}"* 2>/dev/null); do
+        _ns_n=${_ns_d##*-}
+        case $_ns_n in
+            ''|*[!0-9]*) continue ;;
+        esac
+        # 前导零会变成八进制字面量（`-008` 在 dash/bash 里都是语法错）——
+        # 先把零剥掉再比。**不用 `10#`**：那是 bashism，dash 会报
+        # "arithmetic expression: expecting EOF"（实测）。
+        _ns_n=${_ns_n#"${_ns_n%%[!0]*}"}
+        [ -n "$_ns_n" ] || _ns_n=0
+        [ "$_ns_n" -gt "$_ns_max" ] && _ns_max=$_ns_n
+    done
+    printf '%s' "$((_ns_max + 1))"
+}
+
+wt_log_dir_settings() {   # <年> <月日> <时分>
+    _ls_y=$1; _ls_md=$2; _ls_hm=$3
+    _ls_k=$(wt_log_dir_next_seq "$_ls_y" "$_ls_md" "$_ls_hm")
+    _ls_try=0
+    while [ "$_ls_try" -lt 100 ]; do
+        _ls_try=$((_ls_try + 1))
+        _ls_n=$(printf '%03d' "$_ls_k")
+        _ls_d="$WTOOL_LOG_ROOT/wtool-logs-$_ls_y-$_ls_md-$_ls_hm-$_ls_n"
+        if [ ! -e "$_ls_d" ] && mkdir -- "$_ls_d" 2>/dev/null; then
+            printf '%s' "$_ls_d"
+            return 0
+        fi
+        _ls_k=$((_ls_k + 1))
+    done
+    return 1
+}
+
+wt_log_dir_ensure() {
+    [ -n "${WTOOL_LOG_DIR:-}" ] && return 0
+    wt_dry && return 0
+    [ -n "${WTOOL_LOG_ROOT:-}" ] || return 0
+    mkdir -p -- "$WTOOL_LOG_ROOT" 2>/dev/null || return 0
+    # 日期分开取（不用 `date -d`）：GNU date 才有 `-d`，busybox / BSD 上没有。
+    _le_y=$(date +%Y 2>/dev/null || echo 0000)
+    _le_md=$(date +%m%d 2>/dev/null || echo 0000)
+    _le_hm=$(date +%H%M 2>/dev/null || echo 0000)
+    _le_d=$(wt_log_dir_settings "$_le_y" "$_le_md" "$_le_hm") || return 1
+    WTOOL_LOG_DIR=$_le_d
+    export WTOOL_LOG_DIR
+    return 0
+}
+
+# 最近一次（编号最大）的日志目录 —— **永远读最新那个**
+wt_log_dir_latest() {
+    [ -n "${WTOOL_LOG_ROOT:-}" ] || return 0
+    [ -d "$WTOOL_LOG_ROOT" ] || return 0
+    # 名字按字典序 == 时间序（年-月日-时分 都是定宽零填充），编号也定宽 3 位
+    ls -1d -- "$WTOOL_LOG_ROOT"/wtool-logs-* 2>/dev/null | LC_ALL=C sort | tail -n 1
+}
+
+# 往这一轮的日志目录里追加一条（项目 id 里的 `/` 原样保留，和账本的拼法一致）
+wt_project_log() {   # <项目 id> <文件名> <内容...>
+    _pl_id=$1; _pl_name=$2; shift 2
+    [ -n "$_pl_id" ] || return 0
+    wt_log_dir_ensure || return 0
+    [ -n "$WTOOL_LOG_DIR" ] || return 0
+    mkdir -p -- "$WTOOL_LOG_DIR/$_pl_id" 2>/dev/null || return 0
+    printf '%s\n' "$*" >> "$WTOOL_LOG_DIR/$_pl_id/$_pl_name" 2>/dev/null || true
+}
+
+# 这一轮日志目录下的一个日志文件（建不出目录就打印空 → 调用方当"不记日志"）
+wt_project_logfile() {   # <项目 id> <文件名>
+    wt_log_dir_ensure || return 0
+    [ -n "$WTOOL_LOG_DIR" ] || return 0
+    mkdir -p -- "$WTOOL_LOG_DIR/$1" 2>/dev/null || return 0
+    printf '%s/%s/%s' "$WTOOL_LOG_DIR" "$1" "$2"
+}
+
+# --------------------------------------------------------------------------
 # journal：install 做过什么，uninstall 就逆着做
 # 格式: action \t kind \t dest \t target \t sha256
 # --------------------------------------------------------------------------
@@ -1022,6 +1118,11 @@ wt_record_action() {   # <项目 id> <动作名> [说明]
     mkdir -p -- "$WTOOL_STATE/$_ra_id" 2>/dev/null || return 0
     printf '%s\t%s\t%s\n' "$_ra_act" "$(date +%Y-%m-%dT%H:%M:%S%z)" "$_ra_note" \
         >> "$WTOOL_STATE/$_ra_id/actions.tsv" 2>/dev/null || true
+    # 同一笔动作也进**本机日志**（`$WTOOL_LOG_DIR/<项目>/actions.tsv`）。
+    # 两边都记是有意的（ADR-0045 §1.9）：账本要能回退、跟着 `.wtool` 走；
+    # 日志只讲"这台机器上历史上装过几次、每次装了什么"，删了不影响任何功能。
+    wt_project_log "$_ra_id" "actions.tsv" \
+        "$_ra_act	$(date +%Y-%m-%dT%H:%M:%S%z)	$_ra_note"
 }
 
 # 最近一次动作的时间戳（没有就打印空）

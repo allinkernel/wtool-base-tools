@@ -282,6 +282,19 @@ MUSLBIN_ARCHES = ("x86_64",)
 SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
+def _managed_home():
+    """被管理的家目录（`$HOME` 本身）—— `~/usr` 那条全局软链的落点靠它。
+
+    新口径下这个值和 `$WTOOL_HOME`（= `.wtool` 根）**不是一回事**，所以不能再
+    从 `--home` 推（老代码就是那么推的，于是 `~/usr` 会指到 `.wtool/usr`）。
+    引擎（`wtool.sh`）把它导成 `WTOOL_MANAGED_HOME`；纯 Python 单测里拿不到就
+    返回 "" —— 调用方**跳过**"影子 HOME"那几条检查，否则 `~` 不存在时会报一堆
+    假警报。退回 `HOME` 是安全的：`do_check` 的 `--home`/`--state` 是显式参数，
+    它不读 HOME，所以环境里的 HOME 一定是**真**家目录。
+    """
+    return os.environ.get("WTOOL_MANAGED_HOME") or os.environ.get("HOME") or ""
+
+
 def dot_dir(home):
     """`.wtool` 根目录 —— **就是 `$WTOOL_HOME` 本身**（ADR-0045 §1.1 / D47）。
 
@@ -3169,19 +3182,6 @@ def render_rc(home, shell, old, want_lines):
     return "\n".join(rc_lines_for(home, shell)) + "\n"
 
 
-def _managed_home():
-    """被管理的家目录（`$HOME` 本身）—— `~/usr` 那条全局软链的落点靠它。
-
-    新口径下这个值和 `$WTOOL_HOME`（= `.wtool` 根）**不是一回事**，所以不能再
-    从 `--home` 推。引擎（`wtool.sh`）把它导成 `WTOOL_MANAGED_HOME`；
-    纯 Python 单测里拿不到就返回 ""（调用方跳过"影子 HOME"那几条检查，
-    否则 `~` 不存在时会报一堆假警报）。
-    用 `HOME` 是安全的：`do_check` 的 `--home`/`--state` 是显式参数，不读 HOME。
-    """
-    return os.environ.get("WTOOL_MANAGED_HOME") or os.environ.get("HOME") or ""
-
-
-
 def collect_env_blocks(state, shell, exclude=""):
     """扫出所有项目的 env 块，按 (priority, id) 排序。"""
     state = os.path.abspath(state)
@@ -4894,35 +4894,57 @@ def do_check(args):
             # 也可能只是拼错了。留给下面残渣那一节去认，认不出就一条也不报。
             want_id = project_id_of(want_abs, root)
 
-    # ---- 全局：~/usr 这条引擎自己造的软链
-    usr_dest = os.path.join(home, "usr")
-    usr_target = os.path.join(home, SHADOW_ROOT_NAME, "usr")
-    if os.path.islink(usr_dest):
-        if os.path.normpath(os.readlink(usr_dest)) != os.path.normpath(usr_target):
-            bad("-", "~/usr 指向了别处: %s（应该是 %s）"
-                % (os.readlink(usr_dest), usr_target))
-    elif os.path.exists(usr_dest):
-        bad("-", "~/usr 存在但不是软链（应该是 → ~/.wtool/usr）")
-    elif _installed_ids(state):
-        bad("-", "~/usr 不见了（有项目装着，它应该在）")
+    # ---- 全局：~/usr 这条引擎自己造的软链（影子 prefix 的入口）
+    # 新口径下 `~/usr` 和 `$WTOOL_HOME/usr` **不是一个目录**，所以落点得分开算：
+    # `usr_dest` 靠被管理的家目录，`usr_target` 靠 `--home`（= `.wtool` 根）。
+    managed = _managed_home()
+    if managed:
+        usr_dest = os.path.join(os.path.abspath(managed), "usr")
+        usr_target = os.path.join(dot_dir(home), USR_SUBDIR)
+        if os.path.islink(usr_dest):
+            if os.path.normpath(os.readlink(usr_dest)) != os.path.normpath(usr_target):
+                bad("-", "~/usr 指向了别处: %s（应该是 %s）"
+                    % (os.readlink(usr_dest), usr_target))
+        elif os.path.exists(usr_dest):
+            bad("-", "~/usr 存在但不是软链（应该是 → %s）" % usr_target)
+        elif _installed_ids(state):
+            bad("-", "~/usr 不见了（有项目装着，它应该在）")
 
-    # ---- 全局：env 汇总与 loader 块
-    # 汇总文件两个 shell 都要查：只查 zsh 的话，`~/.wtool/.bashrc` 被误删时
-    # check 一声不吭，而"那个 shell 的用户敲命令 command not found"——
-    # 正是最难查的半装状态（BL-24；生成那一侧本来就两个 shell 都做了）。
+    # ---- 全局：`$WTOOL_HOME/env.{zsh,bash}` 与 rc 里那两行（ADR-0045 §1.2 / D48）
+    # 两个 shell 都要查：只查 zsh 的话，`env.bash` 被误删时 check 一声不吭，
+    # 而"那个 shell 的用户敲命令 command not found"—— 正是最难查的半装状态
+    # （BL-24；生成那一侧本来就两个 shell 都做了）。
     for shell in ("zsh", "bash"):
-        agg = os.path.join(home, SHADOW_ROOT_NAME, ".%src" % shell)
         blocks = collect_env_blocks(state, shell)
+        agg = os.path.join(home, "env.%s" % shell)
         if blocks and not os.path.isfile(agg):
-            bad("-", "~/.wtool/.%src 不见了，但还有 %d 个项目的 env 块" % (shell, len(blocks)))
-        rc = os.path.join(home, ".%src" % shell)
-        text = read_text(rc) or ""
-        has_loader = any(l.strip() == LOADER_BEGIN for l in text.split("\n"))
-        has_blocks = bool(collect_env_blocks(state, shell))
-        if has_blocks and not has_loader:
-            bad("-", "%s 里没有 wtool 的 loader 块（env 不会生效）" % rc)
-        if has_loader and not has_blocks:
-            bad("-", "%s 里有 loader 块，但一个项目的 env 块都没有" % rc)
+            bad("-", "$WTOOL_HOME/env.%s 不见了，但还有 %d 个项目的 env 块"
+                % (shell, len(blocks)))
+        rc = os.path.join(os.path.abspath(managed), ".%src" % shell) if managed else ""
+        text = read_text(rc) if rc else None
+        if text is None:
+            continue                    # 没有 rc（测试夹具 / 别处跑）：不猜
+        legacy = bool(rc_strip_legacy(text)[1])
+        has_lines = rc_has_lines(text, shell)
+        if blocks and not has_lines:
+            bad("-", "%s 里没有 wtool 那两行（export WTOOL_HOME=… + source ${WTOOL_HOME}/env.%s），"
+                "env 不会生效" % (rc, shell))
+        if has_lines and not blocks:
+            bad("-", "%s 里有 wtool 那两行，但一个项目的 env 块都没有" % rc)
+        if legacy:
+            bad("-", "%s 里还有 wtool 的旧块（# >>> wtool >>> / per-project 块）；"
+                "旧机器要换成 rc 最后两行，跑一次 wtool install <项目> 会自动替换" % rc)
+
+    # ---- 全局：本机日志目录（ADR-0045 §1.9）
+    # 日志**删了不影响工作**，所以这里只查"能不能建/能不能写"，不把"历史日志"
+    # 当账本查。`--log-dir` 给了就顺带说清"这一轮是哪一本、最新是哪一本"。
+    log_dir = getattr(args, "log_dir", "") or ""
+    if log_dir:
+        if not os.path.isdir(log_dir):
+            bad("-", "本机日志目录不在: %s（本机日志可删，重建：随便跑一条会写日志的命令）"
+                % log_dir)
+        elif not os.access(log_dir, os.W_OK):
+            bad("-", "本机日志目录写不进去: %s" % log_dir)
 
     # ---- 逐项目
     for _prio, pid, path, pub in projects:
@@ -5119,13 +5141,15 @@ def kill_plan(args):
                     continue
                 seen.add(row[2])
                 print("link\t%s\t%s" % (row[2], row[3]))
-    usr_dest = os.path.join(home, "usr")
-    usr_target = os.path.join(home, SHADOW_ROOT_NAME, "usr")
-    if os.path.islink(usr_dest) and usr_dest not in seen:
-        print("link\t%s\t%s" % (usr_dest, usr_target))
-    for shell in ("zsh", "bash"):
-        print("rc\t%s" % os.path.join(home, ".%src" % shell))
-    print("dir\t%s" % os.path.join(home, SHADOW_ROOT_NAME))
+    managed = _managed_home()
+    if managed:
+        usr_dest = os.path.join(os.path.abspath(managed), "usr")
+        usr_target = os.path.join(dot_dir(home), USR_SUBDIR)
+        if os.path.islink(usr_dest) and usr_dest not in seen:
+            print("link\t%s\t%s" % (usr_dest, usr_target))
+        for shell in ("zsh", "bash"):
+            print("rc\t%s" % os.path.join(os.path.abspath(managed), ".%src" % shell))
+    print("dir\t%s" % dot_dir(home))
     print("dir\t%s" % state)
     return 0
 
@@ -5449,6 +5473,9 @@ def build_parser():
     ck.add_argument("--root", required=True)
     ck.add_argument("--home", required=True)
     ck.add_argument("--state", required=True)
+    # 这一轮的本机日志目录（ADR-0045 §1.9）：给了就查"在不在、写不写得进去"。
+    # 不给（老调用方 / 纯单测）就跳过那两条 —— 不把"没有日志"当错误。
+    ck.add_argument("--log-dir", default="")
     ck.add_argument("project", nargs="?")
 
     kp = sub.add_parser("kill-plan")

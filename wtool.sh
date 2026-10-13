@@ -424,10 +424,15 @@ wt_run_project_script() {   # <项目目录> <脚本名> [额外参数...]
         wt_step "工作目录 : $_rs_dir"
         wt_step "环境     : WTOOL_PREFIX=${WTOOL_PREFIX:-} WTOOL_HOME=$WTOOL_HOME WTOOL_PROJECT_ID=$_rs_id"
         wt_step "           WTOOL_ARTIFACTS=$WTOOL_ARTIFACTS WTOOL_STATE_DIR=$WTOOL_STATE/$_rs_id"
+        wt_step "           日志目录=${WTOOL_LOG_ROOT}/wtool-logs-<年>-<月日>-<时分>-<编号>（真跑时新建一个）"
         return 0
     fi
 
     mkdir -p -- "$(dirname -- "$WTOOL_ARTIFACTS")"
+    # 这一轮的日志目录：项目脚本的 stdout/stderr 落一份到
+    # `$WTOOL_LOG_DIR/<项目>/script-<脚本名>.log`（**本机日志**，见 lib/wtool_fs.sh
+    # 顶部那段）。顺手也给用户看 —— 用重定向而不是管道，脚本的退出码才不会被吞。
+    _rs_logf=$(wt_project_logfile "$WTOOL_PROJECT_ID" "script-$_rs_name.log") || _rs_logf=""
 
     _rs_args="$*"
 
@@ -444,9 +449,15 @@ wt_run_project_script() {   # <项目目录> <脚本名> [额外参数...]
         # publish / 表格 全都读它，谁都不许靠猜（见 guide.md「产物契约」）。
         export WTOOL_ARTIFACTS
         export WTOOL_STATE_DIR="$WTOOL_STATE/$WTOOL_PROJECT_ID"
+        export WTOOL_LOG_DIR
         cd -- "$_rs_dir" || exit 1
         # stdin 接 /dev/null：脚本不该从终端读，也不该偷引擎的输入
         # （清单走 fd 3，就是为了防这个——见 cmd_publish_release 的注释）
+        if [ -n "$_rs_logf" ]; then
+            printf '=== %s %s ===\n' "$(date +%Y-%m-%dT%H:%M:%S%z)" "$_rs_name" >> "$_rs_logf"
+            # shellcheck disable=SC2086
+            exec sh "$_rs_path" $_rs_args < /dev/null >> "$_rs_logf" 2>&1
+        fi
         # shellcheck disable=SC2086
         exec sh "$_rs_path" $_rs_args < /dev/null
     )
@@ -1035,12 +1046,15 @@ wt_docker_build() {   # <项目目录> <项目 id> [--target=<目标>] [--jobs=N
         printf '%s\n' "$_db_targets" | awk -F'\t' -v w="$_db_only" '$1==w{found=1} END{exit !found}' \
             || wt_die "$_db_pid 里没有目标 $_db_only（有 $(printf '%s\n' "$_db_targets" | cut -f1 | paste -sd, -)）"
     fi
-    # 日志根**保留项目 id 里的 `/`**（`$WTOOL_STATE/editor/astronvim_v5/build-logs/`）：
-    # 项目身份就是它的路径（ADR-0037），state 目录里所有别的东西（`artifacts.tsv`、
-    # `actions.tsv`、`meta.tsv`…）都是这个拼法。这里原来是 `tr '/' '_'`
-    # （`editor_astronvim_v5/`）—— 同一个项目在 state 下有两个家，是两套拼法，
+    # 构建日志根：`$WTOOL_LOG_DIR/<项目 id>/build-logs/`（**本机日志**，
+    # 不是账本 —— ADR-0045 §1.9：删掉日志只丢历史，`check`/`uninstall` 照样工作）。
+    # 路径**保留项目 id 里的 `/`**（`…/editor/astronvim_v5/build-logs/`）：
+    # 项目身份就是它的路径（ADR-0037），日志目录里所有别的东西（`actions.tsv`、
+    # `provision.log`…）都是这个拼法。这里原来是 `tr '/' '_'`
+    # （`editor_astronvim_v5/`）—— 同一个项目有两个家，是两套拼法，
     # 找日志的人会先找错地方（ADR-0029 §3 的勘误段，B3）。
-    _db_logroot="$WTOOL_STATE/$_db_pid/build-logs"
+    wt_log_dir_ensure || wt_die "建不了日志目录（WTOOL_LOG_ROOT=$WTOOL_LOG_ROOT）"
+    _db_logroot="$WTOOL_LOG_DIR/$_db_pid/build-logs"
 
     _db_n=0
     while IFS='	' read -r _db_t _db_base; do
@@ -2663,7 +2677,7 @@ cmd_check() {
         fi
     fi
     _out=$(python3 "$PY" check --root "$WTOOL_ROOT" --home "$WTOOL_HOME" \
-        --state "$WTOOL_STATE" ${_project:+"$_project"}) || _rc=$?
+        --state "$WTOOL_STATE" --log-dir "$WTOOL_LOG_DIR" ${_project:+"$_project"}) || _rc=$?
     _rc=${_rc:-0}
     # 迁移提示（不改退出码，也不进"修：wtool repair"那一类 —— repair 不搬目录）
     wt_check_old_dir_names "$_project_id" "$_project"
@@ -2768,12 +2782,16 @@ cmd_kill_self_forever() {
     awk -F'\t' '$1=="link"{printf "      %s\n", $2}' "$_scratch/kill.tsv" | head -20
     [ "$_nlink" -gt 20 ] && printf '      …（还有 %s 条）\n' "$((_nlink - 20))"
     printf '\n'
-    printf '  【影子 HOME】%s\n' "$WTOOL_HOME/.wtool"
-    printf '      （编译产物 ~/.wtool/usr、自举副本 ~/.wtool/bootstrap、\n'
-    printf '        所有项目的 env 汇总都在这里，一起没）\n'
-    printf '  【状态目录】%s\n' "$WTOOL_STATE"
+    printf '  【$WTOOL_HOME（.wtool 根）】%s\n' "$WTOOL_HOME"
+    printf '      （L1/L2 链、usr/ 里的产物、账本 var/、env.zsh/env.bash —— 一起没）\n'
+    printf '  【账本】%s\n' "$WTOOL_STATE"
     printf '      （装过什么、怎么撤的记录；删了就只能靠手工收拾）\n'
-    printf '  【rc 里的 loader 块】%s\n' "$WTOOL_HOME/.zshrc 和 $WTOOL_HOME/.bashrc 里 # >>> wtool >>> 那一段"
+    printf '  【rc 里 wtool 的东西】%s\n' \
+        "${WTOOL_MANAGED_HOME:-$HOME}/.zshrc 和 ${WTOOL_MANAGED_HOME:-$HOME}/.bashrc 里 wtool 那两行/旧块"
+    printf '      （新口径是最后两行 export WTOOL_HOME=… + source ${WTOOL_HOME}/env.zsh；\n'
+    printf '        旧机器的 # >>> wtool >>> 块也一起剥掉）\n'
+    printf '  【本机日志】%s\n' "${WTOOL_LOG_DIR:-$WTOOL_LOG_ROOT}"
+    printf '      （历史上装过几次；**删了不影响工作**，只丢历史）\n'
     printf '\n'
     wt_info "**不删**下面这些（它们不归 wtool 管）："
     printf '\n'
@@ -3020,8 +3038,9 @@ cmd_doctor() {
     wt_info "engine      : $ENGINE_VERSION"
     wt_info "bootstrap   : $WTOOL_BOOTSTRAP"
     wt_info "root        : $WTOOL_ROOT"
-    wt_info "home        : $WTOOL_HOME"
-    wt_info "state       : $WTOOL_STATE"
+    wt_info "home        : $WTOOL_HOME  (.wtool 根；WTOOL_HOME 由 rc 里那两行声明)"
+    wt_info "managed home: ${WTOOL_MANAGED_HOME:-$HOME}  (\$HOME 本身；只有 ~/usr 那条链还用它)"
+    wt_info "state       : $WTOOL_STATE  (账本，跟着 .wtool 走)"
     wt_info "prefix      : $WTOOL_PREFIX  (编译安装前缀)"
     wt_info "os          : $WTOOL_OS_ID $WTOOL_OS_VERSION ($WTOOL_OS_CODENAME) like=$WTOOL_OS_LIKE"
     wt_info "arch/jobs   : $WTOOL_ARCH / $WTOOL_JOBS"
@@ -3030,14 +3049,23 @@ cmd_doctor() {
     _n=0
     [ -f "$WTOOL_REGISTRY" ] && _n=$(grep -c . "$WTOOL_REGISTRY" 2>/dev/null || echo 0)
     wt_info "registered  : $_n 条"
-    _uk="$WTOOL_HOME/usr"
+    _uk="${WTOOL_MANAGED_HOME:-$HOME}/usr"
     if [ -L "$_uk" ]; then
         wt_info "~/usr       : $(readlink -- "$_uk")"
     elif [ -e "$_uk" ]; then
-        wt_warn "~/usr       : 存在但不是软链（应该是 → ~/.wtool/usr）"
+        wt_warn "~/usr       : 存在但不是软链（应该是 → $WTOOL_PREFIX）"
     else
         wt_info "~/usr       : 还没有（装第一个项目时由引擎建）"
     fi
+    # 日志目录（ADR-0045 §1.9）：**本机**、不迁移、永远读最新那个
+    _dl_latest=$(wt_log_dir_latest)
+    wt_info "log root    : $WTOOL_LOG_ROOT  (本机日志，删了不影响工作)"
+    if [ -n "$_dl_latest" ]; then
+        wt_info "log latest  : $_dl_latest"
+    else
+        wt_info "log latest  : （还没有 —— 第一次 install 时建）"
+    fi
+    [ -n "${WTOOL_LOG_DIR:-}" ] && wt_info "log this run: $WTOOL_LOG_DIR"
 
     # 环境变量（原来 `wtool env` 的那份，2026-09 并进 doctor）
     printf '\n'
@@ -3121,10 +3149,14 @@ EOF
     printf 'export WTOOL_BOOTSTRAP=%s\n' "$(_q "$WTOOL_BOOTSTRAP")"
     _c "# 整个 wtool 集合的根目录（repo 工作区）"
     printf 'export WTOOL_ROOT=%s\n' "$(_q "$WTOOL_ROOT")"
-    _c "# 被管理的家目录"
+    _c "# wtool 的家：**\`.wtool\` 根目录**（位置任意；rc 里那两行声明的就是它）"
     printf 'export WTOOL_HOME=%s\n' "$(_q "$WTOOL_HOME")"
-    _c "# 状态目录：registry.tsv / 每个项目的 journal.tsv 和 meta.tsv"
+    _c "# 账本：registry.tsv / 每个项目的 journal.tsv 和 meta.tsv（跟着 .wtool 走）"
     printf 'export WTOOL_STATE=%s\n' "$(_q "$WTOOL_STATE")"
+    _c "# 本机日志根（**不跟着迁移**；删了只丢历史）"
+    printf 'export WTOOL_LOG_ROOT=%s\n' "$(_q "$WTOOL_LOG_ROOT")"
+    _c "# 被管理的家目录（\$HOME 本身）—— 只有 ~/usr 那条链还用得上"
+    printf 'export WTOOL_MANAGED_HOME=%s\n' "$(_q "${WTOOL_MANAGED_HOME:-$HOME}")"
     _c ""
     _c "# ── 编译安装前缀 ──────────────────────────────────"
     _c "# wsw.sh / provision 只准往这里装；想卸载就删掉这里对应的文件"
