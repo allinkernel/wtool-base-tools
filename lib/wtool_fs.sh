@@ -1205,11 +1205,15 @@ wt_record_artifacts() {   # <项目 id> <项目目录> <来源前缀>
 #   * 删掉某个项目的块文件，它就自然从汇总里消失，不需要额外的"删除"逻辑
 #   * 早期版本散在用户 rc 里的 per-project 块，会在这里被自动清掉（迁移）
 # --------------------------------------------------------------------------
-wt_env_sync() {
+wt_env_sync() {   # [<要排除的项目 id>] [--keep-rc]
+    # `--keep-rc`：只重算 `env.{zsh,bash}`，**用户的 rc 一个字都不碰**。
+    # 目前只有 `wtool move` 用它（改名 = 卸载 + 重装，项目没消失，rc 得留着）。
+    _es_keep=""
     wt_dry && return 0
     _es_scratch=$(mktemp -d "${TMPDIR:-/tmp}/wtool-env.XXXXXX") || return 0
+    if [ "${2:-}" = "--keep-rc" ]; then _es_keep="--keep-rc"; fi
     if ! python3 "$PY" plan-env --home "$WTOOL_HOME" --state "$WTOOL_STATE" \
-            --exclude "${1:-}" --scratch "$_es_scratch" >/dev/null 2>&1; then
+            --exclude "${1:-}" $_es_keep --scratch "$_es_scratch" >/dev/null 2>&1; then
         rm -rf -- "$_es_scratch"
         wt_warn "环境变量汇总失败，跳过（rc 里的块可能不同步）"
         return 0

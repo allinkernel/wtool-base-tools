@@ -1591,7 +1591,36 @@ install 不替你做这个决定 —— 它永不联网。"
         wt_info "日志        : $WTOOL_LOG_DIR/$WTOOL_PROJECT_ID/install.log"
     fi
 
+    # rc 里那两行：**默认只打印，绝不代写**（ADR-0045 §1.2 / D31 / D48；
+    # 要代写是 `install.sh` 问过用户之后的事，§1.8 ⑥）。旧机器上 rc 里如果还留着
+    # 老形态（`# >>> wtool >>>` 块），上面的 wt_env_sync 已经**替换**成那两行。
+    wt_rc_hint "$WTOOL_PROJECT_ID"
+
     wt_info "install 完成"
+}
+
+# 打印"把这两行加到你的 rc 最后"（已经写过就不啰嗦）。
+# 判据是**那个 rc 文件里现成的内容**，不猜用户用哪个 shell。
+wt_rc_hint() {   # <项目 id>（只用于文案）
+    _rh_managed=${WTOOL_MANAGED_HOME:-$HOME}
+    _rh_any=0
+    for _rh_sh in zsh bash; do
+        _rh_rc="$_rh_managed/.${_rh_sh}rc"
+        [ -f "$_rh_rc" ] || continue
+        if grep -qE "^[[:space:]]*(export[[:space:]]+WTOOL_HOME=|(source|\.)[[:space:]]+\\\$\{?WTOOL_HOME\}?/env\.${_rh_sh})" \
+                "$_rh_rc" 2>/dev/null; then
+            _rh_any=1
+            break
+        fi
+    done
+    [ "$_rh_any" = 1 ] && return 0
+    printf '\n'
+    wt_info "还差一步：把这两行加到你的 rc **最后**（你用的是哪个 shell 就加哪个）："
+    wt_step "export WTOOL_HOME=$WTOOL_HOME"
+    wt_step "source \${WTOOL_HOME}/env.zsh     # bash 用户写 env.bash"
+    wt_info "（wtool **不会**代你改 rc —— 要代写请自己加，或者等 install.sh 问你）"
+    printf '\n'
+    return 0
 }
 
 # --------------------------------------------------------------------------
@@ -1804,11 +1833,21 @@ cmd_uninstall() {
     fi
 
     # 4.5) 重算环境变量汇总。必须在第 5 步之前：
-    #      最后一个项目卸载完时，汇总文件要消失、loader 块要从 rc 里剥掉，
+    #      最后一个项目卸载完时，汇总文件要消失、rc 里 wtool 的东西要从 rc 里剥掉，
     #      剥完 rc 才可能变成空文件，第 5 步才有东西可删。
     #      把"正在撤的这个项目"排除掉 —— 它的 state 目录到第 6 步才删，
     #      不排除的话 ~/usr 这条全局软链永远等不到"一个项目都不剩"。
-    wt_env_sync "$WTOOL_PROJECT_ID"
+    #
+    # ‼️ `WTOOL_KEEP_RC=1`（只由 `wtool move` 设）：这次卸载**不许动用户的 rc**。
+    #    move = 卸载 + 重装，项目并没有消失、只是换了名字 —— 那两行得原样留着
+    #    （实测踩过：不挡的话 `wtool move` 会把用户加的 `source …/env.zsh` 擦掉，
+    #    而 env 文件在 3/3 又被重新生成回来，rc 却回不来了）。
+    #    做法是让 planner **只算 env 文件、不碰 rc**（`--keep-rc`）。
+    if [ "${WTOOL_KEEP_RC:-0}" = 1 ]; then
+        wt_env_sync "$WTOOL_PROJECT_ID" --keep-rc
+    else
+        wt_env_sync "$WTOOL_PROJECT_ID"
+    fi
 
     # 5) 收尾：当初由 wtool 创建的 rc 文件，如果现在已经空了就删掉
     #    （必须放在最后：只有最后一个项目卸载完，共享的 ~/.zshrc 才会变空）
@@ -1976,9 +2015,16 @@ cmd_move() {
     wt_info "改名：$_mv_old_id  →  $_mv_new_id"
 
     wt_step "1/3 卸载 $_mv_old_id"
+    # ‼️ 这次卸载**不许动用户的 rc**：move = 卸载 + 重装，而"最后一个项目卸掉"时
+    #    `wt_env_sync` 会把 rc 里 wtool 那两行也剥掉（那是**别的**场景要的行为：
+    #    `uninstall` 之后不该再 `source` 一个已经不存在的 env.zsh）。
+    #    可这里那个项目**并没有消失**，只是换了名字 —— 剥掉的话，`wtool move`
+    #    会把用户加的那两行擦掉（实测踩过）。所以这一步只改软链/账本/env 块，
+    #    rc 一个字都不碰；3/3 的 install 会把 env 文件重新生成好。
     # 给**绝对路径**：这样 cmd_uninstall 走"目录还在"那条直路，不用去查表。
     # shellcheck disable=SC2086
-    cmd_uninstall "$_mv_old_abs" $_mv_extra || wt_die "卸载旧路径失败 —— 改名中止，目录没动"
+    WTOOL_KEEP_RC=1 cmd_uninstall "$_mv_old_abs" $_mv_extra \
+        || wt_die "卸载旧路径失败 —— 改名中止，目录没动"
 
     wt_step "2/3 mv → $_mv_new_abs"
     mkdir -p -- "$_mv_new_dir" || wt_die "建不了新路径的父目录: $_mv_new_dir"

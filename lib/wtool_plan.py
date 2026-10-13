@@ -3179,35 +3179,51 @@ def rc_strip_new_lines(text, shell):
 
 
 def render_rc(home, shell, old, want_lines):
-    """算出用户 rc 的新内容（None = 这个文件不该存在）。
+    """算出用户 rc 的新内容（None = 这个文件不改 / 不该存在）。
 
-    `want_lines=True`：还有项目装着 → rc 最后两行**应该**是那两行。
-    `want_lines=False`：一个项目都不剩 → 把 wtool 的东西剥干净（恢复原样）。
+    **默认只打印，不代写**（ADR-0045 §1.2 / D31 / D48）：谁把这两行写进
+    用户的 rc，是 `install.sh` **问过用户**之后的事（§1.8 ⑥）。所以这里
+    只做两件事：
 
-    三种输入：
-      * 旧形态（`# >>> wtool >>>` 块 / per-project 块）→ **替换**成那两行（幂等）；
-      * 已经是那两行 → 原样返回（**跑两次只两行**）；
-      * 什么都没有（新机器）→ 什么都不写（**默认只打印**：谁写这两行是
-        `install.sh` 问过用户之后的事，见 DESIGN §1.8 ⑥ / D31）。
+      * **旧形态迁移**：rc 里有 `# >>> wtool >>>` 块 / per-project 块
+        → 剥干净并**换成那两行**（幂等 —— 已经是那两行就原样返回）；
+      * **一个项目都不剩**：把 wtool 的东西（旧块 + 新形态那两行）全剥掉，
+        恢复成没装过的样子。
+
+    其余情况一律**不动**用户的 rc：
+      * 新机器、rc 里没有 wtool 的任何东西 → 返回 None（要打印那两行的是
+        调用方 `cmd_install`，不是这里）—— 这正是"默认只打印"的含义；
+      * 已经是那两行 → 原样返回（**跑两次只有两行**）。
     """
     if old is None and not want_lines:
         return None
     text = old or ""
     body, had_legacy = rc_strip_legacy(text)
     if not want_lines:
-        # 一个项目都没装：wtool 的东西**全**剥干净（旧块 + 新形态那两行），
-        # 空了就删文件。新形态那两行也要剥 —— 否则 `wtool uninstall all` /
-        # `kill-self-forever` 之后 rc 里还留着 `source …/env.zsh`，
-        # 而那个文件已经没了（下一次开 shell 报 source 失败）。
+        # 一个项目都没装：wtool 的东西**全**剥干净（旧块 + 新形态那两行）。
+        # 新形态那两行也要剥 —— 否则 `wtool uninstall all` / `kill-self-forever`
+        # 之后 rc 里还留着 `source …/env.zsh`，而那个文件已经没了
+        # （下一次开 shell 报 source 失败）。
         body2, had_new = rc_strip_new_lines(body, shell)
         if not had_legacy and not had_new:
             return None if old is None else text
-        return body2 or None
-    if rc_has_lines(body, shell):
-        # 已经是新形态：不动它（幂等）—— **跑两次只有两行**
+        # ⚠️ 剥完是空串时**也要留着这个文件**（返回空串而不是 None）：
+        #    它是**用户**建的 —— `install` 从来不建 rc，`uninstall` 也就不该删它。
+        #    （返回 None 会让 shell 侧发一条 `remove`，实测踩过：
+        #     夹具自己的 .zshrc 被删掉，后面那几场全砸在 "No such file" 上。）
+        return body2
+    if not had_legacy:
+        # 没有旧块要迁移 → **用户的 rc 一个字都不动**：
+        #   * 已经是那两行 → 原样返回（幂等，跑两次还是两行）；
+        #   * 新机器 / 还没写过那两行 → **也原样返回**（要提醒的是 `wt_rc_hint`，
+        #     它只打印）。
+        # ‼️ 这里**必须**返回 `old`（哪怕它里面没有那两行）：返回 None 会让 shell
+        #    侧把 rc 当成"不该存在"发一条 `remove` —— 实测踩过：那会把**用户自己
+        #    的 `.zshrc` 删掉**（跑 `wtool move` 时最明显：uninstall 那一步的
+        #    wt_env_sync 一看"这个 rc 里没有我们的两行"，就把它删了）。
         return old
-    if old is None and not had_legacy:
-        return None                     # 新机器：默认只打印，不代写
+    if rc_has_lines(body, shell):
+        return old                     # 两行已经在（旧块和它并存过）：去掉旧块
     if body:
         return body.rstrip("\n") + "\n" + "\n".join(rc_lines_for(home, shell)) + "\n"
     return "\n".join(rc_lines_for(home, shell)) + "\n"
@@ -3285,7 +3301,7 @@ def render_env_file(home, state, shell, exclude=""):
     return "\n".join(ENV_CHECK_LINES + parts).rstrip("\n") + "\n"
 
 
-def render_env(home, state, shell, exclude=""):
+def render_env(home, state, shell, exclude="", keep_rc=False):
     """算出两个文件的新内容：用户的 rc，和 `$WTOOL_HOME/env.<shell>`。
 
     返回 (rc_path, rc_text|None, agg_path, agg_text|None)
@@ -3297,7 +3313,13 @@ def render_env(home, state, shell, exclude=""):
 
     agg_text = render_env_file(home, state, shell, exclude=exclude)
     old = read_text(rc_path)
-    rc_text = render_rc(home, shell, old, want_lines=agg_text is not None)
+    if keep_rc:
+        # `wtool move` 那条路：这个项目并没有消失，只是换了名字 ——
+        # 用户的 rc 一个字都不许改（`uninstall` 那一步会把"最后一个项目卸了"
+        # 当成真的，顺手把那两行剥掉，实测踩过）。
+        rc_text = old
+    else:
+        rc_text = render_rc(home, shell, old, want_lines=agg_text is not None)
     return rc_path, rc_text, agg_path, agg_text
 
 
@@ -3310,9 +3332,11 @@ def plan_env(args, scratch):
     """
     rows = []
     exclude = getattr(args, "exclude", "") or ""
+    keep_rc = bool(getattr(args, "keep_rc", False))
     for shell in ("zsh", "bash"):
         rc_path, rc_text, agg_path, agg_text = render_env(args.home, args.state,
-                                                          shell, exclude=exclude)
+                                                          shell, exclude=exclude,
+                                                          keep_rc=keep_rc)
 
         if rc_text is None:
             if os.path.isfile(rc_path):
@@ -4987,13 +5011,14 @@ def do_check(args):
             continue
         legacy = bool(rc_strip_legacy(text)[1])
         has_lines = rc_has_lines(text, shell)
-        # ⚠️ 这里也按 `installed` 判，**不能**按 `blocks`：只声明了 zsh 的项目装着的
-        #    时候，bash 那边一个块都没有，而用户照样该在 `.bashrc` 里写那两行 ——
-        #    按 blocks 判的话 `wtool check` 会对着一台完全正常的机器一路报红
-        #    （实测：export_test 第 3 节就是这么红的）。
-        if installed and not has_lines:
-            bad("-", "%s 里没有 wtool 那两行（export WTOOL_HOME=… + source ${WTOOL_HOME}/env.%s），"
-                "env 不会生效" % (rc, shell))
+        # ‼️ **"没有那两行"不算错**（ADR-0045 §1.2 / D48）：`install` 默认**只打印**
+        #    那两行、不代写，所以"还没写"是完全正常的中间状态 —— 提醒是
+        #    `install` / `wtool doctor` 的活。`check` 只对"**摆错了**"报：
+        #      * rc 里还有 wtool 的旧块（老机器没迁移）；
+        #      * rc 里有那两行，可一个项目都没装（残渣）。
+        #    （原来这里按 `blocks`/`installed` 去要那两行，实测会把
+        #     "刚装完、用户还没来得及加"的机器报成红的 —— 连 `wtool move`
+        #     之后的正常机器也一起报。）
         if has_lines and not installed:
             bad("-", "%s 里有 wtool 那两行，但一个项目都没装（残渣？）" % rc)
         if legacy:
@@ -5443,6 +5468,8 @@ def build_parser():
 
     pe = sub.add_parser("plan-env")
     pe.add_argument("--home", required=True)
+    # --keep-rc：只重算 env.{zsh,bash}，用户的 rc 一个字都不碰（`wtool move` 用）
+    pe.add_argument("--keep-rc", action="store_true")
     pe.add_argument("--state", required=True)
     pe.add_argument("--scratch", required=True)
     # 正在卸载的那个项目要从"还剩谁"里扣掉：它的 state 目录这会儿还在

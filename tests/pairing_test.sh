@@ -31,10 +31,12 @@ newhome() {
     h=$(mktemp -d "${TMPDIR:-/tmp}/wtool-home.XXXXXX")
     mkdir -p "$h/home"
     printf '# 用户自己的 zshrc\nsetopt auto_cd\nexport MY_STUFF=1\n' > "$h/home/.zshrc"
+    printf '# 用户自己的 bashrc\n' > "$h/home/.bashrc"
     # 新口径（ADR-0045 §1.2 / D48）：**用户**在 rc 最后写那两行。
     # 引擎默认只打印、不代写（要用户点头），所以夹具里自己写上 ——
-    # 之后"env 真的能加载起来"那几场才有意义。
+    # 之后"env 真的能加载起来"那几场才有意义，而且 install 不会再啰嗦那两行。
     wt_rc_lines "$h/home/.zshrc"
+    wt_rc_lines "$h/home/.bashrc"
     # 项目都建在工作区里：**项目身份 = 它相对工作区根的路径**（ADR-0037），
     # 所以"项目放在哪个路径"就决定了它的身份，下面断言里那些 `wtool:<路径>`
     # 和 L1 链 `<dot>/wtool/<路径>` 都是这么来的。
@@ -46,12 +48,16 @@ newhome() {
     echo "$h"
 }
 
-# rc 最后那两行（模拟用户照文档自己加）
-wt_rc_lines() {
-    cat >> "$1" <<'EOF'
-export WTOOL_HOME=~/.wtool
-source ${WTOOL_HOME}/env.zsh
-EOF
+# rc 最后那两行（模拟用户照文档自己加）——按文件后缀给对应的 env 文件
+wt_rc_lines() {   # <rc 文件>
+    case $1 in
+        *.bashrc) _wl_env=env.bash ;;
+        *)        _wl_env=env.zsh ;;
+    esac
+    {
+        printf 'export WTOOL_HOME=~/.wtool\n'
+        printf 'source ${WTOOL_HOME}/%s\n' "$_wl_env"
+    } >> "$1"
 }
 
 snap() { find "$1" -mindepth 1 -printf '%y %p -> %l\n' | sort; }
@@ -149,11 +155,15 @@ grep -q 'setopt auto_cd' "$h/home/.zshrc" \
     bad "uninstall 执行成功" "$(cat "$h/uninstall.log")"; }
 after_uninstall=$(snap "$h/home")
 check "uninstall 后 $HOME 与安装前一致" "$before" "$after_uninstall"
-# 最后一个项目也卸了 → rc 里 wtool 的东西**全**剥掉（旧块 + 新形态那两行），
-# 回到"没装过 wtool"的样子（那两行本来就是 wtool 让用户加的，跟着一起走）
-check "rc 回到原样（一个项目都不剩，那两行也剥掉）" \
+# 最后一个项目也卸了 → rc 里 wtool 的东西**全**剥掉（旧块 + 新形态那两行）。
+# ⚠️ 文件本身**留着**（它是**用户**建的；`install` 从来没建过 rc）——
+#    剥完只剩用户自己那几行，或者干脆是空文件。
+check "rc 里 wtool 的东西全剥掉（一个项目都不剩）" \
       "$(printf '# 用户自己的 zshrc\nsetopt auto_cd\nexport MY_STUFF=1\n')" \
       "$(cat "$h/home/.zshrc")"
+[ -f "$h/home/.zshrc" ] \
+    && ok "★rc 文件本身还在（install 没建过它，uninstall 也就不删它）" \
+    || bad "uninstall 把用户的 rc 文件删了"
 rm -rf "$h"
 
 # --------------------------------------------------------------------------

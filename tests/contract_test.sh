@@ -672,18 +672,29 @@ case $_out in
     *) bad "删了 env.bash check 还是不吭声" "$_out" ;;
 esac
 [ "$_rc" != 0 ] && ok "check 退出码非 0" || bad "报了问题却退 0"
-# rc 里那两行不在（文件在、行不在）也要报 —— 这才是真出问题的形态。
-# ⚠️ 夹具的 .zshrc 是 `newhome` 写的，里面**已经**有那两行（模拟用户照文档加过）——
-#    这里要验的正是"没有那两行"，所以先写成一份**干净**的 rc。
+# ‼️ "rc 里还没有那两行"**不算错**（ADR-0045 §1.2 / D48）：install 默认只打印、
+#    不代写，所以"用户还没来得及加"是正常状态 —— 提醒归 install / doctor。
+#    check 只对"**摆错了**"报：旧块没迁、或者有那两行却一个项目都没装。
 "$WT" install "$PB" >/dev/null 2>&1          # 先把 env.bash 补回来
 printf '# 用户自己的 zshrc\nexport MY_STUFF=1\n' > "$WTOOL_MANAGED_HOME/.zshrc"
 _rc=0
 _out=$("$WT" check "$PB" 2>&1) || _rc=$?
+chk "★rc 里还没有那两行不算错（install 本来就只打印）" "$_rc" "0"
 case $_out in
-    *"里没有 wtool 那两行"*) ok "rc 在、那两行不在 → check 报出来" ;;
-    *) bad "rc 里没有那两行，check 却一声不吭" "$_out" ;;
+    *"里没有 wtool 那两行"*) bad "check 去要那两行了（那是 install/doctor 的提醒）" "$_out" ;;
+    *) ok "check 没去要那两行" ;;
 esac
-[ "$_rc" != 0 ] && ok "缺那两行时 check 退出码非 0" || bad "报了问题却退 0"
+# 反过来：一个项目都没装、rc 里却留着那两行 → 那是**残渣**，要报
+"$WT" uninstall "$PB" --no-script >/dev/null 2>&1 || true
+printf '# 用户自己的 zshrc\nexport WTOOL_HOME=~/.wtool\nsource ${WTOOL_HOME}/env.zsh\n' \
+    > "$WTOOL_MANAGED_HOME/.zshrc"
+_rc=0
+_out=$("$WT" check 2>&1) || _rc=$?
+case $_out in
+    *"一个项目都没装"*) ok "★rc 里留着那两行、账本却空了 → check 报残渣" ;;
+    *) bad "残渣没被报出来" "$_out" ;;
+esac
+[ "$_rc" != 0 ] && ok "残渣时 check 退出码非 0" || bad "报了问题却退 0"
 # 旧形态（`# >>> wtool >>>` 块）要能被认出来并提示替换（老机器迁移）
 "$WT" install "$PB" >/dev/null 2>&1
 printf '# 用户自己的 zshrc\n# >>> wtool >>>\n. "$HOME/.wtool/.zshrc"\n# <<< wtool <<<\n' \
