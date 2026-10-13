@@ -1674,7 +1674,7 @@ def plan_install(args, scratch):
 
         ⚠️ 为什么不沿用老的两条（`reg` + 按需 `link`）：软链已经存在且指向正确时
         老写法只发 `reg` —— **journal 里就没有这条账**，于是它悬空之后
-        `wtool check` 看不见（DESIGN §2.8 实测过的假绿：把 `<D>/bootstrap` 弄悬空，
+        `wtool check` 看不见（DESIGN §2.8 实测过的假绿：把 `<D>/wtool-base-tools` 弄悬空，
         check 照样报"一切对得上"）。L1/L2 都必须进账本（P3）。
         """
         rows.append(("reglink", kind, dest, target, "", ""))
