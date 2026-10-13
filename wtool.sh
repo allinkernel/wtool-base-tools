@@ -297,6 +297,11 @@ wt_print_plan() {
             link) wt_step "link  $_dest -> $_source" ;;
             reglink) wt_step "check $_dest -> $_source（已在，只记账）" ;;
             rc)   wt_step "rc    $_dest" ;;
+            generate)
+                case $_kind in
+                    script) wt_step "gen   $_dest（跑脚本 $_source）" ;;
+                    *)      wt_step "gen   $_dest（跑命令 $_source）" ;;
+                esac ;;
             prune) wt_step "prune $_dest（清单里已经没有，删掉这条软链）" ;;
         esac
     done < "$_plan"
@@ -321,16 +326,23 @@ wt_all_projects() {   # <过滤条件>：build | download | install | publish | 
         _ap_sudo=$(python3 "$PY" sudo-list --root "$WTOOL_ROOT" | cut -f2)
     fi
     # 受**项目类型门禁**管的过滤条件：适用名单由 py 一次给全（别在循环里逐个起进程）。
-    # 只有 `build` 需要接 —— `download` / `publish` 那两条是 KIND_GATE_DEFERRED
-    # （本轮放行，见 wtool_plan.py），等离线族落地那一轮照抄这一句即可。
+    # 只有 `build` 需要接 —— `download` 那份名单也是 py 给的（见下），
+    # `publish` 那条按"发布声明（publish kind）"筛，和类型无关。
     #
     # 为什么要接：`wtool build all` 走的就是这个过滤器。不按类型筛的话，
     # 一个"kind=source 但目录里放着 scripts/build.sh"的项目会被 `all` 选中并**真跑**，
     # 那就绕过了分发点的门禁、落回"去找 scripts/build.sh"的老路。
     _ap_applicable=""
+    _ap_download=""
     case $_ap_filter in
         build) _ap_applicable=$(python3 "$PY" kind-caps --applicable \
                                     --command build --root "$WTOOL_ROOT") ;;
+        # 「能下载」的判据在 py 里**只写一处**（ADR-0045 第 ⑦.2 块）：
+        #   ② muslbin → wtool.xml 里有 <muslbin>
+        #   ③ docker  → 提交了 scripts/release.json
+        # 以前这里只认 release.json，于是 ② 类**永远选不中**（`download-release all`
+        # 漏掉全部 29 个 musl 项目，而它们才是"下载"这条路的主角）。
+        download) _ap_download=$(python3 "$PY" download-list --root "$WTOOL_ROOT") ;;
     esac
     python3 "$PY" publish-list --root "$WTOOL_ROOT" |
     while IFS='	' read -r _prio _pid _path _kind _script _tpl _to; do
@@ -338,8 +350,7 @@ wt_all_projects() {   # <过滤条件>：build | download | install | publish | 
         case $_ap_filter in
             build)    wt_project_script "$_path" build.sh    >/dev/null 2>&1 || continue
                       printf '%s\n' "$_ap_applicable" | grep -qxF -- "$_path" || continue ;;
-            # 「能下载」= 项目里**提交了** scripts/release.json（ADR-026）
-            download) [ -f "$_path/scripts/release.json" ] || continue ;;
+            download) printf '%s\n' "$_ap_download" | grep -qxF -- "$_pid" || continue ;;
             publish)  [ "$_kind" = "none" ] && continue ;;
             sudo)     printf '%s\n' "$_ap_sudo" | grep -qxF -- "$_pid" || continue ;;
             install)  ;;
@@ -1277,6 +1288,11 @@ wt_dl_one() {   # <url> <目标文件> <sha256>（sha256 空 = 不校验）
     if [ -n "$_d_sha" ]; then
         _d_got=$(sha256sum -- "$_d_part" 2>/dev/null | cut -d' ' -f1)
         if [ "$_d_got" != "$_d_sha" ]; then
+            # 期望/实际都打出来（**唯一**还看得到实际值的地方 —— 下一行就把它删了）。
+            # 报"sha256 不匹配"却不给实际值，人没法判断是"上游重打了 tag"还是
+            # "代理塞了个错误页"（后者实际值往往是错误页的 hash）。
+            wt_warn "  sha256 不匹配：期望 $_d_sha"
+            wt_warn "                实际 $_d_got（这份已删，不留在 __release/）"
             rm -f -- "$_d_part"
             return 2
         fi
@@ -1312,16 +1328,14 @@ cmd_download_release() {
     done
 
     if [ -z "$_targets" ]; then
-        wt_info "这些项目提交了 scripts/release.json（可以直接下现成的包）："
+        wt_info "这些项目有东西可下（② 读 <muslbin>，③ 读 scripts/release.json）："
         _n=0
-        while IFS='	' read -r _prio _pid _path _kind _script _tpl _to; do
+        while IFS= read -r _pid; do
             [ -n "${_pid:-}" ] || continue
-            if [ -f "$_path/scripts/release.json" ]; then
-                wt_step "$_pid"
-                _n=$((_n + 1))
-            fi
+            wt_step "$_pid"
+            _n=$((_n + 1))
         done <<EOF
-$(python3 "$PY" publish-list --root "$WTOOL_ROOT")
+$(python3 "$PY" download-list --root "$WTOOL_ROOT")
 EOF
         [ "$_n" -gt 0 ] || wt_info "  （一个都没有）"
         wt_info "下载其中一个：wtool download-release <项目>；全部：wtool download-release all"
@@ -1330,9 +1344,14 @@ EOF
     fi
 
     command -v curl >/dev/null 2>&1 || wt_die "download-release 需要 curl"
+    command -v sha256sum >/dev/null 2>&1 || wt_die "download-release 需要 sha256sum"
 
     _targets=$(wt_expand_targets download $_targets)
     [ -n "$(printf '%s' "$_targets" | tr -d ' ')" ] || wt_die "没有匹配的项目（试试 wtool download-release 看有哪些）"
+
+    _scratch=$(mktemp -d "${TMPDIR:-/tmp}/wtool-dl.XXXXXX")
+    trap 'rm -rf -- "$_scratch"' EXIT INT TERM
+    _plan="$_scratch/plan.tsv"
 
     _done=0
     for _want in $_targets; do
@@ -1353,10 +1372,15 @@ EOF
             _pid=$(printf '%s\n' "$_row" | cut -f2)
             _path=$(printf '%s\n' "$_row" | cut -f3)
         fi
-        _rl="$_path/scripts/release.json"
+
+        # 项目类型只决定**报错该怎么说**：② 类（muslbin）根本没有
+        # scripts/release.json 这条路（D50：它不产产物包），拿"没有 release.json"
+        # 去劝一个 ② 类项目是误导（实测踩过：`download-release tools/musl-bins/eza`
+        # 只说了一句 release.json 的警告，然后"完成（0 个项目）"）。
+        _kind=$(python3 "$PY" project-kind "$_path" 2>/dev/null) || _kind=""
 
         wt_info "── $_pid"
-        if [ ! -f "$_rl" ]; then
+        if [ "$_kind" != muslbin ] && [ ! -f "$_path/scripts/release.json" ]; then
             wt_warn "  没有 scripts/release.json —— 这个项目还没发布过现成的包，"
             wt_warn "  只能自己编：wtool build $_pid"
             # 声明要容器而本机没有 docker 的话，"只能自己编"是句空话 —— 说清真正的出路
@@ -1369,29 +1393,30 @@ EOF
             continue
         fi
 
-        # 清单里每一行：名字 <TAB> sha256 <TAB> 字节 <TAB> 直链（已百分号编码）
-        _rows=$(python3 - "$_rl" <<'PY'
-import json, sys, urllib.parse
-d = json.load(open(sys.argv[1], encoding="utf-8"))
-base = d.get("base_url") or "https://github.com/%s/releases/download/%s" % (
-    d.get("repo", ""), d.get("tag", ""))
-for a in d.get("assets") or []:
-    name = a.get("name", "")
-    if not name:
-        continue
-    print("%s\t%s\t%s\t%s/%s" % (name, a.get("sha256", ""), a.get("bytes", 0),
-                                 base.rstrip("/"), urllib.parse.quote(name)))
-PY
-) || wt_die "读不了 $_rl"
-        [ -n "$_rows" ] || { wt_warn "  release.json 里一个资产都没有，跳过"; continue; }
+        # 该下什么、每个文件的 sha256 是多少 —— 一律由 py 现读**项目里提交的声明**
+        # 算出来（② 读 wtool.xml 的 <muslbin>；③ 读 scripts/release.json）。
+        # 那份声明在 git 里，所以"清单和包同源、等于没校验"这个弱点不存在（ADR-026）。
+        # 只有浏览器的机器没有仓库 —— 那种场景走 docs/download.md 手动下 + unpack-release。
+        python3 "$PY" download-plan "$_path" --root "$WTOOL_ROOT" > "$_plan" || exit $?
 
-        _repo=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1],encoding="utf-8")).get("repo",""))' "$_rl")
-        _tag=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1],encoding="utf-8")).get("tag",""))' "$_rl")
-        wt_info "  清单 : scripts/release.json（$_repo $_tag）"
+        _route=""; _desc=""; _repo=""; _tag=""
+        _rows=""
+        while IFS='	' read -r _k _a _b _c _d _e _f; do
+            [ -n "${_k:-}" ] || continue
+            case $_k in
+                src)  _route=$_a; _desc=$_b; _repo=${_c:-}; _tag=${_d:-} ;;
+                file) _rows="$_rows$_a	$_b	$_c	$_d	$_e	$_f
+" ;;
+                *)    ;;
+            esac
+        done < "$_plan"
+        [ -n "$_rows" ] || wt_die "$_pid 的下载声明里一个资产都没有"
+        wt_info "  声明 : $_desc"
         wt_info "  落点 : __release/"
 
         if wt_dry; then
-            printf '%s\n' "$_rows" | while IFS='	' read -r _n _s _b _u; do
+            printf '%s\n' "$_rows" | while IFS='	' read -r _n _s _b _u _r _t; do
+                [ -n "${_n:-}" ] || continue
                 wt_step "[dry-run] $_n  ← $_u"
             done
             _done=$((_done + 1))
@@ -1402,7 +1427,7 @@ PY
         _ids=""
         _ids_fetched=0
         _got=0
-        while IFS='	' read -r _n _s _b _u; do
+        while IFS='	' read -r _n _s _b _u _r _t; do
             [ -n "${_n:-}" ] || continue
             _dest="$_path/__release/$_n"
             # 已经下好了（sha 对得上）就跳过 —— 重跑是幂等的
@@ -1414,22 +1439,51 @@ PY
             fi
             wt_step "$_n  ← 直链"
             _rc=0
+            _sha_fail=0
             wt_dl_one "$_u" "$_dest" "$_s" || _rc=$?
+            if [ "$_rc" = 2 ]; then _sha_fail=1; fi
             if [ "$_rc" != 0 ]; then
                 # 直链不通 → 走 API 的资产端点（第二条路）
-                if [ "$_ids_fetched" = 0 ]; then
-                    _ids=$(wt_dl_asset_ids "$_repo" "$_tag" || true)
-                    _ids_fetched=1
-                fi
-                _id=$(printf '%s\n' "$_ids" | awk -F'\t' -v n="$_n" '$1==n{print $2; exit}')
-                if [ -n "$_id" ]; then
-                    wt_warn "  直链不通，改走 api.github.com 的资产端点"
-                    _u2="https://api.github.com/repos/$_repo/releases/assets/$_id"
-                    _rc=0
-                    wt_dl_one_api "$_u2" "$_dest" "$_s" || _rc=$?
+                # （py 认得出上游是 GitHub 才给 repo/tag；认不出就老老实实只有直链）
+                case $_r in -|"") _r="" ;; esac
+                case $_t in -|"") _t="" ;; esac
+                if [ -n "$_r" ] && [ -n "$_t" ]; then
+                    if [ "$_ids_fetched" = 0 ]; then
+                        _ids=$(wt_dl_asset_ids "$_r" "$_t" || true)
+                        _ids_fetched=1
+                    fi
+                    _id=$(printf '%s\n' "$_ids" | awk -F'\t' -v n="$_n" '$1==n{print $2; exit}')
+                    if [ -n "$_id" ]; then
+                        wt_warn "  直链不通，改走 api.github.com 的资产端点"
+                        _u2="https://api.github.com/repos/$_r/releases/assets/$_id"
+                        _rc=0
+                        wt_dl_one_api "$_u2" "$_dest" "$_s" || _rc=$?
+                        if [ "$_rc" = 2 ]; then _sha_fail=1; fi
+                    fi
                 fi
                 if [ "$_rc" != 0 ]; then
-                    wt_warn "  $_n 两条路都失败（退出码 $_rc）—— 这个文件没下来"
+                    # ② 类**必须停下来**：它是从上游取二进制，没有第二条来源
+                    # （下一句"wtool build"对 ② 类是空话 —— 它不构建，D50）。
+                    # 尤其是 sha256 不匹配（两条路里出现过一次就算）：那意味着
+                    # tag 被重打过、或者下到的是别的东西 —— 静默跳过会让人以为"装好了"。
+                    if [ "$_route" = muslbin ]; then
+                        if [ "$_sha_fail" = 1 ]; then
+                            wt_die "$_pid 的 $_n sha256 校验失败 —— 上游这个资产和 wtool.xml 里钉的不是一份。
+  期望/实际两个 sha256 见上面那两行 warning；落点没被写进 __release/（半成品已删）。
+  两种可能，都得人来定：
+    ① 上游把同一个 tag 的资产重打过（tag 钉死也挡不住这种）—— 去 release 页核对，
+       改 wtool.xml 的 sha256（顺手核对 readme.md 里记的版本）；
+    ② 这台机器上下到的不是那份资产（代理塞了个错误页？）—— 重跑一次。"
+                        fi
+                        wt_die "$_pid 的 $_n 没下来（curl 退出码 $_rc，直链和 api.github.com 两条路都失败）。
+  ② 类没有第二条来源（它不构建，D50）—— 先看网络/代理，再重跑：
+    wtool download-release $_pid"
+                    fi
+                    if [ "$_sha_fail" = 1 ]; then
+                        wt_warn "  $_n 两条路都失败（退出码 $_rc；其中一次是 sha256 对不上）—— 这个文件没下来"
+                    else
+                        wt_warn "  $_n 两条路都失败（退出码 $_rc）—— 这个文件没下来"
+                    fi
                     continue
                 fi
             fi
@@ -1442,9 +1496,13 @@ EOF
             continue
         fi
 
-        # 来源标记：publish-release 靠它拒绝"把刚下下来的包又传回去"（ADR-026）
-        printf 'downloaded\t%s\t%s\t%s\n' "$_repo" "$_tag" "$(date -Iseconds)" \
-            > "$_path/__release/.source"
+        # 来源标记：publish-release 靠它拒绝"把刚下下来的包又传回去"（ADR-026）。
+        # ⚠️ **只有 ③ 那条路写**：`__release/` 里的东西是**我们自己发布的产物包**时，
+        #    这个标记才有意义。② 类是上游的 tarball，贴"downloaded"是在误报。
+        if [ "$_route" != muslbin ]; then
+            printf 'downloaded\t%s\t%s\t%s\n' "$_repo" "$_tag" "$(date -Iseconds)" \
+                > "$_path/__release/.source"
+        fi
         wt_record_action "$_pid" download
         wt_info "  下了 $_got 个文件"
         wt_info "  下一步: wtool unpack-release $_pid"
@@ -1768,6 +1826,18 @@ cmd_uninstall() {
                 backup)
                     if [ -e "$_target" ] && [ ! -e "$_dest" ]; then
                         wt_run mv -f -- "$_target" "$_dest"
+                    fi
+                    ;;
+                generate)
+                    # `<generate>` 的产物（__output/ 下的**安装期产物**，D41/D33）。
+                    # 账在 journal 里 = 这份东西是 wtool 装的 → 卸载时删干净。
+                    # ‼️ **不比 sha**：重复 install 就是覆盖更新（幂等），拿当初那个
+                    #    sha 去比会把"更新过的"当成"别人的文件"留下来 —— 而那正是
+                    #    要删的东西。（用 if 不用 `[ ] &&`：这段跑在管道子 shell 里，
+                    #    `set -e` 会把一个"文件不在"变成"提前结束整个逆放"。）
+                    if [ -e "$_dest" ] && [ ! -L "$_dest" ]; then
+                        wt_run rm -f -- "$_dest"
+                        wt_step "删掉生成物 $_dest"
                     fi
                     ;;
                 rc) : ;;   # 已由上面的 rc 回退处理

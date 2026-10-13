@@ -328,6 +328,84 @@ wt_created_rc_add() {
 }
 
 # --------------------------------------------------------------------------
+# <generate>：**安装期产物**（ADR-0045 / D41 / D33）
+#
+#   wt_generate_run <cmd|script> <生成物绝对路径> <命令串|脚本绝对路径> [项目根]
+#
+# 契约（和 wtool.xml 的 `<generate>` 一一对应；文档在 docs/spec.md）：
+#   · cwd = **项目根** —— 脚本/命令里的相对路径按项目根算
+#   · PATH **前面加 `$WTOOL_HOME/usr/bin`**：`<generate>` 常常直接调**刚装上的**
+#     那条命令（`fzf --zsh` 就是），而它是靠 L2 链出现在那儿的（D37：install 只是软链）。
+#     不加的话症状很刁：第一次 install 报 "fzf: command not found"，
+#     第二次（链已经在磁盘上了）又好了 —— "重跑一次就行"的 bug 最难查。
+#   · 生成物的内容 = 命令的 **stdout**（stderr 透到终端，不混进生成物：
+#     那是个要被人 `source` 的 shell 片段，掺进诊断信息就是语法错误）
+#   · **先写临时文件再 mv**：跑一半失败不会在 __output/ 里留半个生成物；
+#     重复 install 是覆盖更新（幂等，D33）
+#   · 产物进 journal（uninstall 逆放时按这条账删掉，见 wtool.sh 的逆放循环）
+# --------------------------------------------------------------------------
+wt_generate_run() {   # <cmd|script> <dest> <cmd串|脚本路径> [项目根]
+    _g_mode=$1; _g_dest=$2; _g_src=$3; _g_root=${4:-}
+    if [ -z "$_g_root" ] || [ "$_g_root" = "-" ]; then
+        _g_root=$(dirname -- "$_g_dest")
+    fi
+    if wt_dry; then
+        wt_step "[dry-run] 生成 $_g_dest"
+        case $_g_mode in
+            script) wt_step "            跑 sh $_g_src（cwd $_g_root）" ;;
+            *)      wt_step "            跑 $_g_src（cwd $_g_root）" ;;
+        esac
+        return 0
+    fi
+    case $_g_mode in
+        script)
+            [ -f "$_g_src" ] || wt_die "<generate script> 那个脚本不在: $_g_src" ;;
+        cmd)
+            [ -n "$_g_src" ] || wt_die "<generate cmd> 是空的" ;;
+        *)
+            wt_die "内部错误：<generate> 的 mode 只能是 cmd/script，收到 [$_g_mode]" ;;
+    esac
+
+    wt_ensure_dir "$(dirname -- "$_g_dest")"
+    _g_tmp="$_g_dest.wtool-new.$$"
+    rm -f -- "$_g_tmp"
+    _g_rc=0
+    if [ "$_g_mode" = script ]; then
+        ( cd -- "$_g_root" || exit 1
+          PATH="$WTOOL_HOME/usr/bin:$PATH"
+          export PATH WTOOL_HOME WTOOL_PREFIX
+          export WTOOL_PROJECT_DIR="$_g_root" WTOOL_PROJECT_ROOT="$_g_root"
+          exec sh "$_g_src" ) > "$_g_tmp" || _g_rc=$?
+    else
+        ( cd -- "$_g_root" || exit 1
+          PATH="$WTOOL_HOME/usr/bin:$PATH"
+          export PATH WTOOL_HOME WTOOL_PREFIX
+          export WTOOL_PROJECT_DIR="$_g_root" WTOOL_PROJECT_ROOT="$_g_root"
+          exec sh -c "$_g_src" ) > "$_g_tmp" || _g_rc=$?
+    fi
+    if [ "$_g_rc" != 0 ]; then
+        rm -f -- "$_g_tmp"
+        wt_die "<generate dest=$_g_dest> 跑失败了（退出码 $_g_rc）：
+  命令     : $_g_src
+  工作目录 : $_g_root
+  PATH     : $WTOOL_HOME/usr/bin:…
+生成物**没有被写出去**（临时文件已删）—— __output/ 里那份还是上一次的（如果有）。
+先在上面那几行里找原因：命令本身报错？还是它要的东西还没装（PATH 里那把命令要先被 <export_*>/<muslbin> 装上）？"
+    fi
+    if [ ! -s "$_g_tmp" ]; then
+        rm -f -- "$_g_tmp"
+        wt_die "<generate dest=$_g_dest> 生成物是**空的**（0 字节）：
+  命令     : $_g_src
+  工作目录 : $_g_root
+空文件是最坏的一种"成功"—— 它会被 env.zsh/env.bash 照常 source 进去，
+而用户看到的是"装好了，但功能没生效"。检查命令是不是把内容写到了 stderr"
+    fi
+    mv -f -- "$_g_tmp" "$_g_dest"
+    wt_step "生成 $_g_dest（$_g_mode）"
+    wt_journal_add generate file "$_g_dest" "$_g_src" "$(wt_sha256 "$_g_dest")"
+}
+
+# --------------------------------------------------------------------------
 # 执行 py 生成的 plan.tsv
 # --------------------------------------------------------------------------
 wt_plan_exec() {
@@ -410,6 +488,12 @@ wt_plan_exec() {
                 ;;
             envblock-del)
                 [ -e "$_dest" ] && rm -f -- "$_dest"
+                ;;
+            generate)
+                # `<generate>`：**安装期产物**（D41 / D33）—— 跑 cmd/script，
+                # 把 stdout 写进 `__output/` 下的 dest，并记账（卸载时删掉）。
+                # `_kind` = cmd | script；`_extra` = 项目根（cmd 的 cwd）。
+                wt_generate_run "$_kind" "$_dest" "$_source" "$_extra"
                 ;;
             write)
                 # 汇总文件 / 用户 rc 的新内容
@@ -1315,6 +1399,7 @@ EOF
 WT_ZIP_TOOL="$here/lib/wtool_zip.py"
 WT_SOURCE_ZIP="source.zip"          # 源码包（2026-10-09 前叫 `源码.zip`）
 WT_SOURCE_HASH="source-hash.txt"    # 源码包的 sha256（2026-10-09 前叫 `源码-hash.txt`）
+WT_OUT_SUB="__output"               # 产物目录（ADR-0033）；② 类解包也落这儿（D57）
 
 wt_sha256() { sha256sum -- "$1" | cut -d' ' -f1; }
 wt_bytes()  { wc -c < "$1" | tr -d ' '; }
@@ -1775,6 +1860,28 @@ wt_unpack_marker() {   # <源码包> <工作区根> <scratch>
     fi
 }
 
+# dry-run 时"真跑会做什么"的一句话（②③ 两条路共用 —— 说法只写一处，
+# 免得两条路的 dry-run 文案各长一样、还各自漏掉新种类）。
+wt_ur_report_dry() {   # <kind> <资产名> <from|成员> <to> <有没有分卷> <分卷表> <项目目录>
+    _rd_k=$1; _rd_name=$2; _rd_from=$3; _rd_to=$4; _rd_vol=$5; _rd_vols=$6; _rd_dir=$7
+    case $_rd_k in
+        verify)
+            wt_step "[dry-run] 只校验不铺开: $_rd_name（对照表里标了 to=\"\"）" ;;
+        member)
+            if [ "$_rd_from" = "-" ]; then
+                wt_step "[dry-run] 资产本身就是二进制：$_rd_name → $_rd_dir/$WT_OUT_SUB/$_rd_to（并校验 sha256）"
+            else
+                wt_step "[dry-run] 从 $_rd_name 里取成员 [$_rd_from] → $_rd_dir/$WT_OUT_SUB/$_rd_to（并校验 sha256）"
+            fi ;;
+        *)
+            if [ "$_rd_vol" = 1 ]; then
+                wt_step "[dry-run] 校验 $_rd_vols 并拼接 → 按对照表（$_rd_from）解到 $_rd_dir/${_rd_to}"
+            else
+                wt_step "[dry-run] 解开 $_rd_name → $_rd_dir/${_rd_to}（按对照表：$_rd_from）"
+            fi ;;
+    esac
+}
+
 # 按 `release.json` 的对照表**声明式**解包（ADR-0045 / D57 / Q1 + Q10）
 #   wt_unpack_release <项目目录> <scratch> [下载目录]
 #
@@ -1788,6 +1895,8 @@ wt_unpack_marker() {   # <源码包> <工作区根> <scratch>
 # 行的形状（py 打的 TSV）：
 #   entry  <资产名> <from> <to> <sha256|-> <卷:sha,…|-> <role>
 #   verify <资产名> -      -  <sha256|-> <卷:sha,…|-> <role>   ← 对照表标了 to=""（只校验）
+#   member <资产名> <归档内成员|-> <__output 下的落点> <sha256|-> - muslbin
+#                                                             ↑ ② 类：<muslbin member= dest=>
 #   skip   <资产名> <为什么跳过>
 wt_unpack_release() {
     _ur_dir=$1; _ur_scratch=$2; _ur_pub=${3:-}
@@ -1807,7 +1916,7 @@ wt_unpack_release() {
             skip)
                 wt_info "  跳过 $_ur_name：$_ur_from"
                 continue ;;
-            entry | verify) ;;
+            entry | verify | member) ;;
             *) continue ;;
         esac
 
@@ -1832,7 +1941,18 @@ wt_unpack_release() {
                 fi
                 _ur_prepared="$_ur_prepared $_ur_name"
                 if wt_dry; then
-                    # dry-run 只到这儿：一个字节都不写（拼卷 / 解包都在下面）
+                    # dry-run 只到这儿：一个字节都不写（拼卷 / 解包都在下面）。
+                    # ‼️ 但**必须把这一条也算进"有可解的东西"**（_ur_got）。
+                    #    以前这里直接 `continue`，_ur_got 留在 0 → 函数末尾那句
+                    #    "对照表里没有可解的东西" 把**完全正常的 dry-run 报成了错**：
+                    #    `wtool unpack-release <项目> --dry-run` 非 0。
+                    #    只有"一个资产对应多条 entry"时才看不出来（第二条 entry 走的
+                    #    是 `*" $name "*` 分支，绕过了这个 continue）——
+                    #    所以这条 bug 在 ③ 的多 entry 夹具里藏了很久（实测复现：
+                    #    ② 类一个资产一条 member 行 → 必现）。
+                    wt_ur_report_dry "$_ur_k" "$_ur_name" "$_ur_from" "$_ur_to" \
+                                     "$_ur_hasvol" "$_ur_vols" "$_ur_dir"
+                    _ur_got=$((_ur_got + 1))
                     continue
                 fi
                 if [ "$_ur_hasvol" = 1 ]; then
@@ -1876,19 +1996,37 @@ wt_unpack_release() {
         #   拼卷之后的 sha256 校验在 dry-run 里做不了（要先拼出来）——
         #   所以这里明说"没校验"，不假装验过。
         if wt_dry; then
-            if [ "$_ur_k" = verify ]; then
-                wt_step "[dry-run] 只校验不铺开: $_ur_name（对照表里标了 to=\"\"）"
-            elif [ "$_ur_hasvol" = 1 ]; then
-                wt_step "[dry-run] 校验 $_ur_vols 并拼接 → 按对照表（$_ur_from）解到 $_ur_dir/${_ur_to}"
-            else
-                wt_step "[dry-run] 解开 $_ur_name → $_ur_dir/${_ur_to}（按对照表：$_ur_from）"
-            fi
+            # ★ dry-run 的分岔点（②③ 两条路共用 wt_ur_report_dry 的说法）
+            wt_ur_report_dry "$_ur_k" "$_ur_name" "$_ur_from" "$_ur_to" \
+                             "$_ur_hasvol" "$_ur_vols" "$_ur_dir"
             _ur_got=$((_ur_got + 1))
             continue
         fi
 
         if [ "$_ur_k" = verify ]; then
             wt_info "源码包校验通过（不铺开）: $_ur_name"
+            _ur_got=$((_ur_got + 1))
+            continue
+        fi
+
+        # ★ ② muslbin：从上游资产里取**一个成员**，落到 `<项目>/__output/<dest>`
+        #   （D57：`<muslbin dest=>` 就是"解到哪"的声明，落点天然在 __output/ 下）。
+        #   sha256 已经在上面那步按清单里的值校过一次了（和 ③ 一样，一个字节都不少）。
+        if [ "$_ur_k" = member ]; then
+            _ur_out="$_ur_dir/$WT_OUT_SUB/$_ur_to"
+            if [ "$_ur_from" = "-" ]; then
+                wt_step "取 $_ur_name → ${WT_OUT_SUB}/$_ur_to（资产本身就是那个二进制）"
+                _ur_args=""
+            else
+                wt_step "取 $_ur_name 里的成员 [$_ur_from] → ${WT_OUT_SUB}/$_ur_to"
+                _ur_args="--member=$_ur_from"
+            fi
+            # shellcheck disable=SC2086
+            python3 "$WT_ZIP_TOOL" extract-member "$_ur_pkg" "$_ur_out" $_ur_args \
+                || wt_die "从 $_ur_name 里取不出 $_ur_from —— 逐条核对 wtool.xml 的
+  <muslbin url= sha256= member= dest=>：member 是**归档里的成员名**，
+  不带 member=（或 member 写成 -）表示"资产本身就是那个二进制"。
+  上面那条错误说了归档里到底有哪些成员。"
             _ur_got=$((_ur_got + 1))
             continue
         fi

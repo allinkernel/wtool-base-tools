@@ -359,9 +359,44 @@ install <项目>
    ⚠️ **L1/L2 建在项目脚本之前**：它们指向的是项目 `__output/` 里的**产物**
    （那是 `build` / `download-release` 的活，不是 `install.sh` 的），
    项目脚本要跑的时候 `WTOOL_PROJECT_DIR` 必须已经解析得出来。
+   ⚠️ **`<generate>` 也排在 L2 之后**（第 ①′ 步）：`cmd` 常常直接调**刚装上的**
+   那条命令（`fzf --zsh`），而它是靠 L2 链出现在 `$WTOOL_HOME/usr/bin/` 里的 ——
+   顺序反了的症状是"第一次装报 command not found，第二次（链已在）又好了"。
 4. **落账**：写 `meta.tsv`、更新 `registry.tsv`、追加 journal（按 `(action,dest)` 去重）。
 
 重复 install = **restow**（等价于 GNU Stow 的 `stow -R`）：已正确的软链不重建，rc 块原地更新，plan 为空时打印"没有需要变更的内容"。
+**例外：`<generate>` 每次都重跑**（前面 ①′ 那一步）—— 产物要跟着**刚装上的那份**
+二进制走（升级完 fzf 再 install，补全脚本就该刷新）。所以带 `<generate>` 的项目
+**不会**报"没有需要变更的内容"；它的幂等体现在"**产物逐字节一样**、账不堆（按
+`(action,dest)` 去重）"上。
+
+#### `<generate>`：安装期产物（ADR-0045 / D41 / D33）
+
+```xml
+<generate dest="__output/fzf.zsh"  cmd="fzf --zsh"/>                 <!-- cmd / script 二选一 -->
+<generate dest="__output/fzf.bash" script="scripts/gen-fzf.bash"/>
+```
+
+| 项 | 约定 |
+|---|---|
+| 产物落点 | `<项目>/<dest>`；`dest` **必须在 `__output/` 之下**（解析期就拦） |
+| cwd | **项目根**（命令/脚本里的相对路径按项目根算） |
+| `PATH` | **前面加 `$WTOOL_HOME/usr/bin`** —— 所以 `fzf --zsh` 用的就是刚链上的那份二进制 |
+| 其它变量 | `WTOOL_HOME` / `WTOOL_PREFIX` / `WTOOL_PROJECT_DIR` / `WTOOL_PROJECT_ROOT` |
+| 产物内容 | 命令的 **stdout**；stderr 透到终端（生成物是要被人 `source` 的 shell 片段，
+掺进诊断信息就是语法错误） |
+| 写盘 | 先写临时文件再 `mv` —— **失败不留半个生成物**，重复 install 是覆盖更新 |
+| 失败 | **非 0 停下**（`install` 当场失败）；报错给命令、cwd、`PATH`、退出码 |
+| 空产物 | **也算失败**：0 字节的生成物会被 `env.*` 照常 source，而功能一点没生效
+（最坏的一种"成功"） |
+| 记账 | journal 一条 `generate`（dest + 命令 + 产物 sha256）→ `uninstall` 逆放时删掉 |
+| `check` | 账上有这条产物、磁盘上却不在 → **报出来**（提示跑一次 `install` 重新生成） |
+| `--dry-run` | 只打印"会生成哪个路径、跑什么"，**不跑、不写** |
+| 谁来 source | 项目自己的 `env.zsh` / `env.bash`（典型：fzf 的补全），**不是**引擎 |
+
+实现：`lib/wtool_plan.py` 的 `plan_install` 出 `generate` 行（L2 之后），
+`lib/wtool_fs.sh` 的 `wt_generate_run` 执行并在 `wt_plan_exec` 里接上；
+`wtool.sh` 的逆放循环负责 `uninstall` 删掉它。
 
 #### `install --prune`（BL-15）
 
@@ -1137,35 +1172,53 @@ release 包 3 个文件 2210 字节，而且那 3 个是源码包的**子集**�
 ### download-release：只下载，不解包
 
 ```sh
-wtool download-release                  # 列出提交了 scripts/release.json 的项目
-wtool download-release editor/astronvim_v5
-wtool download-release all              # 所有提交了 release.json 的项目
+wtool download-release                        # 列出**有东西可下**的项目（②③ 两类）
+wtool download-release tools/musl-bins/bat    # ② 类：读 wtool.xml 的 <muslbin>
+wtool download-release editor/astronvim_v5    # ③ 类：读 scripts/release.json
+wtool download-release all                    # 上面两种都算
 ```
 
-1. 读 `<项目>/scripts/release.json` —— **唯一的输入**，而且它在仓库里（可信清单）。
-   目录里没有它 → 警告并告诉你这个项目只能自己编（`wtool build`）
-2. 逐个资产下到 `<项目>/__release/`（`base_url`，或按 `repo`/`tag` 拼出 GitHub 直链），
-   **逐个校验 sha256**
+**两条路线，读的都是项目里提交的声明**（声明跟着仓库走 = 可信清单，ADR-026）：
+
+| 项目类型 | 声明 | 下什么 | 落点 |
+|---|---|---|---|
+| ② `muslbin` | `wtool.xml` 的 `<muslbin url= tag= sha256=>` | 上游 release 的资产（`.tar.gz` / `.zip` / 裸二进制） | `<项目>/__release/<URL 的 basename>` |
+| ③ `docker` | `scripts/release.json` 的 `assets[]` | 我们自己发布的产物包（`release.zip` 等） | 同上 |
+| ① `source` | —— | **什么都不下**（源码即产物，D46/D50；门禁直接拒这条命令） | —— |
+
+1. 该下什么、每个文件的 sha256 一律由 `wtool_plan.py download-plan` 现读上面那份声明算出来。
+   ‼️ ② 类**没有 `scripts/release.json`**（它不产产物包，D50）—— 不许拿它去劝 ② 类项目
+   （2026-10-13 之前的行为：一句 release.json 的 warning + "完成（0 个项目）"，**退出码还是 0**）
+2. 逐个资产下到 `<项目>/__release/`，**逐个校验 sha256**
 3. **已经下好的跳过**（文件在、sha256 对得上）—— 重跑是幂等的，中断了重来不会坏
 4. 直链不通时自动改走**第二条路**：`api.github.com` 的资产端点
-   （`Accept: application/octet-stream`，跳到 `release-assets.githubusercontent.com`）
-5. 下到东西就写 `__release/.source` = `downloaded`（`publish-release` 靠它拒绝回传）
+   （`Accept: application/octet-stream`，跳到 `release-assets.githubusercontent.com`）。
+   这条路只对 `github.com/<owner>/<repo>/releases/download/<tag>/<资产>` 这种地址有；
+   `repo`/`tag` 从 URL 里认，认不出就只有直链一条路（② 类与 ③ 类同一条代码）
+5. ③ 类下到东西写 `__release/.source` = `downloaded`（`publish-release` 靠它拒绝回传）；
+   **② 类不写** —— 那是"我们自己发布的产物包"的标记，给上游 tarball 贴是误报
 
 约束与失败行为：
 
-- 需要 `curl`；没有就直接报错（退出码 1）
+- 需要 `curl` 与 `sha256sum`；缺了直接报错（退出码 1）
 - **不解包**：产出 `__output/` 是下一条命令 `wtool unpack-release <项目>` 的事
-- 单个资产两条路都失败 → 警告"这个文件没下来"，**其余资产照下**；一个都没下来 → 警告
-- 上面两种**退出码仍是 0**（只有参数错 / 缺 curl / 认不出项目才非 0）：
-  部分失败要看输出里的 `warning`，**不能只看退出码**
+- **② 类失败即停、非 0**（两种都停，且 `__release/` 里不留东西，`.part` 也删）：
+  · sha256 不匹配（期望/实际两个值都打出来）—— 多半是上游重打了 tag，或代理塞了错误页；
+  · 两条路都不通 —— ② 类**没有第二条来源**（它不构建，`wtool build` 对它无意义），
+    "警告一下跳过"等于让人以为装好了
+- **③ 类**：单个资产两条路都失败 → 警告"这个文件没下来"，**其余资产照下**；
+  一个都没下来 → 警告。这两种**退出码仍是 0**（部分失败要看输出里的 `warning`，
+  不能只看退出码）—— 只有参数错 / 缺 curl / 认不出项目 / 声明读不出来才非 0
+- `--dry-run`：只打印"会下什么、从哪下"，**一个字节都不下**（连 `__release/` 都不建）
 
-### unpack-release：**声明式**解包（解到哪读 `release.json`，不猜）
+### unpack-release：**声明式**解包（解到哪由声明说了算，不猜）
 
 ```
-读 <项目>/scripts/release.json 的 artifacts 对照表   ← 解到哪，**唯一**的来源（D57）
+② muslbin：读 <项目>/wtool.xml 的 <muslbin member= dest=>        ← 解到哪，**唯一**的来源
+③ docker ：读 <项目>/scripts/release.json 的 artifacts 对照表     ← 同上
 读 __release/dist.json（有的话）                     ← 分卷表 + 每卷/整包 sha256
   → 逐卷校验 sha256 → 按顺序拼接 → 校验整个文件的 sha256
-  → 按对照表逐条解开：把 from 的目录前缀剥掉，拼到 to 下面
+  → 按声明逐条落位：把 from 的目录前缀剥掉，拼到 to 下面
 ```
 
 **硬规矩**：
@@ -1176,8 +1229,25 @@ wtool download-release all              # 所有提交了 release.json 的项目
    写别的 → **报错**（"不许有隐含规则/隐晦约定"）。
 2. **对照表里没写落点的产物资产 → 报错**，不猜（`role=release` 的漏了就停）。
    `role=source` 的漏了 → 只校验不铺开（开发机上本来就有源码 —— ADR-0039）。
-3. **没有 `scripts/release.json` → 报错**并说清"谁写它"（两个 `pack-*` 会写 `artifacts`）。
+3. **③ 类没有 `scripts/release.json` → 报错**并说清"谁写它"（两个 `pack-*` 会写 `artifacts`）。
    它不是可有可无的元数据，而是解包契约的一部分。
+   ‼️ **② 类按设计就没有那份文件**（D50）—— 它的对照表是 `wtool.xml` 的
+   `<muslbin member= dest=>`：`dest` 本来就是相对 `__output/` 的路径（例 `usr/bin/fzf`），
+   所以"一律解到 `__output/` 下"天然成立。D57 要的是**必须声明**，
+   声明写在哪个文件里是次要的。这一路排出来的行是 `member`（不是 `entry`）：
+
+   ```
+   member <资产名> <归档内成员|-> <__output 下的落点> <sha256> - muslbin
+   ```
+
+   · 成员名 `-` = **裸文件资产**：资产本身就是那个二进制（`jq` / `yq` / `shfmt` / `b3sum`）
+   · 取出来的落点权限一律 **0755**（它就是那个要敲的二进制）
+   · `member` 写错 / 归档里没有这个成员 → 报错并**列出归档里有哪些成员**（人能直接照抄）
+   · `member` 缺省 = `dest` 的 basename；**裸文件资产写 `member=` → 解析期报错**
+   · 支持的归档：`.zip` / `.tar` / `.tar.gz` / `.tgz`（**按扩展名认，不猜内容**）；
+     `.tar.xz` 这类认得出是压缩包但不支持的 → **报错**，绝不静默当裸文件
+     （那会装出一个敲了就 `exec format error` 的"二进制"，而 sha256 还是对的）
+   · sha256 用清单里钉的那个：下载那步已经把过关，这一步再对一次（`__release/` 里被手工换过也能拦住）
 4. **离线族的包不归它管**：`source-offline.zip` / `release-offline.zip` /
    `wtool-base-tools.tar.gz` 在对照表里也有条目（`to: "."`），但那是**断网机手工**
    `unzip`/`tar` + `cp -a` 的活（D50 的不变式：解包与合并不需要 wtool）。

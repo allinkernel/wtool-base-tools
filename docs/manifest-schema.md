@@ -290,12 +290,31 @@ $WTOOL_HOME/usr/bin/fzf          ──►  ../../wtool/tools/musl-bins/fzf/__ou
 | `tag` | ✅ | — | 上游版本，**钉死**（不许浮动） |
 | `sha256` | ✅ | — | 下载后的校验值；不是 64 位十六进制 → 报错（写错等于没有校验） |
 | `dest` | ✅ | — | 解到 **`__output/` 下的相对路径**（例 `usr/bin/fzf`），**不写 `__output/` 前缀** |
-| `member` | 否 | `dest` 的 basename | tar 包里的成员名 |
+| `member` | 否 | `dest` 的 basename | **归档里**要取的那个成员名（含目录前缀时写全，例 `bat-v0.26.1-…/bat`） |
 | `arch` | 否 | `x86_64` | 目前只做 `x86_64`（D32），写别的报错 |
 
+**资产有两种形状，判据是 `url` 的扩展名**（按扩展名认，不猜内容）：
+
+| 形状 | `url` 的样子 | `member` | 引擎怎么取 |
+|---|---|---|---|
+| **归档** | `.zip` / `.tar` / `.tar.gz` / `.tgz` | 缺省 = `dest` 的 basename | 从里面取**那一个**成员，写到 `__output/<dest>`，权限 0755 |
+| **裸文件** | 其余（release 页上挂的就是那个二进制：`jq` / `yq` / `shfmt` / `b3sum` 那种） | **不许写**（写了 → 报错） | 下到的东西**本身就是**那个二进制，直接落到 `__output/<dest>` |
+| 认得出是压缩包但不支持的（`.tar.xz` …） | —— | —— | **报错**（不静默当裸文件 —— 那会装出一个 `exec format error` 的"二进制"） |
+
 只对 `kind="muslbin"` 的项目有意义 —— 写在别的类型上**报错**。
-取二进制走 `wtool download-release` + `wtool unpack-release`（**开发机**命令，要联网）。
-⚠️ **本轮引擎只解析 + 校验这条声明**，下载链路的接线在后面的块里。
+
+**这两条命令就是它接的线**（都是**开发机**命令，要联网）：
+
+```sh
+wtool download-release <项目>   # 读这条声明 → 下到 <项目>/__release/<URL 的 basename>，按 sha256 校验
+wtool unpack-release   <项目>   # 从 __release/ 里取下 member → <项目>/__output/<dest>（还是按 sha256 校验一次）
+wtool install          <项目>   # <export_bin src="__output/<dest>"> 建 L2 链，再跑 <generate>
+```
+
+- `download-release` **按 sha256 把关**：不匹配 → 非 0 停下、`__release/` 里不留半成品
+- `unpack-release` 对 ② 类**不读 `scripts/release.json`**（② 类按设计就没有它，D50）——
+  上面这张表就是它的对照表（D57：**必须有声明**，声明写在哪个文件里是次要的）
+- `member` 写错 / 归档里没有 → 报错并**列出归档里有哪些成员**
 
 ---
 
@@ -309,14 +328,21 @@ $WTOOL_HOME/usr/bin/fzf          ──►  ../../wtool/tools/musl-bins/fzf/__ou
 | 属性 | 必填 | 说明 |
 |---|---|---|
 | `dest` | ✅ | **必须在 `__output/` 之下**（D41）：生成物是**安装期产物**，不进源码树、不进 git |
-| `cmd` | 二选一 | 要跑的命令（输出写进 `dest`） |
+| `cmd` | 二选一 | 要跑的命令；它的 **stdout** 就是生成物的内容 |
 | `script` | 二选一 | 项目里的相对路径脚本；文件不存在 → 报错 |
 
 `cmd` 与 `script` **都给 / 都不给** → 报错。生成物由该项目自己的
 `env.zsh` / `env.bash` 去 source（典型例子：fzf 的 `fzf --zsh`）。
 
-⚠️ **本轮引擎只解析 + 校验这条声明**，执行与记账（卸载时删掉生成物）在
-`install` 那一块接线。
+执行契约（`wtool install` 时跑，实现见 `docs/spec.md` §4 的
+`<generate>`：安装期产物）：
+
+- cwd = **项目根**；`PATH` 前面加 `$WTOOL_HOME/usr/bin`
+  （所以 `cmd="fzf --zsh"` 用的就是**刚链上的**那份二进制）
+- 产物写 `__output/<dest>`：先写临时文件再 `mv` —— 失败不留半个生成物，重复 install 是覆盖更新
+- 产物**进 journal** → `wtool uninstall` 会把它删掉；`check` 发现它不见了会报出来
+- 命令失败 / 产物是**空的** → `install` 当场**非 0**（说清命令、cwd、退出码）
+- `--dry-run` 只打印"会生成哪个路径、跑什么"，不跑不写
 
 ---
 

@@ -84,7 +84,7 @@ mkdir -p "$P/__output/usr/bin" "$P/__output/usr/share/man" "$P/scripts"
 printf 'fzfbin\n' > "$P/__output/usr/bin/fzf"
 printf 'rgbin\n'  > "$P/__output/rg-dbg"
 printf 'manpage\n' > "$P/__output/usr/share/man/fzf.1"
-printf '#!/bin/sh\ntrue\n' > "$P/scripts/gen-x.bash"
+printf '#!/bin/sh\necho "export GEN_X=1"\n' > "$P/scripts/gen-x.bash"
 printf 'export DEMO=1\n' > "$P/env.zsh"
 wxml "$P" muslbin \
     '<zshrc  src="env.zsh"/>' \
@@ -104,8 +104,10 @@ case $_v in
     *"error"*) bad "validate 报错了" "$_v" ;;
     *) ok "validate 没有报错" ;;
 esac
-# muslbin/generate 本轮**只解析 + 校验**：不建任何链、不落任何产物
-hasnt "★<generate> 本轮不执行（__output/fzf.zsh 没被生成）" "$P/__output/fzf.zsh"
+# <generate> **install 时才执行**（D41/D33）：validate 只是解析 + 校验，
+# 一个字节都不落盘。执行逻辑在第 ⑦.2 块接上（装机那一步），断言在
+# tests/muslbin_test.sh 里成组验。
+hasnt "★validate 不执行 <generate>（__output/fzf.zsh 没被生成）" "$P/__output/fzf.zsh"
 
 "$WT" install "$P" > "$T/i1.log" 2>&1 || bad "install 执行" "$(cat "$T/i1.log")"
 
@@ -141,13 +143,18 @@ chk "export_usr 把目录条目也建了链（usr/share/man）" \
 chk "usr/bin 下两条并存" "fzf rg" \
     "$(ls "$WTOOL_HOME/usr/bin" 2>/dev/null | tr '\n' ' ' | sed 's/ $//')"
 
-# 幂等：第二次 install 一个字都不用改
+# 幂等：第二次 install 一个字都不用改（**生成物除外** —— 见下面那条）
 _s1=$(find "$WTOOL_HOME" -mindepth 1 -printf '%y %p -> %l\n' | LC_ALL=C sort)
 "$WT" install "$P" > "$T/i1b.log" 2>&1 || bad "第二次 install"
 _s2=$(find "$WTOOL_HOME" -mindepth 1 -printf '%y %p -> %l\n' | LC_ALL=C sort)
 chk "第二次 install 不改变文件树" "$_s1" "$_s2"
-grep -q '没有需要变更的内容' "$T/i1b.log" && ok "第二次 install 报无变更" \
-    || bad "第二次 install 没报无变更" "$(cat "$T/i1b.log")"
+# `<generate>` 是**故意**每次都跑的（D33：产物要跟着刚装上的那份二进制走 ——
+# 升级完 fzf 再 install，补全脚本就该刷新）。所以带 <generate> 的项目
+# **不会**报"没有需要变更的内容"；幂等体现在"产物逐字节一样"上。
+grep -q 'gen   ' "$T/i1b.log" && ok "第二次 install 照旧重跑 <generate>（产物刷新）" \
+    || bad "第二次 install 没重跑 <generate>" "$(cat "$T/i1b.log")"
+chk "第二次 install 之后生成物内容一模一样（真幂等）" "export GEN_X=1" \
+    "$(cat "$P/__output/fzf.bash" 2>/dev/null)"
 
 # --------------------------------------------------------------------------
 printf '\n== 2. 坏输入：每条都必须报错且非 0 ==\n'

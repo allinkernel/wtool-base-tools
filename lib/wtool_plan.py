@@ -30,6 +30,7 @@ import re
 import shutil
 import subprocess
 import sys
+import urllib.parse
 import xml.etree.ElementTree as ET
 
 ENGINE_VERSION = "1.0.0"
@@ -280,6 +281,68 @@ USR_PARTS = ("bin", "lib", "libexec", "share", "include", "local")
 MUSLBIN_ARCHES = ("x86_64",)
 # sha256 的形状（64 个十六进制）：写错了要到下载时才炸，这里先拦
 SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+
+# ---------------------------------------------------------------------------
+# ② muslbin 的**资产形状**（ADR-0045 第 ⑦.2 块 / D32）
+#
+# 上游资产只有两种形状，判据是 **URL 的扩展名**（不猜内容，也不联网去看）：
+#   · 归档：`.zip` / `.tar.gz` / `.tgz` / `.tar` → 用 `member` 从里面取一个成员
+#   · 裸文件：其余一律当"**资产本身就是那个二进制**"
+#     （`jq` / `yq` / `shfmt` / `b3sum` 就是这种：release 页上挂的就是可执行文件本身）
+#
+# ‼️ 认得出是压缩包、但不是上面那四种的（`.tar.xz` 之类）**必须报错**，
+#    绝不能静默当裸文件 —— 那样会装出一个敲了就 `exec format error` 的"二进制"，
+#    而 sha256 还是对的，最难查。
+MUSLBIN_ARCHIVE_EXTS = (".zip", ".tar", ".tar.gz", ".tgz")
+MUSLBIN_ARCHIVE_LIKE_EXTS = (".tar.xz", ".txz", ".tar.bz2", ".tbz2", ".tar.zst",
+                             ".tzst", ".7z", ".rar", ".lz4", ".lz", ".zst")
+
+
+def muslbin_asset_name(url):
+    """`<muslbin url>` → 落进 `__release/` 的文件名。
+
+    URL 的 basename，**去掉 query / fragment 并做百分号解码** —— 上游资产名里
+    出现 `%2B` 这种转义时，落地的名字该是解码后的真名（GitHub 的直链要求
+    编码，那是**传输**的事，不是文件名的事）。
+    """
+    path = urllib.parse.urlparse(url).path
+    return urllib.parse.unquote(os.path.basename(path))
+
+
+def muslbin_asset_format(url):
+    """`archive` | `raw`；认得出是压缩包但不支持 → 抛 `ValueError`。
+
+    诚实地说：这是**按扩展名**判的，不是按内容（引擎不联网、也不能为了判断
+    去解一遍几个 GB 的包）。判错的后果和判据都写在上面那段注释里。
+    """
+    low = muslbin_asset_name(url).lower()
+    if low.endswith(MUSLBIN_ARCHIVE_EXTS):
+        return "archive"
+    if low.endswith(MUSLBIN_ARCHIVE_LIKE_EXTS):
+        raise ValueError(
+            "资产名 %r 看着是压缩包，但引擎只认 %s（按扩展名认，不猜内容）——\n"
+            "        要么换一个受支持的资产，要么找助手加一种格式"
+            % (muslbin_asset_name(url), " / ".join(MUSLBIN_ARCHIVE_EXTS)))
+    return "raw"
+
+
+def muslbin_github_repo_tag(url):
+    """`https://github.com/<owner>/<repo>/releases/download/<tag>/<资产>` → (repo, tag)。
+
+    认不出来 → `("", "")`。**只用于"直链不通时改走 api.github.com 资产端点"**
+    那条退路（见 architecture.md §5）：不是 GitHub 的地址就老老实实只有直链一条路。
+    """
+    try:
+        u = urllib.parse.urlparse(url)
+    except ValueError:
+        return "", ""
+    if u.netloc.lower() not in ("github.com", "www.github.com"):
+        return "", ""
+    parts = [p for p in u.path.split("/") if p]
+    if len(parts) >= 5 and parts[2] == "releases" and parts[3] == "download":
+        return "%s/%s" % (parts[0], parts[1]), parts[4]
+    return "", ""
+
 
 
 def _managed_home():
@@ -930,7 +993,22 @@ def _parse_export(tag, child, meta, errors, warnings, manifest_path):
             errors.append("<muslbin arch=%r> 不认识：当前只做 %s（D32）（%s）"
                           % (arch, "/".join(MUSLBIN_ARCHES), manifest_path))
             return None
-        member = (child.get("member") or "").strip() or os.path.basename(dest)
+        # 资产形状 vs member=（第 ⑦.2 块）：两边的错法都要在**解析期**拦下来 ——
+        # 那时离"清单写错了"最近（下载/解包时才炸的话，人会去查网络）。
+        try:
+            fmt = muslbin_asset_format(url)
+        except ValueError as exc:
+            errors.append("<muslbin url=%r>：%s（%s）" % (url, exc, manifest_path))
+            return None
+        raw_member = (child.get("member") or "").strip()
+        if fmt == "raw" and raw_member:
+            errors.append(
+                "<muslbin url=%r member=%r>：这个资产**不是归档**（资产本身就是那个二进制），"
+                "不能写 member=。\n"
+                "        裸文件资产去掉 member= 即可（引擎会把下载到的东西直接放到 dest）"
+                "（%s）" % (url, raw_member, manifest_path))
+            return None
+        member = raw_member or os.path.basename(dest)
         return Entry("muslbin", url, url=url, tag=tagv, sha256=sha, member=member,
                      dest=os.path.normpath(dest), arch=arch,
                      manifest=manifest_path)
@@ -1703,6 +1781,27 @@ def plan_install(args, scratch):
     for entry in entries:
         for dest, _item, src in getattr(entry, "links", ()) or ():
             add_link("file", dest, l2_target(project_id, src))
+
+    # 2.5) `<generate>`：**安装期产物**（D41 / D33）—— 排在上面两步之后
+    #
+    # 为什么必须排在 L2 之后：`cmd` 里常常直接调**刚装上的那条命令**
+    # （`fzf --zsh` 就是），而那条命令是靠 L2 链出现在 `$WTOOL_HOME/usr/bin/` 里的
+    # —— sh 侧执行时把 `$WTOOL_HOME/usr/bin` 放进 PATH（见 wt_generate_run）。
+    # 排错顺序的症状：第一次 install 报 "fzf: command not found"、
+    # 第二次（链已存在）又好了 —— 那种"重跑一次就行"的 bug 最难查。
+    #
+    # 行的形状：`generate <cmd|script> <生成物绝对路径> <命令串|脚本绝对路径> - <项目根>`
+    for entry in entries:
+        if entry.kind != "generate" or getattr(entry, "skip", False):
+            continue
+        dest_abs = os.path.normpath(os.path.join(project_root, entry.dest))
+        if entry.script:
+            rows.append(("generate", "script", dest_abs,
+                         os.path.join(project_root, entry.script), "-",
+                         project_root))
+        else:
+            rows.append(("generate", "cmd", dest_abs, entry.cmd, "-",
+                         project_root))
 
     # 3) rc 注入
     desired = {}  # rcfile -> env_rel
@@ -4282,6 +4381,191 @@ def offline_assets(args):
     return 0 if found else 1
 
 
+def project_kind_cmd(args):
+    """`project-kind <项目目录>` → stdout 打 `source` / `muslbin` / `docker`。
+
+    退出码（给 shell 用来选路线，`wtool.sh` 的 `download-release` 就靠它）：
+      0  读出来了
+      1  有 `wtool.xml` 但**解析不出来**（清单坏了，错误已打到 stderr）
+      3  不是 wtool 项目（没有 `wtool.xml`）—— "管不着"，让调用方自己决定
+    """
+    root = os.path.abspath(args.project)
+    mf = os.path.join(root, "wtool.xml")
+    if not os.path.isfile(mf):
+        return 3
+    errors = []
+    meta, _entries = parse_manifest(mf, root, errors)
+    if meta is None:
+        for e in errors:
+            sys.stderr.write("%s\n" % e)
+        return 1
+    print(meta.get("project_kind") or DEFAULT_PROJECT_KIND)
+    return 0
+
+
+def download_list(args):
+    """`download-list`：**有东西可下的**项目 id（`download-release all` 的展开名单）。
+
+    "有东西可下"的判据（和 download_plan 同一套，只是不读包/不联网）：
+      · ② `muslbin`：`wtool.xml` 里有 `<muslbin>` 声明（上游二进制，D32）
+      · ③ `docker` ：仓库里**提交了** `scripts/release.json`（ADR-026）——
+        那是"我们发布过产物包"的声明，唯一能找到资产的地方
+      · ① `source` ：**什么都不下**（源码即产物，D46/D50）—— 门禁本来就拦它
+    """
+    for _prio, pid, path, _pub in scan_projects(args.root, manifests_only=True):
+        kind = _kind_of_project(path)
+        if kind == "muslbin":
+            _errors = []
+            _meta, entries = parse_manifest(os.path.join(path, "wtool.xml"),
+                                            os.path.abspath(path), _errors)
+            if any(e.kind == "muslbin" for e in entries):
+                print(pid)
+            continue
+        if os.path.isfile(os.path.join(path, "scripts", "release.json")):
+            print(pid)
+    return 0
+
+
+def download_plan(args):
+    """`download-release` 的计划（ADR-0045 第 ⑦.2 块）。**只算不写、不联网。**
+
+    两条路线，读的都是**项目里提交的声明**（不猜、也不信 `__release/` 里有什么）：
+
+      · ② `muslbin` → `wtool.xml` 的 `<muslbin url= tag= sha256= member= dest=>`：
+        资产名 = URL 的 basename。落点 `<项目>/__release/<资产名>`（D43：下载那一步
+        只负责"拿到包"，解到 `__output/` 是 `unpack-release` 的事）。
+      · ③ `docker`  → `scripts/release.json`（`assets[]` + `base_url`/`repo`/`tag`）。
+
+    stdout 是 TSV：
+      src   <route>  <人话描述>                     ← route ∈ release | muslbin
+      file  <资产名> <sha256> <bytes|-> <url> <repo|-> <tag|->
+    stderr + 非 0 = 计划算不出来（清单坏了 / 没东西可下）。
+    """
+    root = os.path.abspath(args.project)
+    mf = os.path.join(root, "wtool.xml")
+    rj = os.path.join(root, "scripts", "release.json")
+
+    errors = []
+    meta, entries = (None, [])
+    if os.path.isfile(mf):
+        meta, entries = parse_manifest(mf, root, errors)
+    kind = (meta or {}).get("project_kind") or (DEFAULT_PROJECT_KIND if meta else "")
+    mbs = [e for e in entries if e.kind == "muslbin"]
+
+    # ---- ② muslbin：读 <muslbin>（D32）--------------------------------------
+    if mbs:
+        if len(mbs) > 1:
+            # 一条声明 = 一个资产。今天 29 个项目都是一条；多条也能走（下面的
+            # 循环就是按条来的），只是"tag"只用于显示，所以拿第一条说事。
+            pass
+        print("src\tmuslbin\twtool.xml 的 <muslbin>（上游二进制；tag %s）"
+              % mbs[0].tag)
+        for e in mbs:
+            repo, tag = muslbin_github_repo_tag(e.url)
+            print("file\t%s\t%s\t-\t%s\t%s\t%s"
+                  % (muslbin_asset_name(e.url), e.sha256, e.url, repo or "-",
+                     tag or e.tag))
+        return 0
+
+    # ---- ③ docker：读 scripts/release.json（ADR-026）-----------------------
+    if os.path.isfile(rj):
+        try:
+            with open(rj, encoding="utf-8") as fh:
+                doc = json.load(fh)
+        except (OSError, ValueError) as exc:
+            sys.stderr.write("读不了 %s: %s\n" % (rj, exc))
+            return 1
+        repo = doc.get("repo") or ""
+        tag = doc.get("tag") or ""
+        base = doc.get("base_url") or \
+            "https://github.com/%s/releases/download/%s" % (repo, tag)
+        rows = []
+        for a in doc.get("assets") or []:
+            name = a.get("name", "")
+            if not name:
+                continue
+            rows.append("file\t%s\t%s\t%s\t%s/%s\t%s\t%s"
+                        % (name, a.get("sha256", ""), a.get("bytes", 0),
+                           base.rstrip("/"), urllib.parse.quote(name),
+                           repo or "-", tag or "-"))
+        if not rows:
+            sys.stderr.write("%s 里一个资产都没有 —— 没什么可下的\n" % rj)
+            return 1
+        print("src\trelease\tscripts/release.json（%s %s）" % (repo, tag))
+        for r in rows:
+            print(r)
+        return 0
+
+    # ---- 两条路都没有：说清各自缺什么 --------------------------------------
+    sys.stderr.write(
+        "读不出 %s 要下载什么：\n" % root)
+    if errors:
+        sys.stderr.write("  项目清单 wtool.xml 有问题（解析不出 <muslbin>）：\n")
+        for e in errors:
+            sys.stderr.write("    %s\n" % e)
+    if kind == "muslbin":
+        sys.stderr.write(
+            "  它是 kind=\"muslbin\"（② 类），却没有 <muslbin> 下载声明 ——\n"
+            "  ② 类**没有别的下载来源**（它不产产物包，D50）。在 wtool.xml 里补一条：\n"
+            "    <muslbin url=\"https://…/x.tar.gz\" tag=\"v1.2.3\" sha256=\"…\"\n"
+            "             member=\"x\" dest=\"usr/bin/x\" arch=\"x86_64\"/>\n")
+    elif not os.path.isfile(mf):
+        sys.stderr.write("  这里没有 wtool.xml（不是 wtool 项目目录？）\n")
+    else:
+        sys.stderr.write(
+            "  也读不到 scripts/release.json —— 只有**发布过产物包**的 ③ 类才有它\n"
+            "  （ADR-026：那份声明跟着仓库走，是唯一能找到资产的地方）。\n")
+    return 1
+
+
+def _muslbin_entries(root):
+    """项目里声明了几条 `<muslbin>`（读不出来、或不是 ② 类 → 空表）。"""
+    mf = os.path.join(os.path.abspath(root), "wtool.xml")
+    if not os.path.isfile(mf):
+        return []
+    errors = []
+    _meta, entries = parse_manifest(mf, os.path.abspath(root), errors)
+    return [e for e in entries if e.kind == "muslbin"]
+
+
+def _unpack_plan_muslbin(mbs, pub):
+    """② 的声明式解包计划：**`<muslbin member= dest=>` 就是那张对照表**。
+
+    行 `member <资产名> <成员名|-> <__output 下的落点> <sha256> - muslbin`：
+      · 成员名 `-` = 裸文件资产（资产本身就是那个二进制：jq/yq/shfmt/b3sum）
+      · 落点 = `<muslbin dest=>`（例 `usr/bin/fzf`）—— 它**本来就是**相对
+        `__output/` 的（解析期已经拦过前缀问题），所以 D57 那条
+        "一律解到 __output/ 下"天然成立
+      · sha256 用清单里的那个：下载那步已经把关过一次，这里再对一次
+        （`__release/` 里的东西被手工换过 / 拷坏了，这一道能拦住）
+    """
+    rows = []
+    for e in mbs:
+        name = muslbin_asset_name(e.url)
+        if not os.path.isfile(os.path.join(pub, name)):
+            # 缺什么说什么 —— 下一步该敲哪条命令写在提示里
+            rows.append(("skip", name,
+                         "本地没有（缺 %s）—— 先 wtool download-release" % name))
+            continue
+        try:
+            fmt = muslbin_asset_format(e.url)
+        except ValueError:
+            fmt = "archive"          # 解析期已经报过错了，这里按最保守的走
+        member = "-" if fmt == "raw" else e.member
+        rows.append(("member", name, member, e.dest, e.sha256, "-", "muslbin"))
+    if not any(r[0] == "member" for r in rows):
+        sys.stderr.write(
+            "② 类的 <muslbin> 声明的资产，本地一个都没有（都在 %s 里找过）——\n"
+            "  先把上游二进制下下来：wtool download-release <项目>\n" % pub)
+        for r in rows:
+            if r[0] == "skip":
+                sys.stderr.write("    %s：%s\n" % (r[1], r[2]))
+        return 1
+    for r in rows:
+        print("\t".join(str(x) for x in r))
+    return 0
+
+
 def unpack_plan(args):
     """`unpack-release` 的**声明式**计划（ADR-0045 / D57 / Q1 + Q10）。
 
@@ -4302,10 +4586,19 @@ def unpack_plan(args):
         else os.path.join(root, "scripts", "release.json")
 
     if not os.path.isfile(rj):
+        # ‼️ ② `muslbin` **按设计就没有 release.json**（D50：它不产产物包）。
+        #    "解到哪"本来就在 `<muslbin member= dest=>` 里写着 —— D57 要的是
+        #    **必须声明**，声明写在哪个文件里是次要的（这个项目的声明面就是
+        #    wtool.xml）。所以这里**不再要第二份对照表**。
+        mbs = _muslbin_entries(root)
+        if mbs:
+            return _unpack_plan_muslbin(mbs, pub)
         sys.stderr.write(
             "没有 %s —— unpack-release 是**声明式**的：解到哪由这份对照表说了算，\n"
             "  引擎不猜（ADR-0045 / D57）。它跟着仓库走，由 pack-release /\n"
-            "  pack-offline-release 生成（`artifacts` 段），发布时补上 tag。\n" % rj)
+            "  pack-offline-release 生成（`artifacts` 段），发布时补上 tag。\n"
+            "  （② 类 muslbin 项目不写它：那些项目的对照表是 wtool.xml 的\n"
+            "   <muslbin member= dest=>，本项目既不是 ② 也没有这份对照表）\n" % rj)
         return 1
     try:
         with open(rj, encoding="utf-8") as fh:
@@ -5156,6 +5449,13 @@ def do_check(args):
                 if os.path.exists(dest) and os.path.exists(os.path.join(
                         state, pid, "system")):
                     pass
+            elif act == "generate":
+                # `<generate>` 的产物（D41 / D33）：账上有它，磁盘上就**必须**在。
+                # 不在的话，项目 env.zsh 里那句 source 会静默跳过 —— 用户看到的是
+                # "装好了"，而补全/按键绑定一个都没生效（半装状态，最难查）。
+                if not os.path.lexists(dest):
+                    bad(pid, "%s 不见了（<generate> 的安装期产物）—— "
+                             "跑一次 wtool install %s 会重新生成" % (dest, pid))
 
         # 声明里有、日志里没有 → 装的时候没带上（或者被人手工删过）
         declared = {l1_path(home, pid): "L1（项目接入链）"}
@@ -5549,11 +5849,24 @@ def build_parser():
     op.add_argument("--bootstrap", default="")
 
     # unpack-plan：声明式解包的计划（ADR-0045 / D57）。读 release.json + dist.json，
-    # 打一张 TSV 给 shell 执行 —— 引擎不猜"解到哪"。
+    # 打一张 TSV 给 shell 执行 —— 引擎不猜"解到哪"。② 类读 <muslbin member= dest=>。
     upp = sub.add_parser("unpack-plan")
     upp.add_argument("project")
     upp.add_argument("--from-dir", default="")
     upp.add_argument("--release-json", default="")
+
+    # project-kind：只读，读 wtool.xml 根元素的 kind（shell 用它选下载路线）
+    pkc = sub.add_parser("project-kind")
+    pkc.add_argument("project")
+
+    # download-list：有东西可下的项目 id（`download-release all` 的展开名单）
+    dls = sub.add_parser("download-list")
+    dls.add_argument("--root", required=True)
+
+    # download-plan：`download-release` 的计划（② 读 <muslbin>、③ 读 release.json）
+    dlp = sub.add_parser("download-plan")
+    dlp.add_argument("project")
+    dlp.add_argument("--root", default="")
 
     # offline-assets：publish-offline-release 要传哪些文件（只有离线族那些）
     oa = sub.add_parser("offline-assets")
@@ -5782,6 +6095,12 @@ def main(argv):
             print("declare   : %s" % (",".join(res["declare"]) or "-"))
         elif args.cmd == "unpack-plan":
             return unpack_plan(args)
+        elif args.cmd == "project-kind":
+            return project_kind_cmd(args)
+        elif args.cmd == "download-list":
+            return download_list(args)
+        elif args.cmd == "download-plan":
+            return download_plan(args)
         elif args.cmd == "offline-assets":
             return offline_assets(args)
         elif args.cmd == "dev-assets":
