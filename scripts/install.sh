@@ -61,6 +61,24 @@ done
 here=$(cd -- "$(dirname -- "$self")" && pwd -P)      # = <安装器项目>/scripts
 proj=$(cd -- "$here/.." && pwd -P)                   # = <安装器项目>
 
+# ==========================================================================
+# 被引擎调用时（`wtool install <安装器项目>` / `wtool uninstall <安装器项目>`）：
+# **立刻退出** —— 而且必须抢在**参数解析之前、第 0 步之前**。
+#
+#   · 参数要在这一层之前：引擎卸载时跑的是 `scripts/install.sh --uninstall`
+#     （契约见 docs/spec.md），那个开关本脚本不认识 —— 排在解析后面就是
+#     "未知参数: --uninstall" 直接失败（实测：pairing 场景 9 当场红）。
+#   · 第 0 步也要在这一层之前：引擎正装着东西的时候突然去跑 apt，既莫名其妙
+#     又需要 root（**这条踩过**）。
+#   · 更不能反过来调 `wtool install`：那会变成
+#     install.sh → wtool install → install.sh 的无限递归。
+# L1 / 账本 / env 汇总都是引擎的活，这里一个字节都不写。
+# ==========================================================================
+if [ -n "${WTOOL_PROJECT_ID:-}" ]; then
+    say "由引擎调用（项目 ${WTOOL_PROJECT_ID}）：L1 / 账本 / env 汇总都由引擎负责，这里不重复做"
+    exit 0
+fi
+
 HOME_DIR=${HOME:-/root}
 DRY_RUN=0
 RC_MODE=ask                                          # ask（有终端才问）/ write / print
@@ -103,19 +121,6 @@ case $proj in
     "$ws"/*) proj_rel=${proj#"$ws"/} ;;     # = 项目身份（相对工作区根的路径）
     *)       proj_rel=$(basename -- "$proj") ;;
 esac
-
-# ==========================================================================
-# 被引擎调用时（`wtool install <安装器项目>` 会跑到本脚本）：**立刻退出**。
-#
-# 这条路径上 L1 / 账本 / env 汇总都是**引擎**的活，这里一个字节都不该写；
-# 而且必须抢在第 0 步之前 —— 引擎正装着东西的时候突然去跑 apt，既莫名其妙
-# 又需要 root（**这条踩过**）。也不能反过来调 `wtool install`：那会变成
-# install.sh → wtool install → install.sh 的无限递归。
-# ==========================================================================
-if [ -n "${WTOOL_PROJECT_ID:-}" ]; then
-    say "由引擎调用（项目 ${WTOOL_PROJECT_ID}）：L1 / 账本 / env 汇总都由引擎负责，这里不重复做"
-    exit 0
-fi
 
 # ==========================================================================
 # 第 0 步：准备运行环境（发行版不同，做法不同）
@@ -447,11 +452,16 @@ else
             continue
         fi
         _log=$_rec_dir/selfcheck.$_sh.log
+        # ‼️ 判据是"**这个** WTOOL_HOME 里的 wtool"，不只是"PATH 上有 wtool" ——
+        #    机器上装过两份时，光看 `command -v` 会被**另一份**蒙过去（实测：
+        #    跑测试那个 shell 的 PATH 里本来就有别的 wtool，这一步就成了假绿）。
         _code="WTOOL_HOME=\$1; export WTOOL_HOME
 . \"\$WTOOL_HOME/env.$_sh\" || { echo \"SELFCHECK-FAIL source env.$_sh 失败\"; exit 3; }
-command -v wtool >/dev/null 2>&1 || { echo 'SELFCHECK-FAIL source 之后找不到 wtool 命令'; exit 4; }
+_w=\$(command -v wtool 2>/dev/null) || _w=''
+[ -n \"\$_w\" ] || { echo 'SELFCHECK-FAIL source 之后找不到 wtool 命令'; exit 4; }
+case \"\$_w\" in \"\$WTOOL_HOME\"/*) ;; *) echo \"SELFCHECK-FAIL wtool 解析到 \$_w —— 不在 \$WTOOL_HOME 里（PATH 上是不是有别的 wtool？）\"; exit 4 ;; esac
 case \":\$PATH:\" in *\":\$WTOOL_HOME/usr/bin:\"*) ;; *) echo 'SELFCHECK-FAIL PATH 里没有 \$WTOOL_HOME/usr/bin'; exit 5 ;; esac
-echo \"SELFCHECK-OK wtool=\$(command -v wtool)\"
+echo \"SELFCHECK-OK wtool=\$_w\"
 wtool check || exit 6"
         _rc=0
         env -i HOME="$HOME_DIR" PATH="$_clean_path" \
@@ -465,7 +475,7 @@ wtool check || exit 6"
         # 没过：把子进程看到的东西原样贴出来，并说清是哪一步
         case $_rc in
             3) _why="source \$WTOOL_HOME/env.$_sh 就失败了" ;;
-            4) _why="source 之后**找不到 wtool 命令**（env 块里的 PATH 没生效）" ;;
+            4) _why="source 之后**找不到 wtool 命令**，或者它解析到的不是 \$WTOOL_HOME 里那一个（env 块里的 PATH 没生效）" ;;
             5) _why="PATH 里**没有 \$WTOOL_HOME/usr/bin**" ;;
             6) _why="\`wtool check\` 报了问题（工作区里那些项目的账对不上）" ;;
             *) _why="子进程退出码 $_rc" ;;
