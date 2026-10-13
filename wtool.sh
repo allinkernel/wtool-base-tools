@@ -1379,6 +1379,10 @@ EOF
     _plan="$_scratch/plan.tsv"
 
     _done=0
+    # 失败计数（末尾按它给退出码）。批处理里"某个项目没下成"**不算**整批失败，
+    # 但也不能静默当成功 —— 这是 BACKLOG 里那条待决定的落地口径：
+    # **警告 + 继续下一个 + 末尾非 0**（"我让你下的东西一个都没下成"应当算失败）。
+    _failed=0
     for _want in $_targets; do
         # 和 unpack-release 一样：**先认目录**。目录形式不该要求它已经在项目表里
         # —— 刚从发布包铺开的工作区就是这种情况（还没有 wtool.xml 之外的账）。
@@ -1435,7 +1439,16 @@ EOF
                 *)    ;;
             esac
         done < "$_plan"
-        [ -n "$_rows" ] || wt_die "$_pid 的下载声明里一个资产都没有"
+        [ -n "$_rows" ] || {
+            # ‼️ 这里**不能 die**：`download-release all` 是**批处理**，一个"发过声明、
+            #    但声明里一个资产都没有"的项目（典型：③ 类建了 scripts/release.json
+            #    却还没发布过）会把**整批**打断 —— 实测 `download-release all` 在第一个
+            #    项目上就整条命令退出了。改成：报清楚、记一笔失败、继续下一个，
+            #    末尾按失败数给非 0（"我让你下的东西一个都没下成"仍然算失败）。
+            wt_warn "  $_pid 的下载声明里一个资产都没有 —— 跳过（先发布：wtool pack-release $_pid && wtool publish-release $_pid）"
+            _failed=$((_failed + 1))
+            continue
+        }
         wt_info "  声明 : $_desc"
         wt_info "  落点 : __release/"
 
@@ -1517,7 +1530,8 @@ EOF
 $_rows
 EOF
         if [ "$_got" -eq 0 ]; then
-            wt_warn "  一个文件都没下来"
+            wt_warn "  一个文件都没下来 —— 跳过（网络/代理？重跑：wtool download-release $_pid）"
+            _failed=$((_failed + 1))
             continue
         fi
 
@@ -1534,6 +1548,11 @@ EOF
         _done=$((_done + 1))
     done
     wt_info "download-release 完成（$_done 个项目）"
+    if [ "$_failed" -gt 0 ]; then
+        wt_warn "$_failed 个项目没下成（见上面的原因）—— 产物已保留，修好网络直接重跑"
+        return 1
+    fi
+    return 0
 }
 
 # route B：API 的资产端点，要带 Accept: application/octet-stream
@@ -2777,13 +2796,19 @@ cmd_unpack_release() {
             *)         _targets="$_targets $arg" ;;
         esac
     done
-    [ -n "$_targets" ] || wt_die "用法: wtool unpack-release <项目>... [--from=<下载目录>]
+    [ -n "$_targets" ] || wt_die "用法: wtool unpack-release <项目>...|all [--from=<下载目录>]
 
   按 dist.json 校验分卷 → 拼接 → 解到 <项目>/__output/（不联网、不做安装）。
   输入（dist.json + 分卷）默认在 <项目>/__release/；--from=<目录> 指到别处（下载目录）。
-  --dry-run 只打印计划：**不拼卷、不写 __output/**。" \
+  --dry-run 只打印计划：**不拼卷、不写 __output/**。
+  all = 有东西可解的那些项目（②③；和 download-release all 同一张名单）。" \
         ""
     [ -z "$_from" ] || _from=$(cd -- "$_from" && pwd) || wt_die "目录不存在: $_from"
+
+    # `all` / `each` = 有东西可解的那些项目（判据在 py 的 download-list：② 读
+    # <muslbin>、③ 读 scripts/release.json）—— 和 `download-release all` 对称。
+    # 以前这里**不认 all**，于是"下全量"之后必须自己把 42 个项目名抄一遍（实测）。
+    _targets=$(wt_expand_targets download $_targets)
 
     _scratch=$(mktemp -d "${TMPDIR:-/tmp}/wtool-unpack.XXXXXX")
     trap 'rm -rf -- "$_scratch"' EXIT INT TERM
