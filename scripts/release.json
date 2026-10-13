@@ -36,5 +36,20 @@
       "sha256": "293baf2f7fd911d30fe2b172688492d20cb987bf4a7a2c0df1df2c7bb63d7ef9"
     }
   ],
-  "how": "wtool download-release wtool-base-tools   # 下到项目的 __release/（按本文件的 sha256 校验）\nwtool unpack-release wtool-base-tools     # 拼分卷 + 把源码铺回项目目录\nwtool install wtool-base-tools            # 装到本机"
+  "how": "wtool download-release wtool-base-tools   # 下到项目的 __release/（按本文件的 sha256 校验）\nwtool unpack-release wtool-base-tools     # 拼分卷 + 把源码铺回项目目录\nwtool install wtool-base-tools            # 装到本机\n\n# 还没有 .wtool 的机器（种子包，解开来是 .wtool/ 树）：\ntar xzf wtool-base-tools.tar.gz -C \"$HOME\" && \"$HOME/.wtool/install.sh\"",
+  "offlineTag": "",
+  "artifacts": {
+    "source.zip": [
+      {
+        "from": "wtool/wtool-base-tools/**",
+        "to": "."
+      }
+    ],
+    "wtool-base-tools.tar.gz": [
+      {
+        "from": ".wtool/**",
+        "to": ".wtool"
+      }
+    ]
+  }
 }

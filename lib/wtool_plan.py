@@ -5870,7 +5870,13 @@ def release_json(args):
         if ent:
             artifacts[name] = ent
 
-    pid = dist.get("project") or args.project_id or old.get("project") or ""
+    # 项目 id 以**活的身份**为准（args.project_id = 引擎刚解析出来的项目路径）。
+    # ‼️ 原来这里先读 `dist.get("project")`，于是**上一版 `dist.json` 里那个旧名字**
+    #    会盖掉现名 —— 实测 2026-10-14：`wtool-base-tools` 被写成 `bootstrap`、
+    #    `shell/shell-rc` 被写成 `shell/zsh`（两个都是改名前的 id，`release.json`
+    #    是提交进 git 的声明，写错就把下一个人的 `download-release` 指到不存在的项目）。
+    #    没给 id 时才回退到 dist.json / 旧文件（那两个回退仍然有用）。
+    pid = args.project_id or dist.get("project") or old.get("project") or ""
     targets = [t for t in (args.targets or "").split(",") if t]
     out = dict(old)                       # ← 先留着上一版，再覆盖自己这几段
     out.update({
