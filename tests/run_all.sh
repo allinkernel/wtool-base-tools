@@ -36,10 +36,17 @@
 #   tests/docker_build_test.sh kind=docker 的引擎驱动构建（打桩 docker，不联网）；构建日志落在
 #                             **本机日志** $WTOOL_LOG_DIR/<项目>/build-logs/，账本里不再有它（102 条）
 #   tests/install_env_test.sh install.sh 第 0 步：镜像测速 / 挑源 / 换源与退路（打桩，不联网）（67 条）
-#                             —— 十一组共 1174 条（2026-10-13 实测；ADR-0045 第 5a 块：
-#                             1148→1174 = pairing +16（本机日志那一场）、contract +9、
-#                             docker-build +1，同时现场重写掉一批旧断言（rc 块 / 影子 HOME /
-#                             ~/.wtool/.zshrc 那些）。要数字请以**跑出来的 PASS 行**为准。
+#   tests/installer_test.sh   install.sh **六项职责** + manifest 三件套（ADR-0045 第 5b 块 /
+#                             D42）：两条入口链的形状（相对链、项目名不写死）、
+#                             var/ 账本（删掉它 check 必须非 0）、三件套的两种形态
+#                             （满血=绝对链+现场算 / bundle=只校验不覆盖）、
+#                             六步**各自的**失败路径都非 0、rc"非交互一个字节都不写 /
+#                             pty 答 y 才写 / 写了也只有两行"、--dry-run 零副作用
+#                             （78 条 —— 2026-10-13，第 5b 块新加）
+#                             —— 十二组共 1255 条（2026-10-13 实测；ADR-0045 第 5b 块：
+#                             1177→1255 = 新增 installer 78 条；同时 pairing 场景 9 的
+#                             两条断言改到新位置（$WTOOL_HOME/bootstrap → wtool/bootstrap，
+#                             D23），条数不变）。要数字请以**跑出来的 PASS 行**为准。
 #   tests/docker_build_real.sh 同一件事的**真 docker** 冒烟测试（人工跑，见文件头）
 #   tests/container_test.sh   容器里从零装一遍（需要 docker，见文件头注释）
 #   tests/container_acceptance.sh  人工总验收：把它喂给容器里的 container-raw.sh（见文件头）
@@ -47,26 +54,28 @@
 set -eu
 here=$(cd -- "$(dirname -- "$0")" && pwd)
 
-printf '########## 1/11 pairing（install/uninstall）##########\n'
+printf '########## 1/12 pairing（install/uninstall）##########\n'
 sh "$here/pairing_test.sh"
-printf '\n########## 2/11 sudo-install（系统文件/source/task）##########\n'
+printf '\n########## 2/12 sudo-install（系统文件/source/task）##########\n'
 sh "$here/provision_test.sh"
-printf '\n########## 3/11 publish-release（只上传 + release.json）##########\n'
+printf '\n########## 3/12 publish-release（只上传 + release.json）##########\n'
 sh "$here/publish_test.sh"
-printf '\n########## 4/11 table（能力表格）##########\n'
+printf '\n########## 4/12 table（能力表格）##########\n'
 sh "$here/table_test.sh"
-printf '\n########## 5/11 release-copy（解压出来的工作区）##########\n'
+printf '\n########## 5/12 release-copy（解压出来的工作区）##########\n'
 sh "$here/release_copy_test.sh"
-printf '\n########## 6/11 pack-release / unpack-release / download-release ##########\n'
+printf '\n########## 6/12 pack-release / unpack-release / download-release ##########\n'
 sh "$here/release_test.sh"
-printf '\n########## 7/11 新契约（标签/两跳/顺序/check/repair/kill）##########\n'
+printf '\n########## 7/12 新契约（标签/两跳/顺序/check/repair/kill）##########\n'
 sh "$here/contract_test.sh"
-printf '\n########## 8/11 __layer/（OCI 镜像目录）##########\n'
+printf '\n########## 8/12 __layer/（OCI 镜像目录）##########\n'
 sh "$here/layer_test.sh"
-printf '\n########## 9/11 引擎驱动容器构建（kind=docker）##########\n'
+printf '\n########## 9/12 引擎驱动容器构建（kind=docker）##########\n'
 sh "$here/docker_build_test.sh"
-printf '\n########## 10/11 install.sh 第 0 步（镜像测速 / 挑源 / 换源与退路）##########\n'
+printf '\n########## 10/12 install.sh 第 0 步（镜像测速 / 挑源 / 换源与退路）##########\n'
 sh "$here/install_env_test.sh"
-printf '\n########## 11/11 新标签 + L1/L2（ADR-0045 第 3 块）##########\n'
+printf '\n########## 11/12 install.sh 六项职责 + manifest 三件套（第 5b 块）##########\n'
+sh "$here/installer_test.sh"
+printf '\n########## 12/12 新标签 + L1/L2（ADR-0045 第 3 块）##########\n'
 sh "$here/export_test.sh"
 printf '\n全部通过。\n'
