@@ -1164,6 +1164,71 @@ case $_dup in
     *) bad "开发机那一族没传 release.zip" "$_dup" ;;
 esac
 
+echo "== 20. 同名资产守卫：页上已经有**别人**的同名包 → 拒，不覆盖（H33 的配套判据）=="
+# 为什么要有这条：`gh release upload --clobber` 是"同名就盖"，它不问那个资产是谁的。
+# 一仓多项目（`tools/musl-bins` = 42 个项目一个 release 页）时就会互相盖 ——
+# 实测撞过：42 个 `release-offline.zip` 只剩一个。判据 = 远端同名资产的 sha256
+# 跟本地这个文件**不一样** → 拒（要覆盖必须显式 --force）。
+mkdir -p "$T/bin-guard"
+# ⚠️ 假 gh 必须用**不带引号**的 heredoc（和上面那些一样）：`$T` 要在**生成时**
+#    就烙进脚本里。用 `<<'EOF'` 的话 `$T` 是运行时变量（测试里没 export）→
+#    日志会写到 `/gh.log`，断言全部**空过**（第一次写这条时就是这么错的）。
+cat > "$T/bin-guard/gh" <<EOF
+#!/bin/sh
+# 守卫用的假 gh：\`release view ... --json assets\` 报"这一页上已经有一个同名、
+# 但 sha256 完全不同的资产"（假装那是别的项目的包）。
+printf '%s\n' "\$*" >> "$T/gh.log"
+case "\$1 \$2" in
+    "repo view")    echo "ADMIN"; exit 0 ;;
+    "release view")
+        case "\$*" in
+            *"--json assets"*)
+                printf '%s\n' '{"assets":[{"name":"release-offline.zip","size":1,"digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000"}]}'
+                exit 0 ;;
+        esac
+        exit 1 ;;
+esac
+exit 0
+EOF
+chmod +x "$T/bin-guard/gh"
+# 先把包打回来（上面 dry-run 那段之前删过一次，dry-run 又打了一次）
+wt "$T/bin" "$WS19" "$ST19" pack-offline-release terminal/tmux > /dev/null 2>&1
+: > "$T/gh.log"
+_rc=0
+wt "$T/bin-guard" "$WS19" "$ST19" publish-offline-release terminal/tmux > "$T/log20" 2>&1 || _rc=$?
+[ "$_rc" != 0 ] && ok "★同名资产 sha256 不一样 → 非 0（rc=$_rc）" \
+    || { bad "同名资产冲突居然放行了" "$(cat "$T/log20")"; }
+grep -q '冲突' "$T/log20" && ok "★说清了同名资产已经有别的 sha256" \
+    || { bad "没说清冲突" "$(sed 's/^/     /' "$T/log20")"; }
+grep -q '本地 sha256' "$T/log20" && ok "把本地和远端两个 sha256 都打出来了（能自查）" \
+    || bad "没打出两个 sha256"
+chk "★拒了之后**一个字节都没传**（不许 --clobber 盖掉别人的）" \
+    "$(grep -cE 'release (create|upload)' "$T/gh.log" || true)" "0"
+# --force = 我确认要覆盖（`gh` 那边是 --clobber）
+: > "$T/gh.log"
+_rc=0
+wt "$T/bin-guard" "$WS19" "$ST19" publish-offline-release terminal/tmux --force \
+    > "$T/log20b" 2>&1 || _rc=$?
+chk "--force 之后退出码 0" "$_rc" "0"
+grep -q 'release upload' "$T/gh.log" && ok "--force 真的传了（跳过守卫）" \
+    || bad "--force 之后还是没传"
+
+echo "== 21. 离线族资产名的判据：带项目名的包**和它的附件**都要认（D67 配套）=="
+# ‼️ 判据必须"先剥附件后缀再比"：`<项目>-release-offline.zip` 认得出、它的
+#    `.sha256` / `.part-aa` 认不出的话，`publish-offline-release` 会**只传包不传校验文件**
+#    （实测：42 个包一个 .sha256 都没传上去，而假 gh 不在乎 —— 只有这条断言挡得住）。
+GD="$T/guarddir"; rm -rf "$GD"; mkdir -p "$GD"
+for _n in bat-release-offline.zip bat-release-offline.zip.sha256 \
+          bat-release-offline.zip.part-aa x-source-offline.zip x-source-offline.zip.sha256 \
+          release-offline.zip release-offline.zip.sha256 wtool-base-tools.tar.gz.sha256 \
+          check-hash.sh check-hash-ubuntu24.04.sh \
+          release.zip source.zip dist.json .offline source-hash.txt; do
+    : > "$GD/$_n"
+done
+_ls=$(py "$here/../lib/wtool_plan.py" offline-assets --release-dir "$GD" | xargs -r -n1 basename | sort | tr '\n' ' ')
+chk "★带项目名的包**和它的 .sha256 / 分卷**都算离线族" "$_ls" \
+    "bat-release-offline.zip bat-release-offline.zip.part-aa bat-release-offline.zip.sha256 check-hash-ubuntu24.04.sh check-hash.sh release-offline.zip release-offline.zip.sha256 wtool-base-tools.tar.gz.sha256 x-source-offline.zip x-source-offline.zip.sha256 "
+
 echo
 printf 'publish_test: PASS %d  FAIL %d\n' "$pass" "$fail"
 [ "$fail" = 0 ]

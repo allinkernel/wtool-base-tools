@@ -690,6 +690,36 @@ chk "★② 有了离线包之后 unpack-release **照样能用**（回退到 <m
     && ok "★② 产物真的解出来了（不是退化成空成功）" \
     || bad "★② 产物没出来" "$_out"
 
+# ★ 一仓多项目 → 离线包的资产名**带项目名**（2026-10-14 用户拍的 H33 口径）
+#   为什么：42 个 muslbin 项目共用 `allinkernel/wtool-musl-bins` 一个 release 页，
+#   资产名固定的话它们会互相 --clobber（实测跑到第 22 个时页面上只剩一个 .sha256）。
+#   判据：**同一个 git 仓库里放两个 wtool 项目** → 各自的包名是
+#   `<项目路径末段>-release-offline.zip`，而且 `__release/` 里**不留**旧的基础名。
+MB="$WTOOL_ROOT/tools/many/musl-bins2"
+mkdir -p "$MB"; git -C "$MB" init -q
+for _seg in alpha beta; do
+    _d="$MB/$_seg"; mkdir -p "$_d"
+    wxml "$_d" muslbin \
+        '<muslbin url="https://github.com/fake/demo/releases/download/v1.0/procs-1.0.zip"' \
+        "         tag=\"v1.0\" sha256=\"$SHA_ZIP\" member=\"procs\" dest=\"usr/bin/$_seg\" arch=\"x86_64\"/>" \
+        "<export_bin src=\"__output/usr/bin/$_seg\"/>"
+done
+gitci "$MB"
+"$WT" download-release "$MB/alpha" "$MB/beta" >/dev/null 2>&1 || bad "一仓多项目：下载"
+"$WT" pack-offline-release "$MB/alpha" >/dev/null 2>&1 || bad "一仓多项目：打包 alpha"
+[ -f "$MB/alpha/__release/alpha-release-offline.zip" ] \
+    && ok "★一仓多项目：资产名带项目名（alpha-release-offline.zip）" \
+    || bad "★资产名没带项目名" "$(ls "$MB/alpha/__release" 2>/dev/null | tr '\n' ' ')"
+[ ! -e "$MB/alpha/__release/release-offline.zip" ] \
+    && ok "★旧的基础名不留在 __release/ 里（否则发布时两个都会被传上去）" \
+    || bad "★旧名字还在" "$(ls "$MB/alpha/__release" | tr '\n' ' ')"
+"$WT" pack-offline-release "$MB/beta" >/dev/null 2>&1 || true
+_a=$(basename "$(ls "$MB/alpha/__release"/*-release-offline.zip 2>/dev/null | head -1)" 2>/dev/null)
+_b=$(basename "$(ls "$MB/beta/__release"/*-release-offline.zip 2>/dev/null | head -1)" 2>/dev/null)
+[ -n "$_a" ] && [ -n "$_b" ] && [ "$_a" != "$_b" ] \
+    && ok "★同一仓库里两个项目的资产名互不相同（$_a / $_b）" \
+    || bad "★两个项目的资产名撞了" "alpha=[$_a] beta=[$_b]"
+
 printf '\n----------------------------------------\n'
 printf 'muslbin_test: PASS %d  FAIL %d\n' "$pass" "$fail"
 [ "$fail" = 0 ]

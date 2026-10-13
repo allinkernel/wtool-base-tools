@@ -4090,6 +4090,10 @@ cmd_publish_offline_release() {
                 wt_step "[dry-run] 资产（$_n 个）: $_names"
                 return 0
             fi
+            # 同名资产守卫（H33 的配套判据）：先查这一页上有没有**不是我们**的同名资产；
+            # 它的 stdout 是**真正要传的**清单（页上已有一模一样的会跳过）
+            # shellcheck disable=SC2086
+            _up=$(wt_publish_guard_assets "$_scratch" "$_repo" "$_tag" $_files) || return 1
             wt_publish_gh_release "$_repo" "$_tag" "wtool 整机迁移包 $(date +%Y-%m-%d)" \
 "**整机迁移包**（ADR-0045 / D55）：把一台开发机的 \`.wtool\` 搬到一个**没有网络的机器**上。
 
@@ -4105,10 +4109,14 @@ cmd_publish_offline_release() {
 · 校验：同一页上的 \`check-hash*.sh\`（分卷时，直接跑、不依赖 wtool）或 \`<包名>.sha256\`。
 · 单独装某个项目请用**逐项目**那一族的自足包（另一个 release 页）。" \
                 "$_target_override"
-            # shellcheck disable=SC2086
-            if ! wt_publish_gh_upload "$_repo" "$_tag" $_files; then
-                wt_warn "整机包没传完 —— 产物还在 $_pub/，修好网络直接补传"
-                return 1
+            if [ -z "$(printf '%s' "$_up" | tr -d '[:space:]')" ]; then
+                wt_info "  这一版页上都已经有了（sha256 一致）—— 没有要传的"
+            else
+                # shellcheck disable=SC2086
+                if ! wt_publish_gh_upload "$_repo" "$_tag" $_up; then
+                    wt_warn "整机包没传完 —— 产物还在 $_pub/，修好网络直接补传"
+                    return 1
+                fi
             fi
             wt_info "整机迁移包已发布: https://github.com/$_repo/releases/tag/$_tag"
             return 0
@@ -4189,15 +4197,26 @@ cmd_publish_offline_release() {
             continue
         fi
 
+        # 同名资产守卫（H33）：这个页上已经有同名但 sha256 不一样的资产 → 拒，
+        # 别把**别的项目/别的版本**的包盖掉（一仓多项目时这是真会发生的）。
+        # shellcheck disable=SC2086
+        # 守卫的 stdout = **真正要传的**清单（页上已有一模一样的会被跳过）——
+        # 必须拿它去传，不然"跳过"只是打印了一句、包还是重传一遍（实测踩过）。
+        _up=$(wt_publish_guard_assets "$_scratch" "$_repo" "$_tag" $_files) \
+            || { _failed=$((_failed + 1)); continue; }
         wt_publish_gh_release "$_repo" "$_tag" "$_pid 离线包 $(date +%Y-%m-%d)" \
             "离线族的自足包（给断网机）：解开 → cp -a wtool/. \"\$WTOOL_HOME/wtool/\" → wtool install。
 校验：<包名>.sha256（sha256sum -c）；分卷时跑 check-hash.sh（不依赖 wtool）。
 开发机那一族（release.zip + dist.json）在**另一个** release 页上，见 scripts/release.json 的 tag。" \
             "$_sha"
-        # shellcheck disable=SC2086
-        if ! wt_publish_gh_upload "$_repo" "$_tag" $_files; then
-            _failed=$((_failed + 1))
-            continue
+        if [ -z "$(printf '%s' "$_up" | tr -d '[:space:]')" ]; then
+            wt_info "  这一版页上都已经有了（sha256 一致）—— 没有要传的"
+        else
+            # shellcheck disable=SC2086
+            if ! wt_publish_gh_upload "$_repo" "$_tag" $_up; then
+                _failed=$((_failed + 1))
+                continue
+            fi
         fi
         wt_publish_record "$_pid" "$_repo" "$_tag" "$_n" "release-offline:$_tag"
 

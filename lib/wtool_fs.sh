@@ -1125,11 +1125,30 @@ wt_gh_route() {
     fi
     _WTOOL_GH_ROUTE=current
     if [ -n "${HTTPS_PROXY:-}${https_proxy:-}${HTTP_PROXY:-}${http_proxy:-}" ]; then
-        if ! timeout 20 gh api /rate_limit >/dev/null 2>&1; then
+        # ‼️ 探测**失败先重试**再判死刑（2026-10-14 修）：一次超时不等于"代理坏了"。
+        #    实测：后台在拉 42 个上游二进制时（几百 KB/s 占满代理），20 秒的探测会超时
+        #    → 旧实现当场改走**直连**，而直连更慢/更不稳 → 上传两次全失败
+        #    （同一时刻手工 `gh release upload` 走代理却成功）。
+        #    现在：三次探测（中间各歇一下）都失败才改直连；每次重试都出声，
+        #    让日志里看得出"这是重试，不是一次就判死"。
+        _gr_ok=0
+        _gr_try=1
+        while [ "$_gr_try" -le 3 ]; do
+            if timeout 20 gh api /rate_limit >/dev/null 2>&1; then
+                _gr_ok=1
+                break
+            fi
+            if [ "$_gr_try" -lt 3 ]; then
+                wt_warn "探测 GitHub 超时（第 $_gr_try 次）—— 重试（代理忙的时候会这样，不等于代理坏了）"
+                sleep $((_gr_try * 3))
+            fi
+            _gr_try=$((_gr_try + 1))
+        done
+        if [ "$_gr_ok" != 1 ]; then
             if timeout 20 env -u HTTPS_PROXY -u https_proxy -u HTTP_PROXY \
                     -u http_proxy -u ALL_PROXY -u all_proxy \
                     gh api /rate_limit >/dev/null 2>&1; then
-                wt_warn "代理连不上 GitHub，这次发布改用直连"
+                wt_warn "代理连不上 GitHub（试了 3 次），这次发布改用直连"
                 _WTOOL_GH_ROUTE=direct
             fi
         fi
@@ -1144,6 +1163,38 @@ wt_gh() {
                     -u http_proxy -u ALL_PROXY -u all_proxy gh "$@" ;;
         *)      gh "$@" ;;
     esac
+}
+
+# 上传前的**同名资产**守卫（H33 的配套判据）：`gh release upload --clobber` 是
+# "同名就盖"，它不问那个资产是谁的 —— 一仓多项目时会互相盖掉。判据在 py 里
+# （`publish-guard`：远端没这个名字 / sha256 一样 = 自己那份 → 放行；
+# 有且 sha256 不一样 → 拒，说清两个 sha256，要覆盖得显式 `--force`）。
+#
+#   wt_publish_guard_assets <scratch> <repo> <tag> <文件...>
+wt_publish_guard_assets() {
+    _pg_scratch=$1; _pg_repo=$2; _pg_tag=$3; shift 3
+    [ "$#" -gt 0 ] || return 0
+    if [ "${WTOOL_FORCE:-0}" = 1 ]; then
+        wt_info "  --force：跳过同名资产守卫（--clobber 直接覆盖）"
+        return 0
+    fi
+    _pg_json="$_pg_scratch/assets.json"
+    # release 还不存在 → 没有同名资产可撞，直接放行（这是**新页**的正常路径）
+    if ! wt_gh release view "$_pg_tag" --repo "$_pg_repo" --json assets \
+            > "$_pg_json" 2>/dev/null; then
+        printf '%s\n' "$@"
+        return 0
+    fi
+    # stdout = **真正要传的**那些：页上已有一模一样（sha256 相同）的会被跳过
+    # —— 这样"补传"（比如只缺校验文件）不用把几百 MB 的包重传一遍。
+    _pg_out=$(python3 "$PY" publish-guard --assets-json "$_pg_json" \
+                  $([ "${WTOOL_FORCE:-0}" = 1 ] && printf '%s' --force) "$@") || {
+        wt_warn "拒绝上传：上面那些名字在这个 release 页上**已经有别的 sha256** 了。"
+        wt_warn "  确认要覆盖就重跑并加 --force（gh 那边是 --clobber）。"
+        return 1
+    }
+    printf '%s\n' "$_pg_out" | awk 'NF'
+    return 0
 }
 
 wt_publish_gh_upload() {
@@ -1762,6 +1813,7 @@ wt_pack_offline_release() {
     }
     _of_asset=$(awk -F'\t' '$1=="asset"{print $2}' "$_of_scratch/offline.tsv")
     _of_shape=$(awk -F'\t' '$1=="shape"{print $2}' "$_of_scratch/offline.tsv")
+    _of_base=$(awk -F'\t' '$1=="base"{print $2}' "$_of_scratch/offline.tsv")
     _of_prefix=$(awk -F'\t' '$1=="prefix"{print $2}' "$_of_scratch/offline.tsv")
     _of_link=$(awk -F'\t' '$1=="link"{print $2}' "$_of_scratch/offline.tsv")
     _of_kind=$(awk -F'\t' '$1=="kind"{print $2}' "$_of_scratch/offline.tsv")
@@ -1788,6 +1840,18 @@ wt_pack_offline_release() {
     # 和用户自己放在这儿的文件，一个都不动。
     rm -f -- "$_of_pub/$_of_asset" "$_of_pub/$_of_asset.sha256" \
              "$_of_pub/$WT_OFFLINE_CHECK" "$_of_pub/$_of_asset".part-* 2>/dev/null || true
+    # 资产名换过口径时（2026-10-14：一仓多项目改成 `<项目>-release-offline.zip`），
+    # `__release/` 里还会躺着**上一版旧名字**那个包。不清掉它，`publish-offline-release`
+    # 会把两个都当离线族传上去 —— 旧名字正好是**别的项目也在用**的那个
+    # （`release-offline.zip`），传上去就是 H33 那场覆盖。**本族**的旧名字才清。
+    if [ -n "$_of_base" ] && [ "$_of_base" != "$_of_asset" ]; then
+        for _of_old in "$_of_pub/$_of_base" "$_of_pub/$_of_base.sha256"; do
+            [ -e "$_of_old" ] || continue
+            wt_info "  清掉上一版旧名字：$(basename -- "$_of_old")（这一版叫 $_of_asset）"
+            rm -f -- "$_of_old"
+        done
+        rm -f -- "$_of_pub/$_of_base".part-* 2>/dev/null || true
+    fi
 
     if [ "$_of_shape" = "dotwtool" ]; then
         # 安装器包（D59）：`.wtool/` 树。`.wtool/install.sh` 必须是**相对软链** ——

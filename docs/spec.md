@@ -1304,6 +1304,18 @@ wtool download-release all                    # 上面两种都算
 | ① `source` | `source-offline.zip` |
 | ② `muslbin` / ③ `docker` | `release-offline.zip` |
 | **安装器项目**（引擎自己住的那个项目 —— 判据是**位置**不是名字：项目里就是 `wtool.sh` + `lib/wtool_plan.py`，而且正在跑的那份引擎住在里面） | **`wtool-base-tools.tar.gz`**（特例，D59） |
+| **一个仓库多个项目**时（`tools/musl-bins` = 42 个项目一个仓） | 上面那个名字**前面带项目名**（项目**路径末段**、ASCII）：② → `bat-release-offline.zip`；① → `<末段>-source-offline.zip`（D67） |
+
+**D67：一仓多项目的资产名**（用户 2026-10-14 定）—— 判据是"这个项目的 git 仓库根下
+能找到**不止一个** `wtool.xml`"（不许猜、不许写死项目名）。为什么必须带：42 个项目
+共用**同一个 release 页**，资产名固定的话它们会互相 `--clobber`（实测跑到第 22 个时
+页面上只剩一个 `.sha256`，见 `harness/docs/hazards.md` H33）。
+
+**配套判据（上传前守卫）**：`publish-offline-release` 在 `gh release upload` 之前先查
+"这个 tag 下有没有**同名但 sha256 不一样**的资产"——
+· 没有 → 放行；· 有且 sha256 一样 → 就是自己那份，放行（重复上传无害）；
+· 有但 sha256 **不一样** → **拒**，打出两个 sha256（那多半是别的项目/别的版本），
+要覆盖得显式 `--force`（`gh` 那边是 `--clobber`；它本身不问东西是谁的）。
 
 **"自足"的判据 = 离线机上 `wtool install` 工作需要什么**：
 

@@ -157,24 +157,78 @@ INSTALLER_ASSET = "wtool-base-tools.tar.gz"
 OFFLINE_CHECK_HASH = "check-hash.sh"
 
 
-def offline_asset_for(project_root, bootstrap_dir=""):
+def offline_asset_base(asset):
+    """把"一仓多项目"那种**带项目名**的离线资产名还原成基础名。
+
+    `bat-release-offline.zip` → `release-offline.zip`；`wtool-all-ubuntu24.04.tar.gz`
+    和 `wtool-base-tools.tar.gz` **原样返回**（它们自己就是基础名）。
+
+    判据只有一处：**后缀匹配**（`-` + 基础名）。这样 `is_offline_asset` /
+    `ARTIFACT_ROOT` / `artifact_entries` 三处都不用各自再写一遍规则 ——
+    2026-10-14 加"一仓多项目带项目名"（H33 的最终口径）时就是靠它把
+    已有判据一次性接上的。
+    """
+    for base in list(OFFLINE_ASSETS.values()):
+        if asset.endswith("-" + base):
+            return base
+    return asset
+
+
+def offline_asset_for(project_root, bootstrap_dir="", multi_project=False):
     """这个项目的离线自足包叫什么（D50）。
 
     安装器项目是特例（D59）：**引擎自己住的那个项目** → `wtool-base-tools.tar.gz`。
     判据是"引擎就在它里面"（`wtool.sh` + `lib/wtool_plan.py` 都在，而且正在跑的
     那一份就住在这儿），不是"目录叫什么" —— 目录已经改名（bootstrap → wtool-base-tools，
     DESIGN §7）之后这条判据照样成立，不会悄悄产出一个形状不对的包。
+
+    ‼️ **`multi_project=True`（一个仓库承载多个 wtool 项目）时，名字前面带项目名**
+    （项目路径的**末段**，全 ASCII）：`bat-release-offline.zip`、`fzf-release-offline.zip`…
+    理由：42 个 muslbin 项目共用 `allinkernel/wtool-musl-bins` **一个 release 页**，
+    而资产名固定的话它们会互相 `--clobber`（实测：跑到第 22 个时页面上只剩一个
+    `.sha256`）。基础名仍然"类型可见"（`-release-offline.zip` / `-source-offline.zip`）。
     """
     root = os.path.abspath(project_root)
-    if not os.path.isfile(os.path.join(root, "wtool.sh")) \
-            or not os.path.isfile(os.path.join(root, "lib", "wtool_plan.py")):
-        return OFFLINE_ASSETS.get(_kind_of_project(root) or DEFAULT_PROJECT_KIND,
-                                  OFFLINE_ASSETS[DEFAULT_PROJECT_KIND])
-    if bootstrap_dir and not is_under(bootstrap_dir, root):
-        # 有 wtool.sh，但**不是**正在跑的这一份引擎（另一个项目的巧合）→ 按类型走
-        return OFFLINE_ASSETS.get(_kind_of_project(root) or DEFAULT_PROJECT_KIND,
-                                  OFFLINE_ASSETS[DEFAULT_PROJECT_KIND])
-    return INSTALLER_ASSET
+    base = None
+    if os.path.isfile(os.path.join(root, "wtool.sh")) \
+            and os.path.isfile(os.path.join(root, "lib", "wtool_plan.py")) \
+            and (not bootstrap_dir or is_under(bootstrap_dir, root)):
+        return INSTALLER_ASSET               # 安装器包永远是它自己的名字（自己一个仓）
+    base = OFFLINE_ASSETS.get(_kind_of_project(root) or DEFAULT_PROJECT_KIND,
+                              OFFLINE_ASSETS[DEFAULT_PROJECT_KIND])
+    if not multi_project:
+        return base
+    seg = os.path.basename(root.rstrip("/")) or "project"
+    seg = re.sub(r"[^A-Za-z0-9._-]", "-", seg).strip("-") or "project"
+    return "%s-%s" % (seg, base)
+
+
+def repo_has_many_projects(project_root):
+    """这个项目的 **git 仓库**里是不是还住着别的 wtool 项目（一仓多项目）。
+
+    判据：仓库根（`git rev-parse --show-toplevel`）下能找到**不止一个** `wtool.xml`
+    （跳过 `.git` / `__output` / `__release` / `__layer`）。拿不到 git 信息时返回 False
+    （退回"一个项目一个仓"的老口径，不会凭空给资产改名）。
+    """
+    root = os.path.abspath(project_root)
+    try:
+        top = subprocess.check_output(["git", "-C", root, "rev-parse", "--show-toplevel"],
+                                      stderr=subprocess.DEVNULL).decode(
+                                          "utf-8", "surrogateescape").strip()
+    except Exception:                        # noqa: BLE001 —— 不是 git 仓库 / 没装 git
+        return False
+    if not top:
+        return False
+    n = 0
+    for dirpath, dirnames, filenames in os.walk(top):
+        dirnames[:] = [d for d in dirnames if d not in ALWAYS_IGNORED_DIRS
+                       and d != ".repo"]
+        if "wtool.xml" in filenames:
+            n += 1
+            if n > 1:
+                return True
+    return False
+
 
 
 def _kind_of_project(project_root):
@@ -194,14 +248,33 @@ def is_offline_asset(name):
 
     用途只有一个：**把两族的资产分开**（`publish-release` 别把离线包传到开发机那个
     tag 上、`publish-offline-release` 别把 `release.zip` 传到离线 tag 上）。
+
+    ‼️ 判据必须**先剥附件后缀再比**（2026-10-14 修）：`<项目>-release-offline.zip`
+    这种带项目名的包，它的 `.sha256` / `.part-aa` 是**附件**，名字结尾不是基础名 ——
+    原来只按 `endswith(基础名)` 比，于是 `<seg>-release-offline.zip` 认得出、
+    它的 `.sha256` **认不出**，`publish-offline-release` 就**只传包不传校验文件**
+    （实测：42 个包一个 `.sha256` 都没传上去，而打桩测试看不出来 —— 假 gh 不在乎）。
     """
     if name == OFFLINE_CHECK_HASH:
         return True
     if is_bundle_asset(name):
         return True
+    # 剥掉附件后缀：`.sha256` / `.part-aa`
+    stem = name
+    if stem.endswith(".sha256"):
+        stem = stem[:-len(".sha256")]
+    else:
+        i = stem.find(".part-")
+        if i > 0:
+            stem = stem[:i]
     for asset in list(OFFLINE_ASSETS.values()) + [INSTALLER_ASSET]:
-        if name == asset or name == asset + ".sha256" or name.startswith(asset + ".part-"):
+        if stem == asset or stem == asset + ".sha256" \
+                or stem.startswith(asset + ".part-"):
             return True
+    # 一仓多项目那种带项目名的：bat-release-offline.zip（+ .sha256 / .part-*）
+    base = offline_asset_base(stem)
+    if base != stem and stem.endswith("-" + base):
+        return True
     return False
 
 
@@ -233,7 +306,7 @@ def artifact_entries(asset, project_rel="", declare=(), has_release=False):
             return []
         return [{"from": "wtool/%s/**" % project_rel.strip("/"),
                  "to": "" if has_release else "."}]
-    if asset in (OFFLINE_ASSETS["source"], OFFLINE_ASSETS["muslbin"]):
+    if offline_asset_base(asset) in (OFFLINE_ASSETS["source"], OFFLINE_ASSETS["muslbin"]):
         # 自足包：顶层 wtool/<项目路径>/… → 并进 $WTOOL_HOME/wtool（断网机手工 cp -a）
         return [{"from": "wtool/**", "to": "."}]
     if asset == INSTALLER_ASSET:
@@ -4304,7 +4377,10 @@ def offline_plan(args):
     scratch = args.scratch
     os.makedirs(scratch, exist_ok=True)
 
-    asset = offline_asset_for(root, args.bootstrap or "")
+    # 一仓多项目（`tools/musl-bins` 那种：一个仓库 42 个项目、共用同一个 release 页）
+    # → 资产名带项目名，否则 42 个同名资产互相 --clobber（H33 的最终口径）。
+    asset = offline_asset_for(root, args.bootstrap or "",
+                              multi_project=repo_has_many_projects(root))
     declare = [f for f in DECLARE_FILES if os.path.isfile(os.path.join(root, f))]
     kind = _kind_of_project(root) or DEFAULT_PROJECT_KIND
 
@@ -4347,7 +4423,12 @@ def offline_plan(args):
         fh.write("\n".join(files) + ("\n" if files else ""))
     with open(os.path.join(scratch, "offline.tsv"), "w", encoding="utf-8") as fh:
         for key, val in (("asset", asset), ("shape", shape), ("prefix", prefix),
-                         ("link", link), ("kind", kind), ("rel", rel)):
+                         ("link", link), ("kind", kind), ("rel", rel),
+                         # 基础名（不带项目名的那种）：打包时用它清掉**上一版旧名字**
+                         # 留下的文件，否则 `__release/` 里会同时躺着
+                         # `release-offline.zip` 和 `bat-release-offline.zip`，
+                         # 发布时两个都会被当离线族传上去（实测会撞别的项目）。
+                         ("base", offline_asset_base(asset))):
             fh.write("%s\t%s\n" % (key, val))
     with open(os.path.join(scratch, "declare.tsv"), "w", encoding="utf-8") as fh:
         for name in declare:
@@ -4384,6 +4465,67 @@ def dev_assets(args):
     for path in found:
         print(path)
     return 0 if found else 1
+
+
+def publish_guard(args):
+    """上传前的**同名资产**守卫（H33 的配套判据）。
+
+    为什么需要它：`gh release upload --clobber` 是"同名就覆盖"，它**不问**那个资产
+    是不是别人的。一仓多项目（`tools/musl-bins` = 42 个项目一个 release 页）时，
+    两个人/两个项目用同一个名字就会互相盖掉 —— 实测就是这么撞的（42 个
+    `release-offline.zip` 只剩一个）。
+
+    判据（只看名字 + sha256，不问别的）：
+      · 远端没有这个名字 → 放行；
+      · 远端有、**sha256 和本地这个文件一样** → 就是我们自己那一份，放行（重复上传无害）；
+      · 远端有、sha256 **不一样** → **拒**，并把两个 sha256 都打出来 —— 让人自己确认
+        那是不是别的项目/别的版本；确认要用就 `--force`。
+
+    `--assets-json` 是 `gh release view <tag> --json assets` 的原样输出（shell 负责取，
+    python 只做判断）。返回 1 = 有冲突。
+    """
+    try:
+        with open(args.assets_json, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError) as exc:
+        sys.stderr.write("读不了 %s: %s\n" % (args.assets_json, exc))
+        return 1
+    remote = {}
+    for a in doc.get("assets", []) or []:
+        d = (a.get("digest") or "").replace("sha256:", "")
+        remote[a.get("name") or ""] = d
+    bad = 0
+    to_upload = []
+    for path in args.files:
+        name = os.path.basename(path)
+        if not os.path.isfile(path):
+            sys.stderr.write("本地文件不在: %s\n" % path)
+            return 1
+        local = _sha256_file(path)
+        if name in remote and remote[name] and remote[name] == local:
+            if not args.force:
+                # 页上已经有**一模一样**的一份 → 不用再传（幂等发布：补传时不会把
+                # 几百 MB 的包重传一遍；只补缺的那些）。`--force` 时才照样传。
+                sys.stderr.write("已在页上、sha256 一致，跳过: %s\n" % name)
+                continue
+        elif name in remote and args.force:
+            sys.stderr.write("--force：覆盖同名资产 %s\n" % name)
+        if name in remote and not args.force and remote[name] != local:
+            bad += 1
+            sys.stderr.write(
+                "冲突：这个 release 页上**已经有**同名资产 %s\n"
+                "  远端 sha256：%s\n"
+                "  本地 sha256：%s\n"
+                "  它多半是**别的项目**（一个仓库多个项目）或**别的版本**的包 ——\n"
+                "  直接覆盖会把别人的东西盖掉。确认要覆盖就加 --force（`gh` 那边是 --clobber）。\n"
+                % (name, remote[name] or "（远端没给 digest）", local))
+            continue
+        to_upload.append(path)
+    if bad:
+        return 1
+    for path in to_upload:                 # stdout = **真正要传的**那些（调用方拿它当上传清单）
+        print(path)
+    return 0
 
 
 def offline_assets(args):
@@ -5437,7 +5579,7 @@ def unpack_plan(args):
     handled = set()
     for asset in sorted(table):
         entries = table.get(asset) or []
-        where = ARTIFACT_ROOT.get(asset, "project")
+        where = ARTIFACT_ROOT.get(offline_asset_base(asset), "project")
         if where != "project":
             # 离线族的两个（自足包 / 安装器包）：断网机**手工** unzip/tar + cp -a，
             # 不经过 wtool（D50 的不变式）。这里说清"不是这条命令的活"。
@@ -5865,6 +6007,15 @@ def release_json(args):
     known |= set((old.get("artifacts") or {}).keys())
     if args.offline_assets:
         known |= set(a for a in args.offline_assets.split(",") if a)
+    # ‼️ 资产名**换过口径**时（H33：一仓多项目改成 `<项目>-release-offline.zip`），
+    #    旧文件里还留着**同族的基础名**（`release-offline.zip`）。那不是"暂时不在的
+    #    那个资产"，而是**上一版的名字** —— 留着会让对照表声称一个不存在的包存在
+    #    （实测：重打 `bat` 之后 artifacts 里同时有 `bat-release-offline.zip` 和
+    #    `release-offline.zip`）。同名族里**有带项目名的那份**时，基础名丢掉。
+    for _a in list(known):
+        _b = offline_asset_base(_a)
+        if _b != _a and "-" + _b in _a:
+            known.discard(_b)
 
     rel = args.project_rel or ""
     if not rel and args.project_dir:
@@ -6728,6 +6879,12 @@ def build_parser():
     bap = sub.add_parser("bundle-asset")
     bap.add_argument("--os-version", default="")
 
+    # publish-guard：上传前查"这个 tag 下有没有同名但**不是我们**的资产"（H33 配套）
+    pg = sub.add_parser("publish-guard")
+    pg.add_argument("--assets-json", required=True)
+    pg.add_argument("--force", action="store_true")
+    pg.add_argument("files", nargs="*")
+
     # dev-assets：publish-release 要传哪些文件（非离线族那些；和上面互补）
     da = sub.add_parser("dev-assets")
     da.add_argument("--release-dir", required=True)
@@ -6978,6 +7135,8 @@ def main(argv):
         elif args.cmd == "bundle-asset":
             print(bundle_asset_for(args.os_version))
             return 0
+        elif args.cmd == "publish-guard":
+            return publish_guard(args)
         elif args.cmd == "dev-assets":
             return dev_assets(args)
         elif args.cmd == "download-doc":
