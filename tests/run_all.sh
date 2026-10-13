@@ -6,7 +6,9 @@
 #   tests/pairing_test.sh     install/uninstall 的完全配对；rc 里那两行**不由 install 写**
 #                             （默认只打印）、最后一卸两行跟着剥、source $WTOOL_HOME/env.zsh
 #                             之后项目变量真的在；本机日志：每次装一个新目录、编号递增、
-#                             删了 check 照样干净（54 条 —— ADR-0045 第 5a 块：35→54）
+#                             删了 check 照样干净；**有项目脚本时一次 install 只建一个
+#                             日志目录**（场景 11b，第 ⑧ 块加）
+#                             （60 条 —— 2026-10-13 第 ⑧ 块：56→60，+4 条场景 11b）
 #   tests/provision_test.sh   sudo-install 层：系统文件 / source / task（40 条）
 #   tests/publish_test.sh     publish-release：打包 / 只上传 / release.json / 拒收下载包，
 #                             含"资产名必须 ASCII"（H27）、"建 release 带 --target"
@@ -57,10 +59,17 @@
 #                             pty 答 y 才写 / 写了也只有两行"、--dry-run 零副作用
 #                             含 uninstall.sh 对称收尾那两场
 #                             （89 条 —— 2026-10-13，第 5b 块新加）
-#                             —— 十三组共 **1382** 条（2026-10-13 第 ⑦.3 块之后的账；
-#                             本机跑出来的是 **1384 行 PASS** —— 差 2 是头里那两个
-#                             手写数（pairing 写 56 实为 57、sudo-install 写 40 实为 41，
-#                             这一行自己就写着"以跑出来的 PASS 行为准"）：
+#                             —— 十三组共 **1386** 条（2026-10-13 **第 ⑧ 块**实测；
+#                             数法是**逐组汇总行的计数器相加**（pairing 60 + provision 40 +
+#                             publish 192 + table 106 + release-copy 17 + release 158 +
+#                             contract 313 + layer 50 + docker-build 102 + install-env 67 +
+#                             installer 89 + export 78 + muslbin 114 = 1386，FAIL 全 0）：
+#                             1382→1386 = pairing 56→60（+4 条场景 11b："有项目脚本时
+#                             一次 install 只建一个日志目录"，修 hazards H28）。
+#                             ⚠️ 第 ⑦.3 块那行曾写"1384 行 PASS"—— 那是**按行数**数的
+#                             （`grep -c PASS` 把别的前缀也算进去了），和上面这张
+#                             逐组计数器**不是同一种数法**；本文件一律以**逐组计数**为准。
+#                             那之前：
 #                             1372→1382 = muslbin 104→114（+10 条 `.tar.xz`：下载 / 解包 /
 #                             全链 / check），其余 12 组逐条不变。ADR-0045 第 ⑦.2 块：
 #                             1267→1372 = 新增 muslbin 104 条 + export 场景 1 拆出

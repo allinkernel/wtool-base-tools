@@ -448,6 +448,38 @@ esac
 rm -rf "$h"
 
 # --------------------------------------------------------------------------
+printf '\n== 场景 11b：有项目脚本时，一次 install 只建**一个**日志目录\n'
+#   ‼️ 上面那一场用的是 terminal/tmux（① 类，没有 scripts/），走不到
+#      `wt_run_project_script` —— 于是它测不出这个洞（实测：带 scripts/install.sh
+#      的项目，一次 install 会建**两个**目录）。根因是 `wt_run_project_script` 里
+#      `_rs_logf=$(wt_project_logfile …)` 那个**命令替换**：子 shell 里
+#      `wt_log_dir_ensure` 设的 `WTOOL_LOG_DIR` 传不回父 shell → `cmd_install`
+#      末尾又 ensure 一次 → 第二个目录。详见 harness/docs/hazards.md H28。
+h=$(newhome)
+export WTOOL_HOME="$h/home/.wtool" WTOOL_STATE="$h/home/.wtool/var" \
+    WTOOL_MANAGED_HOME="$h/home" WTOOL_LOG_ROOT="$h/logs" WTOOL_ROOT="$h/ws"
+proj="$h/ws/terminal/tmux"; mkrepo "$proj" "terminal/tmux" 50
+mkdir -p "$proj/scripts"
+printf '#!/bin/sh\nset -eu\necho "project install.sh ran"\n' > "$proj/scripts/install.sh"
+chmod +x "$proj/scripts/install.sh"
+( cd "$proj" && git add -A && git -c user.email=t@example.com -c user.name=t commit -qm 'add install.sh' )
+
+"$boot/wtool.sh" install "$proj" > "$h/i.log" 2>&1
+_n=$(ls -1d "$h"/logs/wtool-logs-* 2>/dev/null | wc -l | tr -d ' ')
+chk "★有项目脚本时，一次 install 只建一个日志目录" "$_n" "1"
+_d=$(ls -1d "$h"/logs/wtool-logs-* 2>/dev/null | tail -1)
+[ -f "$_d/terminal/tmux/script-install.sh.log" ] \
+    && ok "同一个目录里有项目脚本的日志（script-install.sh.log）" \
+    || bad "项目脚本的日志不在这个目录里" "$(find "$h/logs" -type f 2>/dev/null | paste -sd' ' -)"
+[ -f "$_d/terminal/tmux/install.log" ] \
+    && ok "同一个目录里也有这次 install 那一行（install.log）" \
+    || bad "install.log 不在这个目录里" "$(find "$h/logs" -type f 2>/dev/null | paste -sd' ' -)"
+grep -q 'project install.sh ran' "$_d/terminal/tmux/script-install.sh.log" \
+    && ok "项目脚本真的跑了，输出落在日志里" || bad "项目脚本的输出没进日志"
+"$boot/wtool.sh" uninstall "$proj" > /dev/null 2>&1
+rm -rf "$h"
+
+# --------------------------------------------------------------------------
 printf '\n----------------------------------------\n'
 printf 'PASS: %d   FAIL: %d\n' "$pass" "$fail"
 [ "$fail" -eq 0 ] || exit 1

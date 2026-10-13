@@ -444,7 +444,19 @@ wt_run_project_script() {   # <项目目录> <脚本名> [额外参数...]
     # 这一轮的日志目录：项目脚本的 stdout/stderr 落一份到
     # `$WTOOL_LOG_DIR/<项目>/script-<脚本名>.log`（**本机日志**，见 lib/wtool_fs.sh
     # 顶部那段）。顺手也给用户看 —— 用重定向而不是管道，脚本的退出码才不会被吞。
-    _rs_logf=$(wt_project_logfile "$WTOOL_PROJECT_ID" "script-$_rs_name.log") || _rs_logf=""
+    #
+    # ‼️ 这里**不许**写成 `_rs_logf=$(wt_project_logfile …)`：命令替换是**子 shell**，
+    #    里面 `wt_log_dir_ensure` 设的 `WTOOL_LOG_DIR` 一出子 shell 就丢了 →
+    #    `cmd_install` 末尾再 `wt_log_dir_ensure` 会**又建一个目录**。实测（有
+    #    `scripts/install.sh` 的项目）：一次 `wtool install` 出现两个目录 ——
+    #    `…-001/<项目>/script-install.sh.log` 和 `…-002/<项目>/install.log`。
+    #    所以在**当前 shell** 里 ensure，再自己拼路径（判据见 hazards H31.2）。
+    if wt_log_dir_ensure; then
+        _rs_logf="$WTOOL_LOG_DIR/$WTOOL_PROJECT_ID/script-$_rs_name.log"
+        mkdir -p -- "$(dirname -- "$_rs_logf")" 2>/dev/null || _rs_logf=""
+    else
+        _rs_logf=""
+    fi
 
     _rs_args="$*"
 
