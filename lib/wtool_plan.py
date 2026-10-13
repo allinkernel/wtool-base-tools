@@ -4972,7 +4972,8 @@ def do_check(args):
         # 判据用"还有没有项目装着"，**不是**"这个 shell 有没有块"：某个 shell 的
         # 块可能一个都没有（项目只声明了 zsh），但文件照样该在 —— 它至少带着校验
         # 片段（D42 职责④）。只按 blocks 判的话，`env.bash` 被误删时 check 一声不吭。
-        if _installed_ids(state) and not os.path.isfile(agg):
+        installed = bool(_installed_ids(state))
+        if installed and not os.path.isfile(agg):
             bad("-", "$WTOOL_HOME/env.%s 不见了（还有项目装着，它该在；"
                 "跑一次 wtool install/uninstall 会重建）" % shell)
         rc = os.path.join(os.path.abspath(managed), ".%src" % shell) if managed else ""
@@ -4986,11 +4987,15 @@ def do_check(args):
             continue
         legacy = bool(rc_strip_legacy(text)[1])
         has_lines = rc_has_lines(text, shell)
-        if blocks and not has_lines:
+        # ⚠️ 这里也按 `installed` 判，**不能**按 `blocks`：只声明了 zsh 的项目装着的
+        #    时候，bash 那边一个块都没有，而用户照样该在 `.bashrc` 里写那两行 ——
+        #    按 blocks 判的话 `wtool check` 会对着一台完全正常的机器一路报红
+        #    （实测：export_test 第 3 节就是这么红的）。
+        if installed and not has_lines:
             bad("-", "%s 里没有 wtool 那两行（export WTOOL_HOME=… + source ${WTOOL_HOME}/env.%s），"
                 "env 不会生效" % (rc, shell))
-        if has_lines and not blocks:
-            bad("-", "%s 里有 wtool 那两行，但一个项目的 env 块都没有" % rc)
+        if has_lines and not installed:
+            bad("-", "%s 里有 wtool 那两行，但一个项目都没装（残渣？）" % rc)
         if legacy:
             bad("-", "%s 里还有 wtool 的旧块（# >>> wtool >>> / per-project 块）；"
                 "旧机器要换成 rc 最后两行，跑一次 wtool install <项目> 会自动替换" % rc)
