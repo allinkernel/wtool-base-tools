@@ -1,31 +1,55 @@
 #!/bin/sh
-# install.sh —— 装 **wtool 自己**。做完就停，然后告诉你下一步跑什么。
+# install.sh —— **安装器的唯一入口**（ADR-0045 §1.8 / D42）。做完就停，然后告诉你下一步跑什么。
 #
-# 这个脚本只负责一件事：**让 `wtool` 这条命令能用**。
+# 它对用户只有一个承诺：
+#     **source 了 `$WTOOL_HOME/env.zsh`（bash 用 env.bash）之后，`wtool` 这条命令就能用。**
 # 它不装任何项目 —— 那是 `wtool bootstrap` 的事。
 #
-# 完整流程（从头到尾只有两条命令）：
+# 三条入口（DESIGN §1.8 / §10.1；后两条由下面的职责①自己建/修）：
 #
-#     ./install.sh          # 第 1 步：准备环境 + 装 wtool 自己
-#     exec $SHELL           #        让当前 shell 认识 wtool（或重开一个终端）
-#     wtool bootstrap       # 第 2 步：装那些不需要你决策的项目
+#     $WTOOL_HOME/install.sh
+#        └─► $WTOOL_HOME/wtool/install.sh
+#               └─► $WTOOL_HOME/wtool/<安装器项目>/scripts/install.sh      ← 本文件
 #
-# 为什么拆成两步：这两件事的失败原因完全不同。
-#   install.sh        失败 = 系统环境问题（缺 python3/git、源连不上）
-#   wtool bootstrap   失败 = 某个项目自己的问题
-# 混在一条命令里，用户看到一堆输出，分不清该修哪一头。
+#   ⚠️ 项目名**不写死**：`<安装器项目>` 是"引擎住在哪个项目里"现算出来的
+#      （= 本文件所在目录的上一级，相对工作区根的路径）。今天它叫 bootstrap，
+#      下一块要改名成 wtool-base-tools —— 这里一行都不用动。
 #
-# 发行版的差异在 install-<发行版><版本>.sh 里，主脚本负责探测和派发。
-# 加一个新发行版 = 加一个只写"不一样的地方"的小文件，不用动这里。
+# 六项职责（D42；**每一步失败都非 0 退出**，并说清是哪一步）：
+#
+#   第 0 步  准备运行环境（发行版差异拆在 install-<发行版><版本>.sh 里）
+#   ① 装安装器项目本体（L1：$WTOOL_HOME/wtool/<项目>）+ **两条入口链**
+#   ② 建 var/ 账本，并把**这次动作**记进去
+#        （删掉 var/ 之后 `wtool check` 必须报错，不许静默"一切对得上"）
+#   ③ 建 manifest 三件套 $WTOOL_HOME/wtool/.repo/manifests/{default.xml,.sha256,.commitid}
+#        满血工作区（.repo/projects **且** .repo/project-objects，D17）
+#            → default.xml 是**指向 live 的绝对链**，.sha256 / .commitid **现场算**
+#        bundle / 没有 repo
+#            → default.xml 是**包内副本**，.sha256 / .commitid **只校验、不覆盖**
+#              （对不上就停手并说清；差一点都不许往下走）
+#   ④ 建 env.{zsh,bash}：**先**加载安装器项目自己 → 保证 `wtool` 可用、
+#        `$WTOOL_HOME/usr/bin` 在 PATH 里
+#   ⑤ 起一个**新的** zsh/bash 子进程：在里面 source env.<shell> + 跑 `wtool check` 当验收
+#   ⑥ **问过用户才**改 rc：默认只打印那两行，用户明确同意（交互确认 / `--write-rc`）才代写；
+#        **非交互（没有终端）绝不许挂住** —— 一律只打印
+#
+# 一切操作都在 `$WTOOL_HOME` 内（只有 ⑥ 用户点头后才动 rc）。
 #
 # 用法：
-#   ./install.sh              准备环境 + 自举引擎 + 让 wtool 可用
-#   ./install.sh --dry-run    只说要做什么
+#   ./install.sh                 装（装到 $WTOOL_HOME；没给就 $HOME/.wtool）
+#   ./install.sh --dry-run       只说要做什么，一个字节都不写
+#   ./install.sh --home <目录>   装到别处（= rc 里那行 `export WTOOL_HOME=<目录>`）
+#   ./install.sh --write-rc      你已经在命令行上明确同意写 rc 那两行（不再问）
+#   ./install.sh --no-rc         连问都不问，只打印那两行
 #   WTOOL_MIRROR=mirrors.ustc.edu.cn ./install.sh    顺带换 apt 源
 set -eu
 
+say()  { printf 'wtool-install: %s\n' "$*"; }
+warn() { printf 'wtool-install: 警告: %s\n' "$*" >&2; }
+die()  { printf 'wtool-install: 错误: %s\n' "$*" >&2; exit 1; }
+
 # 解析自身真实路径：manifest 的 linkfile 会在工作区根目录放一个指向本脚本的
-# 软链，不处理的话"项目目录"会被误判成工作区根目录。
+# 软链，$WTOOL_HOME 下那两条入口链也指到这儿。不处理的话"项目目录"会被误判。
 self=$0
 while [ -L "$self" ]; do
     target=$(readlink -- "$self")
@@ -34,50 +58,62 @@ while [ -L "$self" ]; do
         *)  self=$(dirname -- "$self")/$target ;;
     esac
 done
-here=$(cd -- "$(dirname -- "$self")" && pwd)          # = <项目>/scripts
-proj=$(cd -- "$here/.." && pwd)                     # = <项目>
-
-say()  { printf 'wtool-install: %s\n' "$*"; }
-warn() { printf 'wtool-install: 警告: %s\n' "$*" >&2; }
-die()  { printf 'wtool-install: 错误: %s\n' "$*" >&2; exit 1; }
+here=$(cd -- "$(dirname -- "$self")" && pwd -P)      # = <安装器项目>/scripts
+proj=$(cd -- "$here/.." && pwd -P)                   # = <安装器项目>
 
 HOME_DIR=${HOME:-/root}
-# `$WTOOL_HOME` 就是 **`.wtool` 根目录**（ADR-0045 §1.1 / D47 / D48）——
-# 不再有"被管理的家目录"这一层。引擎调这个脚本时会把 WTOOL_HOME 导出来
-# （测试里那是一个临时目录）；退回 `$HOME/.wtool` 才是默认。
-# ⚠️ 实测踩过：这里原来只看 `$HOME`，于是跑一遍 pairing_test 就把**真**
-#    `~/.wtool/bootstrap` 指向了已删除的 /tmp 目录（悬空软链）。
-#    所以：有 WTOOL_HOME 就用它，没有才退回 `$HOME/.wtool`。
-WTOOL_HOME_DIR=${WTOOL_HOME:-$HOME_DIR/.wtool}
-BOOT_DST=${WTOOL_BOOTSTRAP_DST:-$WTOOL_HOME_DIR/bootstrap}
 DRY_RUN=0
-for _a in "$@"; do [ "$_a" = "--dry-run" ] && DRY_RUN=1; done
+RC_MODE=ask                                          # ask（有终端才问）/ write / print
+WTOOL_HOME_ARG=""
+while [ $# -gt 0 ]; do
+    case $1 in
+        --dry-run)  DRY_RUN=1 ;;
+        --home)     WTOOL_HOME_ARG=${2:-}
+                    [ -n "$WTOOL_HOME_ARG" ] || die "--home 要跟一个目录"
+                    shift ;;
+        --home=*)   WTOOL_HOME_ARG=${1#--home=} ;;
+        --write-rc) RC_MODE=write ;;
+        --no-rc)    RC_MODE=print ;;
+        -h|--help)
+            # 打印文件头那段注释（不写死行号，改一行注释不会错位）
+            awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$self"
+            exit 0 ;;
+        *) die "未知参数: $1（用法：./install.sh --help）" ;;
+    esac
+    shift
+done
 
-[ -x "$proj/wtool.sh" ] || die "这里不是 wtool-bootstrap（找不到 wtool.sh）: $proj"
+# `$WTOOL_HOME` = **`.wtool` 根目录**（ADR-0045 §1.1 / D47 / D48）——
+# 不再有"被管理的家目录"那一层。取值优先级：
+#     --home <目录>  >  环境里的 $WTOOL_HOME（rc 里 export 的那个）  >  $HOME/.wtool
+# ⚠️ 实测踩过：这里原来只看 `$HOME`，于是跑一遍测试就把**真** `~/.wtool/bootstrap`
+#    指向了已删除的 /tmp 目录（悬空软链）。所以：环境里给了就用它。
+WTOOL_HOME_DIR=${WTOOL_HOME_ARG:-${WTOOL_HOME:-$HOME_DIR/.wtool}}
+case $WTOOL_HOME_DIR in
+    /*) ;;
+    *)  die "WTOOL_HOME 得是绝对路径（rc 里那行 `export WTOOL_HOME=…` 写的就是它）: $WTOOL_HOME_DIR" ;;
+esac
+[ "$WTOOL_HOME_DIR" = "/" ] || WTOOL_HOME_DIR=${WTOOL_HOME_DIR%/}
+
+# 工作区根与项目身份。算法和引擎一致（`wtool.sh` 里就是 `dirname <引擎目录>`）：
+# 环境里给了 WTOOL_ROOT 就以它为准（那是引擎导出的）。
+ws=${WTOOL_ROOT:-$(dirname -- "$proj")}
+[ -d "$ws" ] && ws=$(cd -- "$ws" && pwd -P)
+case $proj in
+    "$ws"/*) proj_rel=${proj#"$ws"/} ;;     # = 项目身份（相对工作区根的路径）
+    *)       proj_rel=$(basename -- "$proj") ;;
+esac
 
 # ==========================================================================
-# 被引擎调用时：**只做自举，立刻退出** —— 而且必须在第 0 步之前。
+# 被引擎调用时（`wtool install <安装器项目>` 会跑到本脚本）：**立刻退出**。
 #
-# `wtool install bootstrap` 会走到这个脚本（那时 WTOOL_PROJECT_ID 已设好）。
-# 这条路径上：
-#   · 不能往下走第 0 步 —— 那是"给人用的安装器"该干的事（装 apt 包、
-#     试探 git 权限）。引擎正在装东西的时候突然去跑 apt，
-#     既莫名其妙又需要 root，测试里直接失败。**这条踩过。**
-#   · 不能调 wtool bootstrap —— 会变成
-#     install.sh → wtool install bootstrap → install.sh 无限递归。
+# 这条路径上 L1 / 账本 / env 汇总都是**引擎**的活，这里一个字节都不该写；
+# 而且必须抢在第 0 步之前 —— 引擎正装着东西的时候突然去跑 apt，既莫名其妙
+# 又需要 root（**这条踩过**）。也不能反过来调 `wtool install`：那会变成
+# install.sh → wtool install → install.sh 的无限递归。
 # ==========================================================================
 if [ -n "${WTOOL_PROJECT_ID:-}" ]; then
-    say "由引擎调用（项目 ${WTOOL_PROJECT_ID}），只做自举，不再递归"
-    _self_dir=$(dirname -- "$self")
-    _proj=$(cd -- "$_self_dir/.." && pwd)
-    # ⚠️ 同样：WTOOL_HOME 就是 `.wtool` 根（见文件开头那段注释）
-    _dst=${WTOOL_BOOTSTRAP_DST:-$WTOOL_HOME_DIR/bootstrap}
-    if [ -L "$_dst" ] && [ "$(readlink -f -- "$_dst" 2>/dev/null || true)" = "$_proj" ]; then
-        say "  引擎已经指向这里，跳过"
-    else
-        mkdir -p -- "$(dirname -- "$_dst")"
-        ln -sfn -- "$_proj" "$_dst" && say "  已自举到 $_dst"
-    fi
+    say "由引擎调用（项目 ${WTOOL_PROJECT_ID}）：L1 / 账本 / env 汇总都由引擎负责，这里不重复做"
     exit 0
 fi
 
@@ -111,8 +147,8 @@ if [ -r /etc/os-release ]; then
     say "  系统：${PRETTY_NAME:-$_id $_ver}"
 fi
 
-# env 脚本要用它来试探 git 能不能读仓库
-WTOOL_WS_DIR=$(dirname -- "$proj")
+# env 脚本要用它来试探 git 能不能读仓库（候选是工作区里的项目，不写死名字）
+WTOOL_WS_DIR=$ws
 export WTOOL_WS_DIR
 
 if [ -n "$_env_profile" ]; then
@@ -136,91 +172,455 @@ else
 fi
 
 # ==========================================================================
-# 第 1 步：自举引擎
+# 小工具：建/修一条**相对**软链
 #
-# 把引擎挂到一个固定位置，这样任何 shell、任何目录下 `wtool` 都能用，
-# 不依赖工作区在哪。
+# 两条入口链的两端**都在 `$WTOOL_HOME` 里面** —— 和 L2 链同理（D45）：
+# 写相对目标，整棵 `.wtool` 被 tar 走、搬到别的机器／目录之后照样有效。
+# `readlink -f` 会一路解到工作区里那个真脚本（那正是 ① 的判据）。
 # ==========================================================================
-say "第 1 步：自举引擎到 $BOOT_DST"
-if [ "$DRY_RUN" = 1 ]; then
-    say "  [dry-run] 会建软链 $BOOT_DST → $proj"
-else
-    mkdir -p -- "$(dirname -- "$BOOT_DST")"
-    if [ -L "$BOOT_DST" ]; then
-        _cur=$(readlink -f -- "$BOOT_DST" 2>/dev/null || true)
-        if [ "$_cur" = "$proj" ]; then
-            say "  已经指向这里，跳过"
-        else
-            say "  改指向：$_cur → $proj"
-            ln -sfn -- "$proj" "$BOOT_DST"
+link_rel() {   # <落点> <相对目标>
+    _lx_dest=$1; _lx_target=$2
+    if [ -L "$_lx_dest" ]; then
+        _lx_cur=$(readlink -- "$_lx_dest" 2>/dev/null || true)
+        if [ "$_lx_cur" = "$_lx_target" ]; then
+            say "  已在：$_lx_dest -> $_lx_target"
+            return 0
         fi
-    elif [ -e "$BOOT_DST" ]; then
-        die "$BOOT_DST 已经存在而且不是软链。先自己处理掉（确认里面没有你要的东西）再重试。"
+        say "  改指向：$_lx_dest：$_lx_cur -> $_lx_target"
+    elif [ -e "$_lx_dest" ]; then
+        die "① 失败：$_lx_dest 已经存在而且**不是软链**。先自己确认里面没有你要的东西，处理掉再重试（绝不覆盖你的文件）。"
     else
-        ln -sfn -- "$proj" "$BOOT_DST"
-        say "  已创建软链"
+        say "  建链：$_lx_dest -> $_lx_target"
     fi
+    mkdir -p -- "$(dirname -- "$_lx_dest")"
+    ln -sfn -- "$_lx_target" "$_lx_dest"
+}
 
-    if [ -x "$BOOT_DST/wtool.sh" ]; then
-        say "  验证：$("$BOOT_DST/wtool.sh" version 2>/dev/null || echo '调用失败')"
-    else
-        die "自举后仍然调不到 $BOOT_DST/wtool.sh"
+# ==========================================================================
+# 职责①：装安装器项目本体 + 两条入口链
+#
+# `wtool install <安装器项目>` 会建 L1（`$WTOOL_HOME/wtool/<项目>` → 本目录，
+# 开发机=绝对链 / bundle=本来就是实体）、写 env 块、重算 env.{zsh,bash}。
+# 这一步的输出**绝不吞**：吞掉的话 install 拒绝时用户看到的是一片安静（踩过）。
+# ==========================================================================
+say "① 装安装器项目本体：$proj_rel"
+if [ "$DRY_RUN" = 1 ]; then
+    say "  [dry-run] wtool install $proj（L1：$WTOOL_HOME_DIR/wtool/$proj_rel）"
+    say "  [dry-run] 两条入口链：$WTOOL_HOME_DIR/install.sh → wtool/install.sh → $proj_rel/scripts/install.sh"
+else
+    [ -x "$proj/wtool.sh" ] || die "① 失败：这里不是安装器项目（找不到可执行的 wtool.sh）: $proj"
+    # --force 是有意的：安装器常常来自一个开发副本（工作区挂载进来、或有未提交
+    # 改动）—— 那种情况下"版本记录不准"，但不该因此拦住"让 wtool 能用"。
+    if ! WTOOL_HOME="$WTOOL_HOME_DIR" WTOOL_STATE="$WTOOL_HOME_DIR/var" \
+         WTOOL_PREFIX="$WTOOL_HOME_DIR/usr" WTOOL_MANAGED_HOME="$HOME_DIR" \
+         "$proj/wtool.sh" install "$proj" --force; then
+        die "① 失败：wtool install $proj 没成功（原因就在上面那几行）—— 这一步不过，后面几步全是空的"
     fi
+    [ -x "$WTOOL_HOME_DIR/wtool/$proj_rel/wtool.sh" ] \
+        || die "① 失败：L1 不在（$WTOOL_HOME_DIR/wtool/$proj_rel/wtool.sh 不可执行）"
+    link_rel "$WTOOL_HOME_DIR/wtool/install.sh" "$proj_rel/scripts/install.sh"
+    link_rel "$WTOOL_HOME_DIR/install.sh" "wtool/install.sh"
+    _real=$(readlink -f -- "$WTOOL_HOME_DIR/install.sh" 2>/dev/null || true)
+    [ "$_real" = "$here/install.sh" ] \
+        || die "① 失败：$WTOOL_HOME_DIR/install.sh 解析到「$_real」，期望「$here/install.sh」"
+    say "  ✔ 入口链通了：$WTOOL_HOME_DIR/install.sh → $here/install.sh"
 fi
 
 # ==========================================================================
-# 第 2 步：工作区入口软链
+# 职责①b：工作区根目录的入口软链（install.sh / uninstall.sh / README.md / guide.md）
 #
-# 用 `repo sync` 拿到的客户端，这些软链由 repo 按 manifest 的 linkfile 建。
-# 但**从发布包解压出来的工作区没有 repo 客户端**，那些软链就不存在——
-# 而 README 恰恰让人跑 `./install.sh`。所以这里补上，让两条路拿到的工作区
-# 长得一样。（这不算第二份真相：manifest 仍是对 repo 客户端的权威描述，
-# 这里只是给没有 repo 的那种情况兜底。）
+# 用 `repo sync` 拿到的客户端，这些软链由 repo 按 manifest 的 linkfile 建；
+# 但**从发布包解压出来的工作区没有 repo 客户端**，那些软链就不存在 —— 而
+# README 恰恰让人跑 `./install.sh`。这里补上，让两条路拿到的工作区长得一样。
+# （这不算第二份真相：manifest 仍是对 repo 客户端的权威描述，这里只是兜底。
+#   ⚠️ 安装器项目名**不写死**：install.sh / uninstall.sh 两条按 `$proj_rel` 算。
+#   把这一整段改成"照 manifest 的 linkfile 驱动"是另一件事 —— DESIGN §10.2 的
+#   ENG 清单第 ③ 条（现在这里还是 4 条硬编码 + 兜底，不是 5 条全驱动）。）
 # ==========================================================================
-ws=$(dirname -- "$proj")
-say "第 2 步：工作区入口（$ws）"
-_ln() {   # <链接名> <相对目标>
-    _dest=$ws/$1; _target=$2
-    [ "$DRY_RUN" = 1 ] && { say "  [dry-run] $1 -> $_target"; return 0; }
-    if [ -L "$_dest" ]; then
-        [ "$(readlink -- "$_dest")" = "$_target" ] && return 0
-    elif [ -e "$_dest" ]; then
+ws_ln() {   # <链接名> <相对工作区根的目标>
+    _wl_dest=$ws/$1; _wl_target=$2
+    if [ "$DRY_RUN" = 1 ]; then
+        say "  [dry-run] $1 -> $_wl_target"
+        return 0
+    fi
+    [ -e "$ws/$_wl_target" ] || { say "  $1 跳过（$ws/$_wl_target 不在）"; return 0; }
+    if [ -L "$_wl_dest" ]; then
+        [ "$(readlink -- "$_wl_dest")" = "$_wl_target" ] && return 0
+    elif [ -e "$_wl_dest" ]; then
         warn "  $1 已存在且不是软链，跳过（怕覆盖你的东西）"
         return 0
     fi
-    [ -e "$ws/$_target" ] || return 0
-    ln -sfn -- "$_target" "$_dest" && say "  $1 -> $_target"
+    ln -sfn -- "$_wl_target" "$_wl_dest" && say "  $1 -> $_wl_target"
 }
-_ln install.sh   bootstrap/scripts/install.sh
-_ln uninstall.sh bootstrap/scripts/uninstall.sh
-_ln README.md    wtool-base/README.md
-_ln guide.md     wtool-base/guide.md
+say "①b 工作区根目录入口（$ws）"
+ws_ln install.sh   "$proj_rel/scripts/install.sh"
+ws_ln uninstall.sh "$proj_rel/scripts/uninstall.sh"
+ws_ln README.md    wtool-base/README.md
+ws_ln guide.md     wtool-base/guide.md
 
 # ==========================================================================
-# 第 3 步：让 `wtool` 这条命令真的能用
+# 职责②：建 var/ 账本，并记下**这次动作**
 #
-# 光有引擎文件还不够 —— `wtool` 要出现在 PATH 里，靠的是 bootstrap 项目
-# （也就是引擎自己）的环境变量块。所以这里**只装这一个项目**：
-#
-#   wtool install bootstrap   → 建 ~/.wtool/wtool/bootstrap（L1 链）、写 env 块、
-#                               在用户 rc 里放那一段 loader
-#
-# 装完这一步，`wtool` 就是一条真命令了。**到此为止**，不再往下装项目。
+# 账本（registry.tsv / <项目>/journal.tsv / meta.tsv / env 块）是引擎写的，
+# 装安装器那一步已经建好。这里补的是**安装器自己**那两笔账：
+#   · actions.tsv —— 时间线：这台机器上 install.sh 跑过几次、每次装到哪
+#   · links.tsv   —— 两条入口链（`check` 照它验、卸载照它收）
+# 落点故意叫 `var/installer/`、文件名故意不叫 meta.tsv（那个名字是"一个项目
+# 装着"的判据，会被 `check` 当成一个不存在的项目报残渣）。
 # ==========================================================================
-say "第 3 步：让 wtool 命令可用（只装引擎自己，不装任何项目）"
+say "② 账本（$WTOOL_HOME_DIR/var）"
+_rec_dir=$WTOOL_HOME_DIR/var/installer
 if [ "$DRY_RUN" = 1 ]; then
-    say "  [dry-run] wtool install $proj"
+    say "  [dry-run] 记这次动作：$WTOOL_HOME_DIR/var/（registry.tsv 由引擎写，installer/ 记入口链与时间线）"
 else
-    # --force：这一步装的是**引擎自己**，而引擎很可能来自一个开发副本
-    # （工作区挂载进来、或有未提交改动）。那种情况下"版本记录不准"，
-    # 但不该因此拦住"让 wtool 能用" —— 前者是记账精度，后者是能不能干活。
-    #
-    # **输出绝不吞掉。** 这里原来是 >/dev/null 2>&1，结果 install 因为
-    # 工作区有改动而拒绝时，用户看到的是一片安静，以为装好了 ——
-    # 直到敲 wtool 才发现没有，然后完全无从下手。
-    # 一个可能"静默失败"的安装步骤，比一个会报错的更坏。
-    if ! "$BOOT_DST/wtool.sh" install "$proj" --force; then
-        warn "  上面就是失败原因。这一步不成功，wtool 命令还用不了。"
+    mkdir -p -- "$_rec_dir" || die "② 失败：建不了 $_rec_dir（$WTOOL_HOME_DIR 写不进去？）"
+    _now=$(date +%Y-%m-%dT%H:%M:%S%z)
+    printf '%s\tinstall.sh\t项目=%s\tWTOOL_HOME=%s\n' \
+        "$_now" "$proj_rel" "$WTOOL_HOME_DIR" >> "$_rec_dir/actions.tsv" \
+        || die "② 失败：写不了 $_rec_dir/actions.tsv"
+    # 截断重写（幂等：跑十遍也只有这两行）—— 先写临时文件再 mv，读的人不会撞见半个
+    {
+        printf 'install.sh\twtool/install.sh\t%s\n' "$_now"
+        printf 'wtool/install.sh\t%s/scripts/install.sh\t%s\n' "$proj_rel" "$_now"
+    } > "$_rec_dir/links.tsv.tmp" || die "② 失败：写不了 $_rec_dir/links.tsv"
+    mv -f -- "$_rec_dir/links.tsv.tmp" "$_rec_dir/links.tsv" || die "② 失败：落不了 $_rec_dir/links.tsv"
+    [ -n "$(ls -A -- "$WTOOL_HOME_DIR/var" 2>/dev/null || true)" ] \
+        || die "② 失败：$WTOOL_HOME_DIR/var 还是空的（账本没建起来）"
+    [ -f "$WTOOL_HOME_DIR/var/registry.tsv" ] \
+        || warn "  var/registry.tsv 不在（引擎那一步该写它）—— 后面的 check 会报出来"
+    say "  ✔ $_rec_dir/{actions.tsv,links.tsv}；引擎的账在 $WTOOL_HOME_DIR/var/{registry.tsv,<项目>/}"
+fi
+
+# ==========================================================================
+# 职责③：manifest 三件套
+#
+#   $WTOOL_HOME/wtool/.repo/manifests/default.xml          ← 保留 `.repo` 段（D18）
+#   $WTOOL_HOME/wtool/.repo/manifests/default.xml.sha256
+#   $WTOOL_HOME/wtool/.repo/manifests/default.xml.commitid
+#
+# 两种环境的**唯一区别**（DESIGN §1.6 / §1.10）：
+#   · 满血工作区（.repo/projects 且 .repo/project-objects）→ default.xml 是
+#     **指向 live 清单的绝对链**，永远跟 live 同步；.sha256/.commitid 现场算。
+#   · bundle / 拷贝来的 .wtool（两条缺）→ 三件套**随包而来**，只校验、不覆盖。
+#
+# 第三种（两者都没有 = DESIGN §1.10 的"只有 wtool 一份"）**不硬失败**：
+# 那种机器上本来就没有 manifest，wtool 自己照样能用（`install`/`check` 都不读
+# 三件套）；只是 `pack-release` / `pack-offline-release` 用不了 —— 这一条明说。
+# ==========================================================================
+_man_dir=$WTOOL_HOME_DIR/wtool/.repo/manifests
+_man_xml=$_man_dir/default.xml
+_man_sha=$_man_xml.sha256
+_man_cid=$_man_xml.commitid
+_live=$ws/.repo/manifests/default.xml
+
+_hash_of() { sha256sum -- "$1" 2>/dev/null | cut -d' ' -f1; }
+
+say "③ manifest 三件套（$_man_dir）"
+if [ -d "$ws/.repo/projects" ] && [ -d "$ws/.repo/project-objects" ]; then
+    # ---- 满血工作区 ----
+    [ -f "$_live" ] || die "③ 失败：这是满血工作区（.repo/projects + .repo/project-objects 都在），
+       却找不到 live 清单 $_live —— 工作区是坏的，先把它修好再装。"
+    if [ "$DRY_RUN" = 1 ]; then
+        say "  [dry-run] 满血工作区：default.xml = 指向 live 的绝对链（$_live）"
+        say "  [dry-run] .sha256 / .commitid 现场算（sha256sum + git rev-parse HEAD）"
+    else
+        mkdir -p -- "$_man_dir" || die "③ 失败：建不了 $_man_dir"
+        if [ -L "$_man_xml" ]; then
+            _cur=$(readlink -f -- "$_man_xml" 2>/dev/null || true)
+            if [ "$_cur" = "$_live" ]; then
+                say "  default.xml 已经指向 live，跳过"
+            else
+                say "  default.xml 改指向 live：$_cur -> $_live"
+                ln -sfn -- "$_live" "$_man_xml"
+            fi
+        elif [ -e "$_man_xml" ]; then
+            # 同一个位置上有 live 又有包内副本（罕见）——**以 live 为准**（§1.6 备注）
+            if [ "$(_hash_of "$_man_xml")" != "$(_hash_of "$_live")" ]; then
+                warn "  这里的 default.xml 和 live 清单**不一样** —— 以 live 为准（那份副本换成链）"
+            else
+                say "  这里的 default.xml 和 live 一致 —— 换成链（免得以后两边跑偏）"
+            fi
+            rm -f -- "$_man_xml"
+            ln -sfn -- "$_live" "$_man_xml"
+        else
+            ln -sfn -- "$_live" "$_man_xml" || die "③ 失败：建不了链 $_man_xml"
+        fi
+        _h=$(_hash_of "$_man_xml")
+        [ -n "$_h" ] || die "③ 失败：算不出 $_man_xml 的 sha256"
+        printf '%s  %s\n' "$_h" "default.xml" > "$_man_sha.tmp" \
+            || die "③ 失败：写不了 $_man_sha"
+        mv -f -- "$_man_sha.tmp" "$_man_sha"
+        _cid=$(git -C "$ws/.repo/manifests" rev-parse HEAD 2>/dev/null || true)
+        [ -n "$_cid" ] || die "③ 失败：读不到 live 清单仓的 HEAD
+       （git -C $ws/.repo/manifests rev-parse HEAD 失败）—— .commitid 没东西可写"
+        printf '%s\n' "$_cid" > "$_man_cid.tmp" || die "③ 失败：写不了 $_man_cid"
+        mv -f -- "$_man_cid.tmp" "$_man_cid"
+        say "  ✔ default.xml -> $_live（绝对链，永远跟 live 同步）"
+        say "  ✔ sha256=$_h  commitid=$_cid"
+    fi
+elif [ -e "$_man_xml" ] || [ -L "$_man_xml" ]; then
+    # ---- bundle / 拷贝来的 .wtool：三件套随包而来，只校验、不覆盖 ----
+    if [ "$DRY_RUN" = 1 ]; then
+        say "  [dry-run] 包内副本：只校验 .sha256 / .commitid，一个字都不覆盖"
+    else
+        [ -f "$_man_xml" ] || die "③ 失败：$_man_xml 不是个能读的文件（是悬空链？）
+       满血工作区那边没有 repo 元数据，包内这份又读不到 —— 三件套没法校验。"
+        [ -f "$_man_sha" ] || die "③ 失败：$_man_sha 不在（三件套不全：包内副本必须自带 .sha256）"
+        [ -f "$_man_cid" ] || die "③ 失败：$_man_cid 不在（三件套不全：包内副本必须自带 .commitid）"
+        _want=$(cut -d' ' -f1 < "$_man_sha" | head -1)
+        _got=$(_hash_of "$_man_xml")
+        [ -n "$_want" ] || die "③ 失败：$_man_sha 是空的，校验不了"
+        if [ "$_want" != "$_got" ]; then
+            die "③ 失败：default.xml 和它的 .sha256 **对不上** —— 包坏了 / 被改过，停手。
+      $_man_sha 里记的是：$_want
+      $_man_xml 实际的  ：$_got
+      修法：重新解一次包（别手工改这两个文件），或者拿一份带三件套的 .wtool 过来。"
+        fi
+        _cid=$(head -1 "$_man_cid" | tr -d '[:space:]')
+        case $_cid in
+            ''|*[!0-9a-fA-F]*)
+                die "③ 失败：$_man_cid 里不是一个 commit id：「$_cid」" ;;
+        esac
+        say "  ✔ 包内副本校验通过：sha256=$_got  commitid=$_cid（只校验，没覆盖）"
+    fi
+else
+    # ---- 只有 wtool 一份（DESIGN §1.10）：没有 manifest 可用 ----
+    warn "③ 这台机器上**没有 manifest 可用**：既不是满血工作区
+      （缺 $ws/.repo/projects 或 .repo/project-objects），包内也没有
+      $_man_xml —— 三件套建不出来。
+      wtool 自己照样能用（install / check 都不读三件套），但
+      pack-release / pack-offline-release 这类要 manifest 的命令用不了。
+      等你有满血工作区、或拿到带三件套的包，再跑一次 install.sh 就有了。"
+fi
+
+# ==========================================================================
+# 职责④：env.{zsh,bash} —— **先**加载安装器项目自己
+#
+# 它们是引擎在 ① 里按 (priority, 项目路径) 现算出来的汇总（ADR-0045 §1.2 / D48）：
+# 每个项目的 env 块按 priority 升序 source，安装器项目 priority=5（最早）——
+# 所以 `wtool` 命令、`$WTOOL_HOME/usr/bin` 一定先于别的项目就位。
+# ==========================================================================
+say "④ env.{zsh,bash}（先加载安装器项目自己，保证 wtool 可用）"
+if [ "$DRY_RUN" = 1 ]; then
+    say "  [dry-run] 校验 $WTOOL_HOME_DIR/env.{zsh,bash} 在，且第一个块是 $proj_rel"
+else
+    [ -f "$WTOOL_HOME_DIR/env.zsh" ] \
+        || die "④ 失败：$WTOOL_HOME_DIR/env.zsh 没建出来（引擎的 env 汇总那一步没走到）"
+    [ -f "$WTOOL_HOME_DIR/env.bash" ] \
+        || die "④ 失败：$WTOOL_HOME_DIR/env.bash 没建出来（同上；两个 shell 都得有，不然没 zsh 的机器上用不了）"
+    _first=$(awk '/^# --- wtool:/{sub(/^# --- wtool:/,""); sub(/ \(priority.*/,""); print; exit}' \
+             "$WTOOL_HOME_DIR/env.zsh" 2>/dev/null || true)
+    case $_first in
+        "$proj_rel") say "  ✔ 第一个 env 块就是安装器项目自己（priority 最小 = 最先加载）" ;;
+        "")          warn "  env.zsh 里一个 env 块都没有 —— 安装器项目的 env 没进去（看它的 wtool.xml）" ;;
+        *)           warn "  第一个 env 块是「$_first」，不是安装器项目「$proj_rel」—— 如果 wtool 命令找不到，先看这两个的 priority" ;;
+    esac
+fi
+
+# ==========================================================================
+# 职责⑤：自检 —— 起一个**新的** zsh/bash 子进程，在里面 source env.<shell>
+#         并跑 `wtool check` 当验收
+#
+# 为什么要起新进程：**当前这个 shell 里 PATH 是启动时定下的**，光看自己说明不了
+# "新开的终端里 wtool 能用"。判据必须是"新进程 + 只 source 那个文件"。
+# 而且 PATH 要先**摘掉** wtool 的目录 —— 不然"wtool 能用"可能只是这个 shell
+# 本来就带着它，验不出 env.<shell> 到底有没有干活。
+#
+# 退出码（非 0 = 这一步没过，install.sh 也跟着非 0）：
+#   3 = source env.<shell> 就失败   4 = source 之后找不到 wtool 命令
+#   5 = \$WTOOL_HOME/usr/bin 不在 PATH 里   6 = wtool check 报了问题
+# ==========================================================================
+say "⑤ 自检：起新进程 source env.<shell> + wtool check"
+_selfcheck_ok=0
+if [ "$DRY_RUN" = 1 ]; then
+    say "  [dry-run] 起 zsh / bash 子进程：. \$WTOOL_HOME/env.<shell>; command -v wtool; wtool check"
+    _selfcheck_ok=1
+else
+    _clean_path=$(printf '%s' "${PATH:-/usr/bin:/bin}" | tr ':' '\n' \
+        | awk -v h="$WTOOL_HOME_DIR" -v p="$proj" \
+              'length($0) && index($0,h)==0 && index($0,p)==0 {printf "%s%s", sep, $0; sep=":"}')
+    [ -n "$_clean_path" ] || _clean_path=/usr/bin:/bin
+
+    for _sh in zsh bash; do
+        if ! command -v "$_sh" >/dev/null 2>&1; then
+            say "  $_sh：这台机器上没有，跳过"
+            continue
+        fi
+        _log=$_rec_dir/selfcheck.$_sh.log
+        _code="WTOOL_HOME=\$1; export WTOOL_HOME
+. \"\$WTOOL_HOME/env.$_sh\" || { echo \"SELFCHECK-FAIL source env.$_sh 失败\"; exit 3; }
+command -v wtool >/dev/null 2>&1 || { echo 'SELFCHECK-FAIL source 之后找不到 wtool 命令'; exit 4; }
+case \":\$PATH:\" in *\":\$WTOOL_HOME/usr/bin:\"*) ;; *) echo 'SELFCHECK-FAIL PATH 里没有 \$WTOOL_HOME/usr/bin'; exit 5 ;; esac
+echo \"SELFCHECK-OK wtool=\$(command -v wtool)\"
+wtool check || exit 6"
+        _rc=0
+        env -i HOME="$HOME_DIR" PATH="$_clean_path" \
+            "$_sh" -c "$_code" _ "$WTOOL_HOME_DIR" > "$_log" 2>&1 || _rc=$?
+        if [ "$_rc" = 0 ]; then
+            say "  $_sh：✔ $(sed -n 's/^SELFCHECK-OK //p' "$_log" | head -1)"
+            say "        （PATH 是摘干净了 wtool 目录的 —— wtool 是 source env.$_sh 之后才有的）"
+            _selfcheck_ok=1
+            continue
+        fi
+        # 没过：把子进程看到的东西原样贴出来，并说清是哪一步
+        case $_rc in
+            3) _why="source \$WTOOL_HOME/env.$_sh 就失败了" ;;
+            4) _why="source 之后**找不到 wtool 命令**（env 块里的 PATH 没生效）" ;;
+            5) _why="PATH 里**没有 \$WTOOL_HOME/usr/bin**" ;;
+            6) _why="\`wtool check\` 报了问题（工作区里那些项目的账对不上）" ;;
+            *) _why="子进程退出码 $_rc" ;;
+        esac
+        warn "  $_sh：✘ 第 ⑤ 步没过 —— $_why"
+        sed 's/^/        /' "$_log" >&2
+        if [ "$_rc" = 6 ]; then
+            # 分清"装坏了"和"工作区里别的项目有旧账"—— 后者不该让人以为安装器坏了
+            _only=0
+            env -i HOME="$HOME_DIR" PATH="$_clean_path" "$_sh" -c \
+                "WTOOL_HOME=\$1; export WTOOL_HOME; . \"\$WTOOL_HOME/env.$_sh\" >/dev/null 2>&1; wtool check \"\$2\"" \
+                _ "$WTOOL_HOME_DIR" "$proj_rel" >> "$_log" 2>&1 || _only=$?
+            if [ "$_only" = 0 ]; then
+                warn "        上面那些**不是安装器自己的问题**：只看「$proj_rel」是干净的（wtool check $proj_rel 退出 0）"
+            else
+                warn "        只看「$proj_rel」也不干净 —— 这是安装器自己那一份没装对"
+            fi
+        fi
+        warn "        这一轮的自检输出留在：$_log"
+    done
+    [ "$_selfcheck_ok" = 1 ] \
+        || die "⑤ 失败：zsh / bash 里**没有一个**能通过验收（上面写了每个失败在哪一步）。
+       wtool 可能已经装上了，但"source env 就能用"这个承诺没兑现 —— 修好再重跑一次 ./install.sh。"
+fi
+
+# ==========================================================================
+# 职责⑥：rc 两行 —— **问过用户才改**
+#
+# 用户 rc 的**最后两行**（ADR-0045 §1.2 / D48）：
+#     export WTOOL_HOME=~/.wtool
+#     source ${WTOOL_HOME}/env.zsh          （bash 用户写 env.bash）
+#
+# 默认**只打印**。只有两种"用户明确同意"才代写：
+#   · 交互确认（有终端时问一句，回答 y）；
+#   · `--write-rc`（你在命令行上已经说了要写）。
+# 非交互（管道 / `< /dev/null` / CI）**不问、不写、也不挂住** —— 只打印。
+# ==========================================================================
+if [ "$WTOOL_HOME_DIR" = "$HOME_DIR/.wtool" ]; then
+    _rc_home_line="~/.wtool"                      # 装在默认位置 → 写 `~`（换个用户名也能用）
+else
+    _rc_home_line=$WTOOL_HOME_DIR
+fi
+
+# 这个 rc 里已经有那两行了吗（幂等判据：两行都在就算）
+rc_has_lines() {   # <rc 文件> <shell>
+    _rh_f=$1; _rh_sh=$2
+    [ -f "$_rh_f" ] || return 1
+    grep -qE "^[[:space:]]*export[[:space:]]+WTOOL_HOME=" "$_rh_f" 2>/dev/null || return 1
+    grep -qE "^[[:space:]]*(source|\.)[[:space:]]+\\\$\{?WTOOL_HOME\}?/env\.$_rh_sh([[:space:]]*#.*)?[[:space:]]*$" \
+        "$_rh_f" 2>/dev/null || return 1
+    return 0
+}
+
+rc_write() {   # <rc 文件> <shell>
+    _rw_f=$1; _rw_sh=$2
+    if rc_has_lines "$_rw_f" "$_rw_sh"; then
+        say "  $_rw_f 里已经有那两行了，跳过"
+        return 0
+    fi
+    # 结尾没有换行就先补一个，否则新加的两行会和上一行粘在一起
+    if [ -s "$_rw_f" ] && [ -n "$(tail -c 1 -- "$_rw_f" 2>/dev/null || true)" ]; then
+        printf '\n' >> "$_rw_f"
+    fi
+    {
+        printf '\n'
+        printf 'export WTOOL_HOME=%s\n' "$_rc_home_line"
+        printf 'source ${WTOOL_HOME}/env.%s\n' "$_rw_sh"
+    } >> "$_rw_f" || die "⑥ 失败：写不了 $_rw_f"
+    say "  ✔ 已写进 $_rw_f（最后两行）"
+}
+
+say "⑥ rc 两行（默认只打印，问过你才代写）"
+
+# 这个 shell 的 rc 文件（只认存在的；没建过的 rc 绝不代建）
+rc_file_of() {   # <shell> → 打印 rc 路径
+    case $1 in
+        zsh)  printf '%s' "$HOME_DIR/.zshrc" ;;
+        *)    printf '%s' "$HOME_DIR/.bashrc" ;;
+    esac
+}
+
+_rc_targets=""
+for _sh in zsh bash; do
+    _rc_f=$(rc_file_of "$_sh")
+    [ -f "$_rc_f" ] || continue
+    rc_has_lines "$_rc_f" "$_sh" && continue
+    _rc_targets="$_rc_targets $_rc_f"
+done
+
+if [ -z "$_rc_targets" ]; then
+    say "  ✔ 该有的 rc 里都已经有那两行了（或者你还没建 rc 文件）—— 不用改任何东西"
+else
+    cat <<TIP
+
+  还差一步：把**这两行**加到你的 rc **最后**（你用的是哪个 shell 就加哪个）：
+
+      export WTOOL_HOME=$_rc_home_line
+      source \${WTOOL_HOME}/env.zsh        # bash 用户写 env.bash
+
+TIP
+    for _sh in zsh bash; do
+        _rc_f=$(rc_file_of "$_sh")
+        [ -f "$_rc_f" ] || continue
+        say "      $_rc_f ：source \${WTOOL_HOME}/env.$_sh"
+    done
+
+    _do_write=0
+    case $RC_MODE in
+        write) _do_write=1; say "  --write-rc：按你的命令行授权直接写" ;;
+        print) _do_write=0; say "  --no-rc：只打印，不碰你的 rc" ;;
+        ask)
+            if [ -t 0 ] && [ -t 1 ]; then
+                printf 'wtool-install: 要我把上面那两行写进%s 吗？[y/N] ' "$_rc_targets"
+                _ans=""
+                read -r _ans || _ans=""
+                case $_ans in
+                    y|Y|yes|YES|Yes) _do_write=1 ;;
+                    *)               _do_write=0 ;;
+                esac
+            else
+                say "  没有终端可以问（非交互）—— 只打印，一个字节都不动你的 rc"
+            fi ;;
+    esac
+
+    if [ "$_do_write" = 1 ]; then
+        if [ "$DRY_RUN" = 1 ]; then
+            say "  [dry-run] 会写进：$_rc_targets"
+        else
+            for _sh in zsh bash; do
+                _rc_f=$(rc_file_of "$_sh")
+                [ -f "$_rc_f" ] || continue
+                rc_write "$_rc_f" "$_sh"
+            done
+            say "  ✔ 写好了。新开一个终端（或 exec \$SHELL）就生效。"
+        fi
+    else
+        say "  （wtool **不会**替你改 rc —— 上面那两行自己贴一下就行）"
+    fi
+fi
+
+# --------------------------------------------------------------------------
+# 这一轮的本机日志（ADR-0045 §1.9：日志不跟着迁移、随时可删）。
+# 目录是引擎在 ① 里建的那个"最新"目录，这里只追一行安装器自己的流水。
+# 一整段都是**尽力而为**：写不进去也不该让安装失败。
+# --------------------------------------------------------------------------
+if [ "$DRY_RUN" != 1 ]; then
+    _log_root=${WTOOL_LOG_ROOT:-${XDG_STATE_HOME:-$HOME_DIR/.local/state}/wtool}
+    _log_latest=$(ls -1d -- "$_log_root"/wtool-logs-* 2>/dev/null | LC_ALL=C sort | tail -n 1 || true)
+    if [ -n "$_log_latest" ] && [ -d "$_log_latest" ]; then
+        {
+            printf 'install.sh\t%s\t项目=%s\tWTOOL_HOME=%s\n' \
+                "$(date +%Y-%m-%dT%H:%M:%S%z)" "$proj_rel" "$WTOOL_HOME_DIR"
+            printf '自检\t%s\tzsh/bash 子进程 source env + wtool check 通过\n' \
+                "$(date +%Y-%m-%dT%H:%M:%S%z)"
+        } >> "$_log_latest/installer.log" 2>/dev/null || true
     fi
 fi
 
@@ -236,11 +636,8 @@ cat <<TIP
   ────────────────────────────────────────────────────────────
   装好了。这个脚本只负责让 wtool 能用，**没有装任何项目**。
 
-  当前这个 shell 里 wtool 还看不见（PATH 是启动时定下的），
-  让 shell 重新读一次配置：
-
-      exec \$SHELL          # 或者干脆重开一个终端
-$([ -n "$_rc" ] && printf '      # 配置写在 %s 里的那一段 loader\n' "$_rc")
+  重新开一个终端（或 exec \$SHELL）之后：
+$([ -n "$_rc" ] && printf '      # %s 里那两行就会自动生效\n' "$_rc")
 
   然后**两步**：先系统层，再用户层（分开是有意的，失败原因完全不同）：
 
