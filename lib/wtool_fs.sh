@@ -345,7 +345,7 @@ wt_plan_exec() {
                 #
                 # ‼️ 为什么不能沿用 `reg` + 按需 `link`：软链已经存在且指向正确时
                 #    老写法只发 `reg`，journal 里**什么都没有** —— 于是它悬空之后
-                #    `wtool check` 看不见（DESIGN §2.8 的假绿：把 `<D>/bootstrap`
+                #    `wtool check` 看不见（DESIGN §2.8 的假绿：把 `<D>/wtool-base-tools`
                 #    弄悬空，check 照样报"一切对得上"）。L1 悬空 = 项目的
                 #    `WTOOL_PROJECT_DIR` 指到空气，env 一行都 source 不进来，
                 #    而用户看到的是一切正常。所以这条链**必须进账本**。

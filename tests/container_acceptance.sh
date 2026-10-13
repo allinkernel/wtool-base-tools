@@ -7,8 +7,8 @@
 #
 #   docker run -i --rm --network=host -v ~/self/wtool:/wtool \
 #     -v wtool-apt-cache:/var/cache/apt ubuntu:24.04 \
-#     bash -c 'bash /wtool/bootstrap/scripts/container-raw.sh' \
-#     < bootstrap/tests/container_acceptance.sh
+#     bash -c 'bash /wtool/wtool-base-tools/scripts/container-raw.sh' \
+#     < wtool-base-tools/tests/container_acceptance.sh
 #
 # 为什么这么绕：`container-raw.sh` 刻意什么都不装（等价于"刚 repo sync 完"），
 # 总验收要验的正是"这台什么都没有的机器上，用户按文档敲一遍能不能走通"。
@@ -39,7 +39,7 @@ say "1. install.sh —— 准备环境 + 装 wtool 自己（四步，做完就�
 cd /wtool && ./install.sh
 
 say "2. 让当前 shell 认识 wtool（照 README 的 eval 那条路），再看现状"
-eval "$(sh "$WTOOL_HOME/bootstrap/wtool.sh" doctor --quiet)" || true
+eval "$(sh "$WTOOL_HOME/wtool-base-tools/wtool.sh" doctor --quiet)" || true
 printf 'wtool  : %s\n' "$(command -v wtool || echo 还是没有)"
 command -v wtool >/dev/null || { echo "❌ install.sh 装完了却敲不到 wtool"; exit 1; }
 wtool version
@@ -216,7 +216,7 @@ fi
 # 用真工作区里的 os/ubuntu 出一次计划：有记录就该是 dedup（跳过），没记录才是 replace
 WT_S=$( [ -f "$WTOOL_STATE/mirror.txt" ] && echo "$WTOOL_STATE" || echo "$HOME/.local/state/wtool" )
 mkdir -p /tmp/wtool-accept-sc
-python3 /wtool/bootstrap/lib/wtool_plan.py plan-provision /wtool/os/ubuntu \
+python3 /wtool/wtool-base-tools/lib/wtool_plan.py plan-provision /wtool/os/ubuntu \
     --home "$HOME" --state "$WT_S" --scratch /tmp/wtool-accept-sc \
     --os-id ubuntu --os-codename noble --arch x86_64 2>&1 | grep -E "已经换过源|选了官方源|actions" | head -4
 _act=$(cut -f1 /tmp/wtool-accept-sc/sysfiles.tsv 2>/dev/null | head -1)

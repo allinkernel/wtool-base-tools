@@ -13,8 +13,8 @@
 set -eu
 
 here=$(cd -- "$(dirname -- "$0")" && pwd)
-bootstrap=$(cd -- "$here/.." && pwd)
-WT="$bootstrap/wtool.sh"
+engine_root=$(cd -- "$here/.." && pwd)
+WT="$engine_root/wtool.sh"
 
 pass=0; fail=0
 ok()  { pass=$((pass + 1)); printf '  ok   %s\n' "$*"; }
@@ -31,7 +31,7 @@ trap 'rm -rf -- "$T"' EXIT INT TERM
 # --------------------------------------------------------------------------
 WS="$T/ws"
 mkdir -p "$WS/.wtool-dist" "$WS/terminal/tmux" "$WS/harness" \
-         "$WS/bootstrap" "$WS/wtool-base"
+         "$WS/wtool-base-tools" "$WS/wtool-doc"
 
 cat > "$WS/terminal/tmux/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -44,19 +44,19 @@ echo 'export TMUX_DEMO=1' > "$WS/terminal/tmux/env.zsh"
 # harness：没有 wtool.xml，只能靠发布标记找到它
 echo 'agent notes' > "$WS/harness/notes.md"
 
-# bootstrap / wtool-base：假装是发布包解压出来的，用来验工作区入口
-mkdir -p "$WS/bootstrap/scripts"
-cp -f "$bootstrap/wtool.sh" "$WS/bootstrap/wtool.sh"
-mkdir -p "$WS/bootstrap/lib"
-cp -f "$bootstrap/lib/"*.py "$WS/bootstrap/lib/" 2>/dev/null || true
-cat > "$WS/bootstrap/scripts/install.sh" <<'EOF'
+# wtool-base-tools / wtool-doc：假装是发布包解压出来的，用来验工作区入口
+mkdir -p "$WS/wtool-base-tools/scripts"
+cp -f "$engine_root/wtool.sh" "$WS/wtool-base-tools/wtool.sh"
+mkdir -p "$WS/wtool-base-tools/lib"
+cp -f "$engine_root/lib/"*.py "$WS/wtool-base-tools/lib/" 2>/dev/null || true
+cat > "$WS/wtool-base-tools/scripts/install.sh" <<'EOF'
 #!/bin/sh
-echo "bootstrap install.sh 被调用了（WTOOL_PROJECT_ID=${WTOOL_PROJECT_ID:-未设置}）"
+echo "wtool-base-tools install.sh 被调用了（WTOOL_PROJECT_ID=${WTOOL_PROJECT_ID:-未设置}）"
 EOF
-cp -f "$bootstrap/scripts/uninstall.sh" "$WS/bootstrap/scripts/uninstall.sh"
-chmod +x "$WS/bootstrap/scripts/install.sh" "$WS/bootstrap/scripts/uninstall.sh"
-echo '# 用户文档' > "$WS/wtool-base/README.md"
-echo '# 使用指南' > "$WS/wtool-base/guide.md"
+cp -f "$engine_root/scripts/uninstall.sh" "$WS/wtool-base-tools/scripts/uninstall.sh"
+chmod +x "$WS/wtool-base-tools/scripts/install.sh" "$WS/wtool-base-tools/scripts/uninstall.sh"
+echo '# 用户文档' > "$WS/wtool-doc/README.md"
+echo '# 使用指南' > "$WS/wtool-doc/guide.md"
 
 cat > "$WS/.wtool-dist/terminal-tmux.json" <<'EOF'
 {"project":"terminal/tmux","repo":"allinkernel/wtool-tmux-config",
@@ -102,7 +102,7 @@ grep -q '不是 git 仓库' "$T/log2" && ok "说了为什么拒绝" || bad "没�
 
 echo "== 3. 项目表靠发布标记找全（harness 没有 wtool.xml）=="
 TAB=$(env HOME="$H" WTOOL_ROOT="$WS" WTOOL_STATE="$T/state" \
-      python3 "$bootstrap/lib/wtool_plan.py" table --root "$WS" --state "$T/state")
+      python3 "$engine_root/lib/wtool_plan.py" table --root "$WS" --state "$T/state")
 printf '%s\n' "$TAB" | awk '$2=="harness"{print "     " $0}'
 # 表格现在带边框，项目 id 是 awk 的 $2。
 # 项目表只认 wtool.xml —— 没有清单的纯数据仓库（harness）不该出现在表里，
@@ -113,8 +113,8 @@ chk "没有 wtool.xml 的 harness 不出现在表里" \
     "$(printf '%s\n' "$TAB" | awk '$2 == "harness" {print $2}' | head -1)" ""
 
 echo "== 4. 工作区入口：没有 repo 客户端也要有根目录软链 =="
-# bootstrap/install.sh 自己会补这几条（repo 的 linkfile 只能覆盖 repo 客户端）
-cat > "$WS/bootstrap/install.sh" <<'EOF'
+# wtool-base-tools/install.sh 自己会补这几条（repo 的 linkfile 只能覆盖 repo 客户端）
+cat > "$WS/wtool-base-tools/install.sh" <<'EOF'
 #!/bin/sh
 set -eu
 self=$0
@@ -131,13 +131,13 @@ _ln() {
     [ -e "$ws/$_target" ] || return 0
     ln -sfn -- "$_target" "$_dest"
 }
-_ln install.sh   bootstrap/scripts/install.sh
-_ln uninstall.sh bootstrap/scripts/uninstall.sh
-_ln README.md    wtool-base/README.md
-_ln guide.md     wtool-base/guide.md
+_ln install.sh   wtool-base-tools/scripts/install.sh
+_ln uninstall.sh wtool-base-tools/scripts/uninstall.sh
+_ln README.md    wtool-doc/README.md
+_ln guide.md     wtool-doc/guide.md
 EOF
-chmod +x "$WS/bootstrap/install.sh"
-env HOME="$H" "$WS/bootstrap/install.sh" > "$T/log4" 2>&1 || true
+chmod +x "$WS/wtool-base-tools/install.sh"
+env HOME="$H" "$WS/wtool-base-tools/install.sh" > "$T/log4" 2>&1 || true
 for l in install.sh uninstall.sh README.md guide.md; do
     if [ -L "$WS/$l" ]; then
         ok "根目录 $l -> $(readlink -- "$WS/$l")"
@@ -147,25 +147,25 @@ for l in install.sh uninstall.sh README.md guide.md; do
 done
 
 echo "== 5. 入口软链不能覆盖用户的真实文件 =="
-WS2="$T/ws2"; mkdir -p "$WS2/bootstrap" "$WS2/wtool-base"
-mkdir -p "$WS2/bootstrap/scripts"
-cp -f "$WS/bootstrap/scripts/install.sh" "$WS2/bootstrap/scripts/install.sh"
-echo '# 我自己写的 README' > "$WS2/wtool-base/README.md"
+WS2="$T/ws2"; mkdir -p "$WS2/wtool-base-tools" "$WS2/wtool-doc"
+mkdir -p "$WS2/wtool-base-tools/scripts"
+cp -f "$WS/wtool-base-tools/scripts/install.sh" "$WS2/wtool-base-tools/scripts/install.sh"
+echo '# 我自己写的 README' > "$WS2/wtool-doc/README.md"
 echo 'this is mine' > "$WS2/README.md"          # 真实文件，不是软链
-env HOME="$H" "$WS2/bootstrap/install.sh" >/dev/null 2>&1 || true
+env HOME="$H" "$WS2/wtool-base-tools/install.sh" >/dev/null 2>&1 || true
 chk "用户的真实 README.md 没被覆盖" "$(cat "$WS2/README.md")" "this is mine"
 
 # --------------------------------------------------------------------------
 # 6. 查不到资产 ≠ 没有项目可发布 —— 绝不能拿空表覆盖现有下载表
 #
 # 真出过事：一次 publish 什么都没推上去、gh 那边也查不到资产，
-# 刷新逻辑就把 wtool-base/README.md 里 30 条真实链接刷成了
+# 刷新逻辑就把文档仓的 README.md 里 30 条真实链接刷成了
 # "还没有发布过任何项目"。外部查询失败被当成了"事实就是空的"。
 echo "== 6. 下载表不会被空结果洗掉 =="
-WS3="$T/ws3"; mkdir -p "$WS3/bootstrap" "$WS3/wtool-base"
-cp -f "$WT" "$WS3/bootstrap/wtool.sh"
-mkdir -p "$WS3/bootstrap/lib"; cp -f "$bootstrap"/lib/*.py "$bootstrap"/lib/*.sh "$WS3/bootstrap/lib/" 2>/dev/null || true
-cat > "$WS3/wtool-base/README.md" <<'EOF'
+WS3="$T/ws3"; mkdir -p "$WS3/wtool-base-tools" "$WS3/wtool-doc"
+cp -f "$WT" "$WS3/wtool-base-tools/wtool.sh"
+mkdir -p "$WS3/wtool-base-tools/lib"; cp -f "$engine_root"/lib/*.py "$engine_root"/lib/*.sh "$WS3/wtool-base-tools/lib/" 2>/dev/null || true
+cat > "$WS3/wtool-doc/README.md" <<'EOF'
 # 下载
 
 <!-- >>> wtool:downloads >>> -->
@@ -174,10 +174,10 @@ cat > "$WS3/wtool-base/README.md" <<'EOF'
 | wtool-base | wtool-base-2026-09-15.tar.zst | 12.3 MB |
 <!-- <<< wtool:downloads <<< -->
 EOF
-_before=$(cat "$WS3/wtool-base/README.md")
+_before=$(cat "$WS3/wtool-doc/README.md")
 env HOME="$H" WTOOL_ROOT="$WS3" WTOOL_STATE="$T/state3" \
     "$WT" refresh-downloads >/dev/null 2>&1 || true
-chk "空结果没有洗掉下载表" "$(cat "$WS3/wtool-base/README.md")" "$_before"
+chk "空结果没有洗掉下载表" "$(cat "$WS3/wtool-doc/README.md")" "$_before"
 
 echo
 printf 'release_copy_test: PASS %d  FAIL %d\n' "$pass" "$fail"

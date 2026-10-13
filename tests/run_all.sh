@@ -47,7 +47,7 @@
 #                             —— 十二组共 1267 条（2026-10-13 实测；ADR-0045 第 5b 块：
 #                             1177→1267 = 新增 installer 89 条 + pairing 场景 9 多一条
 #                             "D23 老位置不该存在"（55→56）；同时把 pairing 那两条断言
-#                             改到新位置（$WTOOL_HOME/bootstrap → wtool/bootstrap））。
+#                             改到新位置（$WTOOL_HOME/wtool-base-tools → wtool/wtool-base-tools））。
 #                             要数字请以**跑出来的 PASS 行**为准。
 #   tests/docker_build_real.sh 同一件事的**真 docker** 冒烟测试（人工跑，见文件头）
 #   tests/container_test.sh   容器里从零装一遍（需要 docker，见文件头注释）

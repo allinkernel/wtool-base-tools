@@ -160,7 +160,7 @@ def offline_asset_for(project_root, bootstrap_dir=""):
 
     安装器项目是特例（D59）：**引擎自己住的那个项目** → `wtool-base-tools.tar.gz`。
     判据是"引擎就在它里面"（`wtool.sh` + `lib/wtool_plan.py` 都在，而且正在跑的
-    那一份就住在这儿），不是"目录叫什么" —— 目录改名（bootstrap → wtool-base-tools，
+    那一份就住在这儿），不是"目录叫什么" —— 目录已经改名（bootstrap → wtool-base-tools，
     DESIGN §7）之后这条判据照样成立，不会悄悄产出一个形状不对的包。
     """
     root = os.path.abspath(project_root)
@@ -479,7 +479,7 @@ def parse_manifest(path, project_root, errors, warnings=None):
         errors.append("schema 必须是整数，实际是 %r" % raw_schema)
         return None, []
     if schema not in SCHEMA_SUPPORTED:
-        errors.append("不支持的 schema=%d（本引擎支持: %s），请升级 wtool-bootstrap"
+        errors.append("不支持的 schema=%d（本引擎支持: %s），请升级 wtool-base-tools"
                       % (schema, ",".join(str(s) for s in SCHEMA_SUPPORTED)))
         return None, []
 
@@ -1158,7 +1158,7 @@ def _bool_attr(node, name, default=False):
 # --------------------------------------------------------------------------
 # 镜像源生成（kind="apt-mirror" / "yum-mirror"）
 # --------------------------------------------------------------------------
-# 镜像表：**和 install.sh 的候选表要对得上**（`bootstrap/scripts/install-env.sh`
+# 镜像表：**和 install.sh 的候选表要对得上**（`wtool-base-tools/scripts/install-env.sh`
 # 的 env_mirror_list）。install.sh 挑完之后会把选择记在 <state>/mirror.txt，
 # 系统层（项目的 <sudo-install kind="apt-mirror" mirror="auto"/>）照着它来 ——
 # 两处各换一次就会出现两份源文件，apt 会警告 "configured multiple times"
@@ -3635,7 +3635,7 @@ def render_downloads(rows):
     out.append("```")
     out.append("")
     out.append("跑完 `~/self/wtool/` 就是一个完整的工作区。")
-    out.append("接着 `cd ~/self/wtool && ./bootstrap/scripts/install.sh`（第一次要用完整路径，")
+    out.append("接着 `cd ~/self/wtool && ./wtool-base-tools/scripts/install.sh`（第一次要用完整路径，")
     out.append("它会把根目录的 `./install.sh` 等入口补齐，之后就能直接用短的了）。")
     out.append("")
 

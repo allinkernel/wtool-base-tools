@@ -1,21 +1,21 @@
-# 下载 bootstrap
+# 下载 wtool-base-tools
 
 这一版：`ds_dev-2026-10-09`（2026-10-09）
 
 | 文件 | 大小 | 是什么 | 直链 |
 |---|---|---|---|
-| `dist.json` | 859B | — | https://github.com/allinkernel/wtool-bootstrap/releases/download/ds_dev-2026-10-09/dist.json |
-| `source-hash.txt` | 77B | — | https://github.com/allinkernel/wtool-bootstrap/releases/download/ds_dev-2026-10-09/source-hash.txt |
-| `source.zip` | 353.2K | 源码包 | https://github.com/allinkernel/wtool-bootstrap/releases/download/ds_dev-2026-10-09/source.zip |
+| `dist.json` | 859B | — | https://github.com/allinkernel/wtool-base-tools/releases/download/ds_dev-2026-10-09/dist.json |
+| `source-hash.txt` | 77B | — | https://github.com/allinkernel/wtool-base-tools/releases/download/ds_dev-2026-10-09/source-hash.txt |
+| `source.zip` | 353.2K | 源码包 | https://github.com/allinkernel/wtool-base-tools/releases/download/ds_dev-2026-10-09/source.zip |
 
 ## 怎么装
 
 **装了 wtool 的机器**（推荐，校验和拼分卷它自己做）：
 
 ```sh
-wtool download-release bootstrap   # 按仓库里提交的 scripts/release.json 下载 + 校验
-wtool unpack-release bootstrap     # 拼分卷 + 把源码铺回项目目录
-wtool install bootstrap            # 装到本机（登记、软链、shell 集成）
+wtool download-release wtool-base-tools   # 按仓库里提交的 scripts/release.json 下载 + 校验
+wtool unpack-release wtool-base-tools     # 拼分卷 + 把源码铺回项目目录
+wtool install wtool-base-tools            # 装到本机（登记、软链、shell 集成）
 ```
 
 **只有浏览器的机器**：把上面每个文件点下来，放进项目的 `__release/` 目录，

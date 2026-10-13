@@ -16,7 +16,7 @@
 #
 #   ⚠️ 为什么挂 `-v /:/h:ro`：这样**不用 apt**（实测走代理装包会十分钟起步、
 #      经常直接超时）。python3 / git / zsh 都用宿主的，容器只当隔离层。
-#   ⚠️ 脚本里 `cp -a /wtool/bootstrap` 到 /work：工作区是只读挂载，
+#   ⚠️ 脚本里 `cp -a /wtool/wtool-base-tools` 到 /work：工作区是只读挂载，
 #      而且验收要造自己的假工作区与假 HOME。
 #   ⚠️ `zsh` 用一层包装脚本（`env -i` 会清掉 LD_LIBRARY_PATH，所以设在包装里）。
 #
@@ -59,9 +59,9 @@ WORK=/work; HOME_DIR=/root
 export HOME="$HOME_DIR"
 rm -rf "$WORK"; mkdir -p "$WORK"
 # 工作区只读挂着 → 拷一份出来当"满血工作区"
-cp -a /wtool/bootstrap "$WORK/bootstrap"
-rm -rf "$WORK/bootstrap/lib/__pycache__" "$WORK/bootstrap/.git"
-BOOT="$WORK/bootstrap"
+cp -a /wtool/wtool-base-tools "$WORK/wtool-base-tools"
+rm -rf "$WORK/wtool-base-tools/lib/__pycache__" "$WORK/wtool-base-tools/.git"
+BOOT="$WORK/wtool-base-tools"
 WS="$WORK/ws"
 
 echo
@@ -224,7 +224,7 @@ irun() {   # <HOME> <脚本> [参数…]
 IWS=/work/iws; IHOME=/work/ihome
 rm -rf "$IWS" "$IHOME"
 mkdir -p "$IWS/.repo/projects" "$IWS/.repo/project-objects" "$IWS/.repo/manifests" "$IHOME"
-cp -a /work/bootstrap "$IWS/bootstrap"        # = 安装器项目（含 scripts/install.sh）
+cp -a /work/wtool-base-tools "$IWS/wtool-base-tools"        # = 安装器项目（含 scripts/install.sh）
 
 echo
 echo "=== 14. 第 5b 块夹具：满血工作区（D17 判据：这两个目录都在）+ 独立假 HOME ==="
@@ -233,7 +233,7 @@ cat > "$IWS/.repo/manifests/default.xml" <<'XML'
 <manifest>
   <remote name="github" fetch=".."/>
   <default revision="main" remote="github"/>
-  <project path="bootstrap" name="allinkernel/wtool-bootstrap"/>
+  <project path="wtool-base-tools" name="allinkernel/wtool-base-tools"/>
 </manifest>
 XML
 git -C "$IWS/.repo/manifests" init -q
@@ -241,7 +241,7 @@ git -C "$IWS/.repo/manifests" add -A
 git -C "$IWS/.repo/manifests" -c user.email=t@e.com -c user.name=t commit -qm manifest
 printf '# 用户自己的 zshrc\nsetopt auto_cd\n' > "$IHOME/.zshrc"
 printf '# 用户自己的 bashrc\n' > "$IHOME/.bashrc"
-echo "  工作区 : $IWS（安装器项目 = $IWS/bootstrap）"
+echo "  工作区 : $IWS（安装器项目 = $IWS/wtool-base-tools）"
 echo "  假 HOME: $IHOME（跟上面 13 节那个 \$HOME_DIR 分开，互不干扰）"
 echo "  满血判据: .repo/projects=$([ -d "$IWS/.repo/projects" ] && echo 有)  .repo/project-objects=$([ -d "$IWS/.repo/project-objects" ] && echo 有)"
 echo "  live 清单 HEAD = $(git -C "$IWS/.repo/manifests" rev-parse HEAD)"
@@ -250,7 +250,7 @@ echo
 echo "=== 15. 真跑一遍 install.sh（非交互：stdin 接 /dev/null）==="
 echo "  —————————————— install.sh 的输出开始 ——————————————"
 _rc=0
-irun "$IHOME" "$IWS/bootstrap/scripts/install.sh" < /dev/null || _rc=$?
+irun "$IHOME" "$IWS/wtool-base-tools/scripts/install.sh" < /dev/null || _rc=$?
 echo "  —————————————— install.sh 的输出结束 ——————————————"
 echo "  ← install.sh 退出码 = $_rc（0 = 六步都过）"
 
@@ -258,7 +258,7 @@ echo
 echo "=== 16. 两条入口链的真实形状（①）==="
 ls -l "$IHOME/.wtool/install.sh" "$IHOME/.wtool/wtool/install.sh" | sed 's/^/    /'
 echo "  readlink -f \$WTOOL_HOME/install.sh = $(readlink -f "$IHOME/.wtool/install.sh")"
-echo "  期望（项目里那个真脚本）           = $IWS/bootstrap/scripts/install.sh"
+echo "  期望（项目里那个真脚本）           = $IWS/wtool-base-tools/scripts/install.sh"
 echo "  从那两条链跑一次（应该能跑、且认得出自己）:"
 irun "$IHOME" "$IHOME/.wtool/install.sh" --dry-run < /dev/null 2>&1 | grep -E '① 装安装器项目本体' | sed 's/^/    /'
 
@@ -301,26 +301,26 @@ echo "=== 20. 六步各自的失败路径（都非 0、都说清是哪一步）=
 _fail_try() {   # <名字> <对夹具做的破坏…（由调用方先做）>
     _name=$1
     _rc=0
-    irun "$IHOME" "$IWS/bootstrap/scripts/install.sh" < /dev/null >/tmp/ifail.log 2>&1 || _rc=$?
+    irun "$IHOME" "$IWS/wtool-base-tools/scripts/install.sh" < /dev/null >/tmp/ifail.log 2>&1 || _rc=$?
     echo "  $_name → 退出码 $_rc"
     grep -E '[①②③④⑤⑥] 失败' /tmp/ifail.log | head -2 | sed 's/^/      /'
 }
-mv "$IWS/bootstrap/wtool.xml" "$IWS/bootstrap/wtool.xml.off"
-printf '<wtool schema="1"><export_bin src="src/x"/></wtool>\n' > "$IWS/bootstrap/wtool.xml"
+mv "$IWS/wtool-base-tools/wtool.xml" "$IWS/wtool-base-tools/wtool.xml.off"
+printf '<wtool schema="1"><export_bin src="src/x"/></wtool>\n' > "$IWS/wtool-base-tools/wtool.xml"
 _fail_try "① 清单坏了（引擎拒绝）"
-rm -f "$IWS/bootstrap/wtool.xml"; mv "$IWS/bootstrap/wtool.xml.off" "$IWS/bootstrap/wtool.xml"
-mv "$IWS/bootstrap/bin/wtool" "$IWS/bootstrap/bin/wtool.off"
+rm -f "$IWS/wtool-base-tools/wtool.xml"; mv "$IWS/wtool-base-tools/wtool.xml.off" "$IWS/wtool-base-tools/wtool.xml"
+mv "$IWS/wtool-base-tools/bin/wtool" "$IWS/wtool-base-tools/bin/wtool.off"
 _fail_try "⑤ 删掉 bin/wtool（source 之后没这个命令）"
-mv "$IWS/bootstrap/bin/wtool.off" "$IWS/bootstrap/bin/wtool"
+mv "$IWS/wtool-base-tools/bin/wtool.off" "$IWS/wtool-base-tools/bin/wtool"
 rm -f "$IHOME/.wtool/wtool/install.sh"
 _fail_try "① 入口链被删（其实每次跑都会补回来 → 应该 0）"
 rm -rf "$IHOME/.wtool/var"
 echo "  删掉 var/ 之后 check 的态度："
-_rc=0; irun "$IHOME" "$IWS/bootstrap/wtool.sh" check >/tmp/ifail2.log 2>&1 || _rc=$?
+_rc=0; irun "$IHOME" "$IWS/wtool-base-tools/wtool.sh" check >/tmp/ifail2.log 2>&1 || _rc=$?
 sed 's/^/      /' /tmp/ifail2.log
 echo "      → rc = $_rc（非 0 = 账本不能删这条立住了）"
 echo "  再跑一次 install.sh 让它自己长回来："
-irun "$IHOME" "$IWS/bootstrap/scripts/install.sh" < /dev/null >/dev/null 2>&1; echo "      → 退出码 $?"
+irun "$IHOME" "$IWS/wtool-base-tools/scripts/install.sh" < /dev/null >/dev/null 2>&1; echo "      → 退出码 $?"
 
 echo
 echo "=== 21. rc 两条路（⑥）：非交互只打印 / pty 答 y 才写 ==="
@@ -328,12 +328,12 @@ echo "  rc 里 WTOOL_HOME 出现次数 = $(grep -c WTOOL_HOME "$IHOME/.zshrc" ||
 echo "  非交互那一段说了什么："
 grep -E '没有终端可以问|不会替你改' /tmp/ifail.log 2>/dev/null | sed 's/^/      /' || true
 if command -v script >/dev/null 2>&1; then
-  printf 'y\n' | script -qec "env -i LD_LIBRARY_PATH='${LD_LIBRARY_PATH:-}' PATH='$PATH' HOME=$IHOME sh $IWS/bootstrap/scripts/install.sh" /dev/null >/tmp/pty.log 2>&1 || true
+  printf 'y\n' | script -qec "env -i LD_LIBRARY_PATH='${LD_LIBRARY_PATH:-}' PATH='$PATH' HOME=$IHOME sh $IWS/wtool-base-tools/scripts/install.sh" /dev/null >/tmp/pty.log 2>&1 || true
   echo "  pty 里答 y 之后："
   grep -E '要我把|已写进|写好了' /tmp/pty.log | tr -d '\r' | sed 's/^/      /' | head -4
   echo "  rc 最后两行（zsh）:"; tail -2 "$IHOME/.zshrc" | tr -d '\r' | sed 's/^/      /'
   echo "  rc 最后两行（bash）:"; tail -2 "$IHOME/.bashrc" | tr -d '\r' | sed 's/^/      /'
-  printf 'y\n' | script -qec "env -i LD_LIBRARY_PATH='${LD_LIBRARY_PATH:-}' PATH='$PATH' HOME=$IHOME sh $IWS/bootstrap/scripts/install.sh" /dev/null >/dev/null 2>&1 || true
+  printf 'y\n' | script -qec "env -i LD_LIBRARY_PATH='${LD_LIBRARY_PATH:-}' PATH='$PATH' HOME=$IHOME sh $IWS/wtool-base-tools/scripts/install.sh" /dev/null >/dev/null 2>&1 || true
   echo "  再答一次 y（幂等）→ WTOOL_HOME 出现次数 = $(grep -c WTOOL_HOME "$IHOME/.zshrc")  ← 还是 2"
 else
   echo "  （容器里没有 script，跳过 pty 那条）"
@@ -343,11 +343,11 @@ echo
 echo "=== 22. bundle 形态（③：包内副本只校验不覆盖）==="
 IB=/work/ibundle
 rm -rf "$IB"; mkdir -p "$IB/home/.wtool/wtool/.repo/manifests"
-cp -a /work/bootstrap "$IB/home/.wtool/wtool/bootstrap"
+cp -a /work/wtool-base-tools "$IB/home/.wtool/wtool/wtool-base-tools"
 cp "$IWS/.repo/manifests/default.xml" "$IB/home/.wtool/wtool/.repo/manifests/default.xml"
 ( cd "$IB/home/.wtool/wtool/.repo/manifests" && sha256sum default.xml > default.xml.sha256 )
 git -C "$IWS/.repo/manifests" rev-parse HEAD > "$IB/home/.wtool/wtool/.repo/manifests/default.xml.commitid"
-ln -s wtool/bootstrap/scripts/install.sh "$IB/home/.wtool/install.sh"
+ln -s wtool/wtool-base-tools/scripts/install.sh "$IB/home/.wtool/install.sh"
 printf '# zshrc\n' > "$IB/home/.zshrc"
 _rc=0; irun "$IB/home" "$IB/home/.wtool/install.sh" < /dev/null >/tmp/ibundle.log 2>&1 || _rc=$?
 echo "  bundle 里 install.sh 退出码 = $_rc"
@@ -358,7 +358,7 @@ printf '%s  default.xml\n' "0000000000000000000000000000000000000000000000000000
     > "$IB/home/.wtool/wtool/.repo/manifests/default.xml.sha256"
 _rc=0; irun "$IB/home" "$IB/home/.wtool/install.sh" < /dev/null >/tmp/ibundle2.log 2>&1 || _rc=$?
 echo "      退出码 = $_rc"; grep -E '对不上' /tmp/ibundle2.log | sed 's/^/      /'
-echo "  ★bundle 的项目目录还在吗: $([ -x "$IB/home/.wtool/wtool/bootstrap/wtool.sh" ] && echo 在（没被备份走） || echo 丢了)"
+echo "  ★bundle 的项目目录还在吗: $([ -x "$IB/home/.wtool/wtool/wtool-base-tools/wtool.sh" ] && echo 在（没被备份走） || echo 丢了)"
 
 echo
 echo "ACCEPTANCE DONE"

@@ -748,7 +748,7 @@ env_prepare() {
 #   · 容器里以 root 访问宿主目录（uid 0 ≠ 宿主 uid）
 #   · 容器里的普通用户 uid 和宿主 uid 不一样（`container-raw.sh --user`
 #     在镜像自带的 uid 1000 被 `ubuntu` 占着时会拿到 1001 —— 实测就是这么撞上的：
-#     `wtool install` 报 "git 拒绝使用 /wtool/bootstrap 的仓库"）
+#     `wtool install` 报 "git 拒绝使用 /wtool/wtool-base-tools 的仓库"）
 # 所以这里**不再限定 root**：谁跑 install.sh 就给谁设。
 env_git_ownership() {
     [ -n "${WTOOL_WS_DIR:-}" ] || return 0
@@ -756,7 +756,8 @@ env_git_ownership() {
     # ⚠️ 别拿**工作区根目录**去试：它是 repo 客户端，**不是 git 仓库**
     #    （`git -C /wtool rev-parse` 必然失败）。要试就试里面某个项目。
     # ‼️ **不写死项目名**（原来是 `"$WTOOL_WS_DIR/bootstrap"` 打头）：安装器项目
-    #    改名（bootstrap → wtool-base-tools）之后那个候选就永远不存在了，虽然下面
+    #    2026-10-13 已经改名（bootstrap → wtool-base-tools，ADR-0045 §7.1），那个候选
+#    就永远不存在了，虽然下面
     #    的 `*/` 兜底还能兜住，但"先试哪个"这件事不该靠一个会过期的名字。
     #    调用方（install.sh）已经把项目目录喂进 `WTOOL_WS_DIR` 的同级，扫一遍就行。
     _go_probe=""

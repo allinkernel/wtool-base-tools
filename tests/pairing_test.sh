@@ -311,12 +311,12 @@ fi
 rm -rf "$h"
 
 # --------------------------------------------------------------------------
-printf '\n== 场景 9：bootstrap 自举项目提供的长期变量 ==\n'
+printf '\n== 场景 9：wtool-base-tools 自举项目提供的长期变量 ==\n'
 h=$(newhome)
 export WTOOL_HOME="$h/home/.wtool" WTOOL_STATE="$h/home/.wtool/var" \
     WTOOL_MANAGED_HOME="$h/home" WTOOL_LOG_ROOT="$h/logs" WTOOL_ROOT="$h/ws"
-# 引擎要求被安装的仓库是"干净的 git 仓"，所以拿一份 bootstrap 的副本测试
-bcopy="$h/ws/bootstrap"
+# 引擎要求被安装的仓库是"干净的 git 仓"，所以拿一份 wtool-base-tools 的副本测试
+bcopy="$h/ws/wtool-base-tools"
 mkdir -p "$bcopy"
 cp -r "$boot"/. "$bcopy/" 2>/dev/null || true
 rm -rf "$bcopy/.git" "$bcopy/lib/__pycache__"
@@ -324,25 +324,25 @@ rm -rf "$bcopy/.git" "$bcopy/lib/__pycache__"
   && git -c user.email=t@example.com -c user.name=t commit -qm init )
 
 # ⚠️ 自举那一步必须落在**这一轮的 `$WTOOL_HOME`** 里。
-#    踩过：它原来只看 `$HOME`，于是跑一遍这个测试就把**真** `~/.wtool/bootstrap`
-#    指向 `$h/ws/bootstrap` 这个临时副本 —— 测试跑完临时目录一删，真 HOME 里留下一条悬空软链。
+#    踩过：它原来只看 `$HOME`，于是跑一遍这个测试就把**真** `~/.wtool/wtool-base-tools`
+#    指向 `$h/ws/wtool-base-tools` 这个临时副本 —— 测试跑完临时目录一删，真 HOME 里留下一条悬空软链。
 #    所以这里两头都钉：该建的建在临时 `$WTOOL_HOME` 里，真 `~/.wtool` 一个字节不许动。
 #    ‼️ 第 5b 块（D23）之后"自举"就是 **L1**：`$WTOOL_HOME/wtool/<项目>` → 工作区里
-#    那个项目目录；`$WTOOL_HOME/bootstrap` 这个**老位置不再存在**（下面也钉一条）。
-_real_boot_before=$(readlink -- "$HOME/.wtool/wtool/bootstrap" 2>/dev/null || echo 无)
+#    那个项目目录；`$WTOOL_HOME/wtool-base-tools` 这个**老位置不再存在**（下面也钉一条）。
+_real_boot_before=$(readlink -- "$HOME/.wtool/wtool/wtool-base-tools" 2>/dev/null || echo 无)
 
 "$bcopy/wtool.sh" install "$bcopy" > "$h/boot.log" 2>&1 || {
-    bad "install bootstrap" "$(cat "$h/boot.log")"; }
-[ -d "$h/home/.wtool/wtool/bootstrap" ] \
-    && ok "bootstrap 的 L1 接入链已创建" || bad "bootstrap 的 L1 接入链已创建"
-grep -q '# --- wtool:bootstrap (priority' "$h/home/.wtool/env.zsh" \
-    && ok "bootstrap 的块写进了汇总文件" || bad "bootstrap 的块没写进去"
-check "自举（L1）落在这一轮的 \$WTOOL_HOME 里（\$WTOOL_HOME/wtool/bootstrap）" "$bcopy" \
-    "$(readlink -- "$h/home/.wtool/wtool/bootstrap" 2>/dev/null || echo 无)"
-check "★真 ~/.wtool/wtool/bootstrap 没被动过" "$_real_boot_before" \
-    "$(readlink -- "$HOME/.wtool/wtool/bootstrap" 2>/dev/null || echo 无)"
-check "D23：不再有 \$WTOOL_HOME/bootstrap 这个老位置" "无" \
-    "$(readlink -- "$h/home/.wtool/bootstrap" 2>/dev/null || echo 无)"
+    bad "install wtool-base-tools" "$(cat "$h/boot.log")"; }
+[ -d "$h/home/.wtool/wtool/wtool-base-tools" ] \
+    && ok "wtool-base-tools 的 L1 接入链已创建" || bad "wtool-base-tools 的 L1 接入链已创建"
+grep -q '# --- wtool:wtool-base-tools (priority' "$h/home/.wtool/env.zsh" \
+    && ok "wtool-base-tools 的块写进了汇总文件" || bad "wtool-base-tools 的块没写进去"
+check "自举（L1）落在这一轮的 \$WTOOL_HOME 里（\$WTOOL_HOME/wtool/wtool-base-tools）" "$bcopy" \
+    "$(readlink -- "$h/home/.wtool/wtool/wtool-base-tools" 2>/dev/null || echo 无)"
+check "★真 ~/.wtool/wtool/wtool-base-tools 没被动过" "$_real_boot_before" \
+    "$(readlink -- "$HOME/.wtool/wtool/wtool-base-tools" 2>/dev/null || echo 无)"
+check "D23：不再有 \$WTOOL_HOME/wtool-base-tools 这个老位置" "无" \
+    "$(readlink -- "$h/home/.wtool/wtool-base-tools" 2>/dev/null || echo 无)"
 
 if command -v zsh >/dev/null 2>&1; then
     got=$(HOME="$h/home" zsh -c '. "$HOME/.zshrc" >/dev/null 2>&1;
@@ -351,7 +351,7 @@ if command -v zsh >/dev/null 2>&1; then
     check "新 shell 里能拿到 PREFIX/OS_ID/ARCH 且 PATH 已含前缀" \
           "$h/home/.wtool/usr|ubuntu|x86_64|in-path" "$got"
     got2=$(HOME="$h/home" zsh -c '. "$HOME/.zshrc" >/dev/null 2>&1; command -v wtool')
-    check "wtool 命令在 PATH 上" "$h/home/.wtool/wtool/bootstrap/bin/wtool" "$got2"
+    check "wtool 命令在 PATH 上" "$h/home/.wtool/wtool/wtool-base-tools/bin/wtool" "$got2"
 else
     printf 'SKIP  zsh 不可用，跳过场景 9\n'
 fi

@@ -1,7 +1,8 @@
-# bootstrap 项目的 env：wtool 的"长期"环境变量（每次开 shell 都会加载）
+# wtool-base-tools 项目的 env：wtool 的"长期"环境变量（每次开 shell 都会加载）
+# （2026-10-13 前这个项目叫 bootstrap，ADR-0045 §7.1）
 #
-# WTOOL_PROJECT_DIR 由 wtool 块导出 = $HOME/.wtool/wtool/bootstrap（**L1 链**，ADR-0045）
-[[ -n "$WTOOL_PROJECT_DIR" ]] || WTOOL_PROJECT_DIR="$HOME/.wtool/wtool/bootstrap"
+# WTOOL_PROJECT_DIR 由 wtool 块导出 = $HOME/.wtool/wtool/wtool-base-tools（**L1 链**，ADR-0045）
+[[ -n "$WTOOL_PROJECT_DIR" ]] || WTOOL_PROJECT_DIR="$HOME/.wtool/wtool/wtool-base-tools"
 
 # 探测 OS/架构/并行度，并得到 WTOOL_PREFIX
 . "$WTOOL_PROJECT_DIR/lib/wtool_os.sh"

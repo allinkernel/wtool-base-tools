@@ -1,6 +1,11 @@
-# wtool-bootstrap
+# wtool-base-tools
 
 wtool 集合的**引擎**：一份代码，管理任意多个项目仓库的软链与 shell 注入。
+
+> **2026-10-13 改名**（ADR-0045 §7.1）：GitHub `allinkernel/wtool-bootstrap` →
+> `allinkernel/wtool-base-tools`，工作区路径 `bootstrap/` → `wtool-base-tools/`。
+> 代码里**不写死项目名**（按脚本位置/引擎所在项目推），所以改名没动逻辑；
+> ⚠️ 本地目录改名 + `wtool move` 属一次性切换，见 `harness/BACKLOG.md` BL-62。
 
 ```sh
 # 日常三条（一条铁律：要 sudo 的都叫 sudo-*）
@@ -47,7 +52,7 @@ wtool 集合的**引擎**：一份代码，管理任意多个项目仓库的软�
 
 ## 设计一句话
 
-> **bootstrap 是引擎（一份），项目是数据（各一份）；Python 只算不写，Shell 只写不算；状态目录既是日志也是注册表；"完全配对"由测试证明而不是由约定保证。**
+> **wtool-base-tools 是引擎（一份），项目是数据（各一份）；Python 只算不写，Shell 只写不算；状态目录既是日志也是注册表；"完全配对"由测试证明而不是由约定保证。**
 
 ## 目录
 
@@ -72,10 +77,10 @@ wtool 集合的**引擎**：一份代码，管理任意多个项目仓库的软�
 |---|---|---|
 | `WTOOL_HOME` | `$HOME` | 被管理的家目录（测试用） |
 | `WTOOL_STATE` | `$XDG_STATE_HOME/wtool` 或 `~/.local/state/wtool` | 状态目录 |
-| `WTOOL_ROOT` | bootstrap 的上级目录 | 工作区根 —— **项目身份就是项目相对它的路径**（ADR-0037） |
+| `WTOOL_ROOT` | wtool-base-tools 的上级目录 | 工作区根 —— **项目身份就是项目相对它的路径**（ADR-0037） |
 | `WTOOL_BOOTSTRAP` | 存根自动查找 | 显式指定引擎位置 |
 
-bootstrap 项目（自举）提供的**长期变量**，重启 shell 后依然可用：
+wtool-base-tools 项目（自举）提供的**长期变量**，重启 shell 后依然可用：
 
 | 变量 | 值 |
 |---|---|
@@ -99,11 +104,11 @@ WTOOL_ARTIFACTS / WTOOL_STATE_DIR
 
 ## 自举
 
-`bootstrap` 本身也是一个 wtool 项目。`install.sh` 是**安装器的唯一入口**（六项职责
+`wtool-base-tools` 本身也是一个 wtool 项目。`install.sh` 是**安装器的唯一入口**（六项职责
 见 `docs/spec.md` §12）：
 
 ```sh
-cd bootstrap && ./install.sh     # ① L1 链 + 两条入口链 ② var/ 账本 ③ manifest 三件套
+cd wtool-base-tools && ./install.sh     # ① L1 链 + 两条入口链 ② var/ 账本 ③ manifest 三件套
                                  # ④ env.{zsh,bash} ⑤ 新进程里 source + wtool check
 exec zsh                         # ⑥ rc 那两行**默认只打印**，你贴一下（或回答 y 让它代写）
 wtool doctor                     # 之后 wtool / WTOOL_PREFIX / OS 变量就位
@@ -134,7 +139,7 @@ wtool doctor                     # 之后 wtool / WTOOL_PREFIX / OS 变量就位
 引擎 `1.0.0`，schema `1`。
 
 **已实现**：`install` / `uninstall` / `sudo-install` / `sudo-uninstall` / `sudo-bootstrap` /
-`bootstrap` / `build` / `pack-release` / `publish-release` / `download-release` / `unpack-release` /
+`bootstrap`（命令） / `build` / `pack-release` / `publish-release` / `download-release` / `unpack-release` /
 `_layer-save` / `_layer-load` / `unpack-layer` / `push-layer` / `pull-layer` /
 `check` / `repair` / `status` / `doctor` / `validate` / `init` / `kill-self-forever` /
 `version`，加 `--dry-run` / `--force`。另外有三个**帮助里没写**的隐藏入口：

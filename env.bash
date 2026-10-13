@@ -1,6 +1,6 @@
-# bootstrap 项目的 env（bash 版）：与 env.zsh 等价
-# WTOOL_PROJECT_DIR 由 wtool 块导出 = $HOME/.wtool/wtool/bootstrap（**L1 链**，ADR-0045）
-[ -n "$WTOOL_PROJECT_DIR" ] || WTOOL_PROJECT_DIR="$HOME/.wtool/wtool/bootstrap"
+# wtool-base-tools 项目的 env（bash 版）：与 env.zsh 等价（2026-10-13 前叫 bootstrap）
+# WTOOL_PROJECT_DIR 由 wtool 块导出 = $HOME/.wtool/wtool/wtool-base-tools（**L1 链**，ADR-0045）
+[ -n "$WTOOL_PROJECT_DIR" ] || WTOOL_PROJECT_DIR="$HOME/.wtool/wtool/wtool-base-tools"
 
 . "$WTOOL_PROJECT_DIR/lib/wtool_os.sh"
 wt_os_detect

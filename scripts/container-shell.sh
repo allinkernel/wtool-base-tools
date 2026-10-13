@@ -4,7 +4,7 @@
 # 宿主机执行（一条命令）：
 #   docker run --rm -it --network=host \
 #     -v ~/self/wtool:/wtool:ro \
-#     ubuntu:24.04 bash /wtool/bootstrap/scripts/container-shell.sh
+#     ubuntu:24.04 bash /wtool/wtool-base-tools/scripts/container-shell.sh
 #
 # 它只做三件事，和你在真机上手动做的一模一样：
 #
@@ -31,8 +31,8 @@ export GIT_OPTIONAL_LOCKS
 say()  { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!!\033[0m %s\n' "$*" >&2; }
 
-[ -d "$WTOOL_DIR/bootstrap" ] || {
-    warn "$WTOOL_DIR 下没有 bootstrap/ —— 挂载点不对？"
+[ -d "$WTOOL_DIR/wtool-base-tools" ] || {
+    warn "$WTOOL_DIR 下没有 wtool-base-tools/ —— 挂载点不对？"
     warn "宿主机应该是：docker run ... -v ~/self/wtool:$WTOOL_DIR:ro ..."
     exit 1
 }

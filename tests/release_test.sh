@@ -390,7 +390,7 @@ printf '\n== 场景 4：没有构建能力的项目（纯声明式）只发源�
 #   没有 build/layers.tsv）→ release.zip 里**只剩声明面**，而那三个文件
 #   （wtool.xml / env.zsh / env.bash）源码包里本来就有。实测 tmux：
 #   源码包 15 个文件 20060 字节 vs release 包 3 个文件 2210 字节 —— 子集。
-P5="$T/ws5/shell/zsh"
+P5="$T/ws5/shell/shell-rc"
 export WTOOL_ROOT="$T/ws5"
 mkdir -p "$P5"
 printf 'alias ll="ls -alF"\n' > "$P5/env.zsh"
@@ -449,7 +449,7 @@ grep -q '旧的中文资产名' "$T/pack5b.log" && ok "pack-release 报了一声
 [ -f "$P5/__release/source.zip" ] && ok "新的 source.zip 照常产出" || bad "新的 source.zip 没产出"
 
 # 只有源码包的机器：下载 → 解包 → **源码铺回项目目录**（否则 install 没东西可装）
-P6="$T/ws6/shell/zsh"
+P6="$T/ws6/shell/shell-rc"
 export WTOOL_ROOT="$T/ws6"
 mkdir -p "$P6/__release" "$P6/scripts"
 cp "$P5/__release/dist.json" "$P6/__release/"
@@ -463,7 +463,7 @@ cp "$P5/scripts/release.json" "$P6/scripts/"      # 对照表：源码包解到�
     || bad "env.zsh 没铺出来"
 [ -e "$P6/__output" ] && bad "凭空造了 __output/（这个项目本来就没有产物）" \
     || ok "没有凭空造 __output/"
-[ -f "$T/ws6/.wtool-dist/shell-zsh.json" ] \
+[ -f "$T/ws6/.wtool-dist/shell-shell-rc.json" ] \
     && ok "发布副本标记铺到工作区根（解压副本没有 .git 时 install 靠它免 --force）" \
     || bad "没铺 .wtool-dist 标记"
 grep -q '源码就是产物' "$T/unpack6.log" \
@@ -674,8 +674,8 @@ chk "块头写的是 retire 之后的命令名 wtool publish-release" \
     "$(printf '%s\n' "$DOC9" | grep -c '由 `wtool publish-release` 自动重写' || true)" "1"
 chk "块里不再提已退休的 wtool publish（会 die 的老名字）" \
     "$(printf '%s\n' "$DOC9" | grep -c '`wtool publish`' || true)" "0"
-chk "安装入口是 bootstrap/scripts/install.sh（包里只有这一个）" \
-    "$(printf '%s\n' "$DOC9" | grep -c './bootstrap/scripts/install.sh' || true)" "1"
+chk "安装入口是 wtool-base-tools/scripts/install.sh（包里只有这一个）" \
+    "$(printf '%s\n' "$DOC9" | grep -c './wtool-base-tools/scripts/install.sh' || true)" "1"
 
 # 6) 没有资产时不是空白块，而是明说"还没发布过"
 printf '' > "$ROWS"
@@ -786,7 +786,7 @@ _cr2=$(cd "$OS2/__release" && env -i PATH=/usr/bin:/bin sh ./check-hash.sh 2>&1)
 printf '%s\n' "$_cr2" | grep -q 'FAILED' && ok "② 说清了哪一卷 FAILED" || bad "② 没说清哪卷坏"
 
 # ---- ③ docker：release-offline.zip（产物 + 声明面）------------------------
-OS3="$OWS/shell/zsh"
+OS3="$OWS/shell/shell-rc"
 mkdir -p "$OS3/__output/ubuntu_24.04/usr/bin"
 printf 'export DEMO=1\n' > "$OS3/env.bash"
 cat > "$OS3/wtool.xml" <<'EOF'
@@ -797,11 +797,11 @@ printf '#!/bin/sh\necho zsh\n' > "$OS3/__output/ubuntu_24.04/usr/bin/zsh"
 chmod +x "$OS3/__output/ubuntu_24.04/usr/bin/zsh"
 git -C "$OS3" init -q && git -C "$OS3" add -A \
     && git -C "$OS3" -c user.name=t -c user.email=t@t commit -qm init
-"$WT" pack-offline-release shell/zsh > "$T/off3.log" 2>&1 \
+"$WT" pack-offline-release shell/shell-rc > "$T/off3.log" 2>&1 \
     || bad "③ pack-offline-release" "$(cat "$T/off3.log")"
-zhave "$OS3/__release/release-offline.zip" "wtool/shell/zsh/__output/ubuntu_24.04/usr/bin/zsh" \
+zhave "$OS3/__release/release-offline.zip" "wtool/shell/shell-rc/__output/ubuntu_24.04/usr/bin/zsh" \
     && ok "③ 自足：产物在包里，顶层是 wtool/<项目路径>/" || bad "③ 产物的路径不对"
-zhave "$OS3/__release/release-offline.zip" "wtool/shell/zsh/wtool.xml" \
+zhave "$OS3/__release/release-offline.zip" "wtool/shell/shell-rc/wtool.xml" \
     && ok "③ 声明面（wtool.xml）也在包里" || bad "③ 缺 wtool.xml"
 chk "③ 资产名按 kind：release-offline.zip（和 ② 同名，但各在自己的项目里）" \
     "$(ls "$OS3/__release/release-offline.zip" 2>/dev/null | grep -c . || true)" "1"
@@ -842,7 +842,7 @@ tar tzvf "$O4" | grep -E '^l' | grep -q ' \.wtool/install\.sh -> wtool/wtool-bas
 _rc=0
 "$WT" pack-offline-release all > "$T/off1all.log" 2>&1 || _rc=$?
 chk "③b pack-offline-release all 退出码 0" "$_rc" "0"
-for _p in terminal/tmux tools/musl-bins shell/zsh; do
+for _p in terminal/tmux tools/musl-bins shell/shell-rc; do
     grep -q "── $_p" "$T/off1all.log" && ok "③b all 里点了 $_p" \
         || bad "③b all 漏了 $_p" "$(grep -c '── ' "$T/off1all.log")"
 done
@@ -877,7 +877,7 @@ chk "① 敲 pack-offline-release 放行（dry-run，rc=0）" "$_rc" "0"
 # ---- ⑤ 声明式解包：落点由 release.json 说了算（改表就改落点）---------------
 #   把对照表里 release.zip 的 to 改成 __output/换了个地方，产物就该跟着挪 ——
 #   这条是"引擎不写死路径"的直接证据（ADR-0045 / D57 用户原话：坚决不要隐晦）。
-OD="$T/ws10d/shell/zsh"
+OD="$T/ws10d/shell/shell-rc"
 mkdir -p "$OD/scripts" "$OD/__release"
 # 先打一个产物包（它会把 release.zip 写进对照表），再**改表**看落点跟不跟着走
 "$WT" pack-release "$OS3" --tag=v10 --repo=o/r > "$T/off10b.log" 2>&1 \

@@ -12,8 +12,8 @@
 #               └─► $WTOOL_HOME/wtool/<安装器项目>/scripts/install.sh      ← 本文件
 #
 #   ⚠️ 项目名**不写死**：`<安装器项目>` 是"引擎住在哪个项目里"现算出来的
-#      （= 本文件所在目录的上一级，相对工作区根的路径）。今天它叫 bootstrap，
-#      下一块要改名成 wtool-base-tools —— 这里一行都不用动。
+#      （= 本文件所在目录的上一级，相对工作区根的路径）。今天它叫 wtool-base-tools
+#      （2026-10-13 由 `bootstrap` 改名，ADR-0045 §7.1）—— 这里一行都没动过。
 #
 # 六项职责（D42；**每一步失败都非 0 退出**，并说清是哪一步）：
 #
@@ -105,7 +105,8 @@ done
 # 不再有"被管理的家目录"那一层。取值优先级：
 #     --home <目录>  >  环境里的 $WTOOL_HOME（rc 里 export 的那个）  >  $HOME/.wtool
 # ⚠️ 实测踩过：这里原来只看 `$HOME`，于是跑一遍测试就把**真** `~/.wtool/bootstrap`
-#    指向了已删除的 /tmp 目录（悬空软链）。所以：环境里给了就用它。
+#    （那时安装器项目还叫这个名字）指向了已删除的 /tmp 目录（悬空软链）。
+#    所以：环境里给了就用它。
 WTOOL_HOME_DIR=${WTOOL_HOME_ARG:-${WTOOL_HOME:-$HOME_DIR/.wtool}}
 case $WTOOL_HOME_DIR in
     /*) ;;
@@ -260,8 +261,11 @@ ws_ln() {   # <链接名> <相对工作区根的目标>
 say "①b 工作区根目录入口（$ws）"
 ws_ln install.sh   "$proj_rel/scripts/install.sh"
 ws_ln uninstall.sh "$proj_rel/scripts/uninstall.sh"
-ws_ln README.md    wtool-base/README.md
-ws_ln guide.md     wtool-base/guide.md
+# 用户文档仓：**2026-10-13 由 `wtool-base` 改名成 `wtool-doc`**（ADR-0045 §7.1）。
+# ⚠️ 这里原来是写死的 `wtool-base/…` —— 改名之后 `ws_ln` 会因为"源不在"**静默跳过**
+#    （只打一句"跳过"），根目录就少两条入口软链。名字跟着清单的 `path=` 走。
+ws_ln README.md    wtool-doc/README.md
+ws_ln guide.md     wtool-doc/guide.md
 
 # ==========================================================================
 # 职责②：建 var/ 账本，并记下**这次动作**

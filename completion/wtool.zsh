@@ -1,4 +1,4 @@
-# wtool 的 zsh 补全（由 bootstrap/env.zsh 自动 source，不用你手动做）
+# wtool 的 zsh 补全（由 wtool-base-tools/env.zsh 自动 source，不用你手动做）
 #
 # 和 bash 那份一样：候选**全部由引擎自己算**
 # （`wtool _complete <正在敲的词> <已经敲过的词...>`），这里不抄命令清单。

@@ -4,12 +4,12 @@
 # 宿主机执行：
 #   docker run --rm -it --network=host \
 #     -v ~/self/wtool:/wtool:ro \
-#     ubuntu:20.04 bash /wtool/bootstrap/scripts/container-raw.sh
+#     ubuntu:20.04 bash /wtool/wtool-base-tools/scripts/container-raw.sh
 #
 # 想**以普通用户**进容器（而不是 root），加 `--user`：
 #   docker run --rm -it --network=host \
 #     -v ~/self/wtool:/wtool:ro \
-#     ubuntu:24.04 bash /wtool/bootstrap/scripts/container-raw.sh --user mindul
+#     ubuntu:24.04 bash /wtool/wtool-base-tools/scripts/container-raw.sh --user mindul
 #
 #   `--user <名字>` **只做这三件事**（顺序有意义），做完就把 shell 交给它：
 #     1. 建这个普通用户（家目录、bash、**密码 root**、`/etc/sudoers.d` 免密；
@@ -38,7 +38,7 @@
 # 本来就还没有 python3 —— 这个容器要如实反映那个状态。否则你会以为某条命令
 # 能用，换到真机器上才发现不能，那才是真的浪费时间。
 #
-# 进来之后能做什么，脚本末尾会打一份对照表；man 版见 wtool-base/README.md。
+# 进来之后能做什么，脚本末尾会打一份对照表；man 版见 wtool-doc/README.md。
 set -eu
 
 WTOOL_DIR=${WTOOL_DIR:-/wtool}
@@ -88,8 +88,8 @@ if [ -n "$USER_NAME" ]; then
     [ "$USER_NAME" != root ] || { warn "--user root 没意义（不带 --user 就是 root）"; exit 2; }
 fi
 
-[ -d "$WTOOL_DIR/bootstrap" ] || {
-    warn "$WTOOL_DIR 下没有 bootstrap/ —— 挂载点不对？"
+[ -d "$WTOOL_DIR/wtool-base-tools" ] || {
+    warn "$WTOOL_DIR 下没有 wtool-base-tools/ —— 挂载点不对？"
     warn "宿主机应该是：docker run ... -v ~/self/wtool:$WTOOL_DIR:ro ..."
     exit 1
 }

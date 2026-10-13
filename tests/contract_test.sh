@@ -1207,8 +1207,8 @@ printf '\n== 场景 16：uninstall 按路径指项目，且**必须**跑项目�
 #     printf '<?xml version="1.0"?>\n<wtool schema="1"/>\n' > $WTOOL_ROOT/foo/bar/wtool.xml
 #     git -C $WTOOL_ROOT/foo/bar init -q && git -C $WTOOL_ROOT/foo/bar add -A \
 #       && git -C $WTOOL_ROOT/foo/bar -c user.name=t -c user.email=t@t commit -qm init
-#     sh bootstrap/wtool.sh install foo/bar
-#     sh bootstrap/wtool.sh uninstall foo/bar
+#     sh wtool-base-tools/wtool.sh install foo/bar
+#     sh wtool-base-tools/wtool.sh uninstall foo/bar
 #     ls $WTOOL_ROOT/foo/bar/uninstall-called.txt
 #   标记文件写在**项目目录**里（state 卸完会被删掉，留在那儿就看不见了）。
 newhome

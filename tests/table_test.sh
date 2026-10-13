@@ -32,9 +32,9 @@ set -eu
 for _v in $(env | grep -o '^WTOOL_[A-Za-z_]*' || true); do unset "$_v"; done
 
 here=$(cd -- "$(dirname -- "$0")" && pwd)
-bootstrap=$(cd -- "$here/.." && pwd)
-PY="$bootstrap/lib/wtool_plan.py"
-WT="$bootstrap/wtool.sh"
+engine_root=$(cd -- "$here/.." && pwd)
+PY="$engine_root/lib/wtool_plan.py"
+WT="$engine_root/wtool.sh"
 
 pass=0; fail=0
 ok()  { pass=$((pass + 1)); printf '  ok   %s\n' "$*"; }

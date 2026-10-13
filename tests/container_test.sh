@@ -7,7 +7,7 @@
 #     -v ~/self/wtool:/wtool:ro \
 #     -e GIT_OPTIONAL_LOCKS=0 \
 #     ubuntu:24.04 \
-#     bash /wtool/bootstrap/tests/container_test.sh
+#     bash /wtool/wtool-base-tools/tests/container_test.sh
 #
 # 说明：
 #   * /wtool 只读挂载；GIT_OPTIONAL_LOCKS=0 让 git 不去写索引，只读挂载也能用
@@ -16,7 +16,7 @@
 set -eu
 
 WT=${WT:-/wtool}
-PROJECTS="bootstrap shell/oh-my-zsh shell/zsh tools/git-repo-sh-tools terminal/tmux terminal/fzf"
+PROJECTS="wtool-base-tools shell/oh-my-zsh shell/shell-rc tools/git-repo-sh-tools terminal/tmux terminal/fzf"
 # 状态目录放到 /tmp，让最后的"完全回退"比对只关注 $HOME 里的配置与软链
 export WTOOL_STATE=${WTOOL_STATE:-/tmp/wtool-state}
 
@@ -89,7 +89,7 @@ else
         printf '      docker run --rm -it --network host -v ~/self/wtool:/wtool:ro \\\n'
         printf '        -e GIT_OPTIONAL_LOCKS=0 -e http_proxy=http://127.0.0.1:7890 \\\n'
         printf '        -e https_proxy=http://127.0.0.1:7890 ubuntu:24.04 \\\n'
-        printf '        bash /wtool/bootstrap/tests/container_test.sh\n'
+        printf '        bash /wtool/wtool-base-tools/tests/container_test.sh\n'
         sed 's/^/      /' /tmp/wtool-apt.log | tail -5
         exit 1
     fi
@@ -149,19 +149,19 @@ install_project() {
     printf '  ✓ %s\n' "$p"
 }
 # 故意乱序安装，验证最终顺序只由 priority 决定
-for p in terminal/fzf tools/git-repo-sh-tools shell/oh-my-zsh terminal/tmux shell/zsh bootstrap; do
+for p in terminal/fzf tools/git-repo-sh-tools shell/oh-my-zsh terminal/tmux shell/shell-rc wtool-base-tools; do
     install_project "$p"
 done
 
 printf '\n===== 4. 验证 =====\n'
-export PATH="$WT/bootstrap/bin:$PATH"
-eval "$("$WT/bootstrap/wtool.sh" env)"
+export PATH="$WT/wtool-base-tools/bin:$PATH"
+eval "$("$WT/wtool-base-tools/wtool.sh" env)"
 
 check "wtool env 的 WTOOL_PREFIX"        "$HOME/.wtool/usr" "$WTOOL_PREFIX"
 check "wtool env 识别出 ubuntu"          "ubuntu"           "$WTOOL_OS_ID"
 check "wtool env 识别出 24.04"           "24.04"            "$WTOOL_OS_VERSION"
 check "wtool env 识别出 noble"           "noble"            "$WTOOL_OS_CODENAME"
-check "wtool 命令可用"                   "$WT/bootstrap/bin/wtool" "$(command -v wtool)"
+check "wtool 命令可用"                   "$WT/wtool-base-tools/bin/wtool" "$(command -v wtool)"
 
 # `wtool list` 已经并进 `wtool status`（旧名字 die + 指路，见架构书 §7）
 n=$(wtool status | grep -c . || true)
@@ -173,7 +173,7 @@ grep -o 'wtool:[a-z/-]* schema=1 engine=[0-9.]* prio=[0-9]*' "$HOME/.zshrc" | se
 order=$(grep -o 'prio=[0-9]*' "$HOME/.zshrc" | sed 's/prio=//' | tr '\n' ' ')
 check "zshrc 块按 priority 升序" "5 10 20 40 50 60 " "$order"
 
-printf '\n  --- ~/.bashrc（bootstrap + fzf）---\n'
+printf '\n  --- ~/.bashrc（wtool-base-tools + fzf）---\n'
 grep -o 'wtool:[a-z/-]*' "$HOME/.bashrc" | sort -u | sed 's/^/    /'
 
 printf '\n  --- 软链 ---\n'
@@ -220,7 +220,7 @@ printf '%s\n' "$pout" | sed 's/^/    /'
 
 printf '\n===== 5. 全部卸载，核对是否完全回退 =====\n'
 after=/tmp/wtool-snap-after.txt
-for p in shell/zsh terminal/tmux shell/oh-my-zsh tools/git-repo-sh-tools terminal/fzf bootstrap; do
+for p in shell/shell-rc terminal/tmux shell/oh-my-zsh tools/git-repo-sh-tools terminal/fzf wtool-base-tools; do
     if [ -d "$WT/$p/.git" ] && [ -n "$(git -C "$WT/$p" status --porcelain -uno 2>/dev/null)" ]; then
         "$WT/$p/uninstall.sh" --force >/dev/null
     else

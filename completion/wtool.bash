@@ -1,4 +1,4 @@
-# wtool 的 bash 补全（由 bootstrap/env.bash 自动 source，不用你手动做）
+# wtool 的 bash 补全（由 wtool-base-tools/env.bash 自动 source，不用你手动做）
 #
 # 候选**全部由引擎自己算**：`wtool _complete <正在敲的词> <已经敲过的词...>`
 # —— 别在这个文件里再抄一份命令清单，那样迟早和图例、和分发对不上。

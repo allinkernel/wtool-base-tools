@@ -10,7 +10,7 @@
 #   `docker exec -d` 的缓冲、commit 抓不抓得到可写层、`docker save | tar -x` 的格式、
 #   容器里写 /wtool-layer/ 的权限……这些只有真容器才现原形。
 #
-#   sh bootstrap/tests/docker_build_real.sh          # 默认用 alpine:latest
+#   sh wtool-base-tools/tests/docker_build_real.sh          # 默认用 alpine:latest
 #   WT_REAL_IMAGE=ubuntu:24.04 sh .../docker_build_real.sh
 #
 # 它**只碰自己的东西**：一个临时工作区、一个 `wtool-smoke/one` 镜像、一个同名缓存卷，

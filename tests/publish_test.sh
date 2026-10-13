@@ -30,8 +30,10 @@ for v in $(env | grep -o '^WTOOL_[A-Za-z_]*'); do unset "$v"; done
 
 here=$(cd -- "$(dirname -- "$0")" && pwd)
 WS=$(cd -- "$here/../.." && pwd)
-WT="$WS/bootstrap/wtool.sh"
-WT_ZIP="$WS/bootstrap/lib/wtool_zip.py"
+# 引擎根**按本脚本的位置推**（`tests/..`）—— 不写死"工作区里那个项目叫什么"，
+# 目录改名（bootstrap → wtool-base-tools，ADR-0045 §7.1）前后都成立。
+WT="$here/../wtool.sh"
+WT_ZIP="$here/../lib/wtool_zip.py"
 
 pass=0; fail=0
 ok()   { pass=$((pass + 1)); printf '  ok   %s\n' "$*"; }
@@ -403,7 +405,12 @@ echo "== 6. ★测试没有碰真工作区的文档 =="
 # 这条断言是为了防住"测试改写真实文件"这类问题——它真的发生过一次。
 # 宿主文件是 **download.md**（ADR-0042 把 wtool:downloads 块从 README 挪进了下载页；
 # README 里现在只剩一行指过去的链接，不再带标记）。
-_real_doc="$WS/wtool-base/download.md"
+# 文档仓的目录名（wtool-base → wtool-doc）按内容找，不写死：谁有 download.md 就是它。
+_real_doc=""; _real_doc_dir=""
+for _c in "$WS"/*/download.md; do
+    [ -f "$_c" ] || continue
+    _real_doc=$_c; _real_doc_dir=$(dirname -- "$_c"); break
+done
 if [ -f "$_real_doc" ]; then
     if grep -q 'wtool:downloads' "$_real_doc" \
             && [ "$(grep -c '还没有发布过任何项目' "$_real_doc" || true)" = 0 ]; then
@@ -412,11 +419,11 @@ if [ -f "$_real_doc" ]; then
         bad "真工作区的 download.md 被测试改动了"
     fi
 else
-    ok "真工作区没有 wtool-base（无所谓）"
+    ok "真工作区里没有文档仓（无所谓）"
 fi
 # 反向断言：README **不许**再带标记块 —— 带了就是两个真相源（ADR-0042 禁止）
-if [ -f "$WS/wtool-base/README.md" ]; then
-    grep -q '^<!-- >>> wtool:downloads >>> -->' "$WS/wtool-base/README.md" \
+if [ -n "$_real_doc_dir" ] && [ -f "$_real_doc_dir/README.md" ]; then
+    grep -q '^<!-- >>> wtool:downloads >>> -->' "$_real_doc_dir/README.md" \
         && bad "真工作区 README 又带上了下载块标记（下载页只能有一个）" \
         || ok "真工作区 README 里没有下载块标记（只链接到 download.md）"
 fi
@@ -469,7 +476,7 @@ chk "拒绝之后什么都没传" "$(grep -cE 'release (create|upload)' "$T/gh.l
 echo "== 9. release view 失败但 release 其实存在 → 复用，不硬失败 =="
 # view 失败 ≠ 不存在：网络抖一下或 API 最终一致性都会让 view 报错，
 # 这时 create 会撞 422 already exists。硬失败会让整个发布停在一个
-# 早就建好的 release 上（实测在 shell/zsh 上撞过）。
+# 早就建好的 release 上（实测在 shell/shell-rc 上撞过）。
 WS9="$T/ws9"; ST9="$T/state9"; P9="$WS9/racy"
 mkdir -p "$P9"
 cat > "$P9/wtool.xml" <<'EOF'
@@ -794,7 +801,7 @@ echo "== 16. ★下载表按「项目自己记着的 tag」刷新（缺陷 A：�
 #   ① 发布过的项目按 scripts/release.json 的 tag 查；② 没发布过的退回模板；
 #   ③ 生成出来的命令要**能照着跑**（前缀防撞名 + 按扩展名解压）。
 WS16="$T/ws16"; ST16="$T/state16"; P16="$WS16/alpha"; P16B="$WS16/beta"
-mkdir -p "$P16" "$P16B" "$WS16/wtool-base"
+mkdir -p "$P16" "$P16B" "$WS16/wtool-doc"
 cat > "$P16/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <wtool schema="1" kind="docker" priority="10">
@@ -847,7 +854,7 @@ chmod +x "$T/bin-dl/gh"
 
 # 目标文档：块里**已经有一张表**（旧版本）—— 这样"空表也要拦住"那条守卫不会兜底，
 # 能不能更新全看真的查到了资产。
-DOC16="$WS16/wtool-base/README.md"
+DOC16="$WS16/wtool-doc/README.md"
 cat > "$DOC16" <<'EOF'
 # 下载
 
@@ -946,7 +953,7 @@ echo "== 18. ★下载页只能有一个：两个文档都带标记时拒绝刷�
 # 于是"下载页有两份、只更新了一份"，另一份永远停在旧版本 —— 正是这个项目
 # 一直在消灭的"同一个东西两个说法"。改成：多于一个就拒绝 + 列出全部候选 + 非零退出。
 WS18="$T/ws18"; ST18="$T/state18"; P18="$WS18/alpha"
-mkdir -p "$P18" "$WS18/wtool-base"
+mkdir -p "$P18" "$WS18/wtool-doc"
 cat > "$P18/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <wtool schema="1" kind="docker" priority="10">
@@ -960,19 +967,19 @@ git_init "$P18"
 mkdir -p "$P18/scripts"
 printf '{\n  "schema": 1,\n  "project": "alpha",\n  "repo": "fakeowner/alpha",\n  "tag": "v-alpha"\n}\n' \
     > "$P18/scripts/release.json"
-cat > "$WS18/wtool-base/README.md" <<'EOF'
+cat > "$WS18/wtool-doc/README.md" <<'EOF'
 # wtool
 
 下载看 [download.md](download.md)。
 EOF
-cat > "$WS18/wtool-base/download.md" <<'EOF'
+cat > "$WS18/wtool-doc/download.md" <<'EOF'
 # 下载
 
 <!-- >>> wtool:downloads >>> -->
 <!-- <<< wtool:downloads <<< -->
 EOF
 # 第二份"下载页"：老 README 保留下来的标记块（就是这次搬迁要防的那种残留）
-cat > "$WS18/wtool-base/OLD-downloads.md" <<'EOF'
+cat > "$WS18/wtool-doc/OLD-downloads.md" <<'EOF'
 # 旧下载页（残留）
 
 <!-- >>> wtool:downloads >>> -->
@@ -981,26 +988,26 @@ cat > "$WS18/wtool-base/OLD-downloads.md" <<'EOF'
 | alpha | [snapshot-2020-01-01](https://example.invalid/x) | [old.tar.gz](https://example.invalid/old.tar.gz) | 1.0K |
 <!-- <<< wtool:downloads <<< -->
 EOF
-_before18a=$(cat "$WS18/wtool-base/download.md")
-_before18b=$(cat "$WS18/wtool-base/OLD-downloads.md")
+_before18a=$(cat "$WS18/wtool-doc/download.md")
+_before18b=$(cat "$WS18/wtool-doc/OLD-downloads.md")
 : > "$T/gh.log"
 _rc=0
 wt "$T/bin-dl" "$WS18" "$ST18" refresh-downloads > "$T/log18" 2>&1 || _rc=$?
 chk "★两个标记文档 → 非零退出（不再静默挑一个）" "$_rc" "1"
 grep -q '2 个文档带 wtool:downloads 标记' "$T/log18" \
     && ok "报出了标记文档的个数" || { bad "没说有几个"; sed 's/^/     /' "$T/log18"; }
-grep -q 'wtool-base/OLD-downloads.md' "$T/log18" \
+grep -q 'wtool-doc/OLD-downloads.md' "$T/log18" \
     && ok "把候选逐个列出来了（知道该删哪个）" || bad "没列出候选文档"
-chk "★两个文件都一个字节没动（第一个）" "$(cat "$WS18/wtool-base/download.md")" "$_before18a"
-chk "★两个文件都一个字节没动（第二个）" "$(cat "$WS18/wtool-base/OLD-downloads.md")" "$_before18b"
+chk "★两个文件都一个字节没动（第一个）" "$(cat "$WS18/wtool-doc/download.md")" "$_before18a"
+chk "★两个文件都一个字节没动（第二个）" "$(cat "$WS18/wtool-doc/OLD-downloads.md")" "$_before18b"
 chk "★一个 gh 查询都没发（拒绝得早）" "$(grep -c 'release view' "$T/gh.log" || true)" "0"
 
 # 删掉残留那个 → 恢复正常，刷进唯一的那个
-rm -f "$WS18/wtool-base/OLD-downloads.md"
+rm -f "$WS18/wtool-doc/OLD-downloads.md"
 _rc=0
 wt "$T/bin-dl" "$WS18" "$ST18" refresh-downloads > "$T/log18b" 2>&1 || _rc=$?
 chk "只剩一个标记文档时退出码 0" "$_rc" "0"
-grep -q 'v-alpha/source.zip' "$WS18/wtool-base/download.md" \
+grep -q 'v-alpha/source.zip' "$WS18/wtool-doc/download.md" \
     && ok "★刷的是唯一的那个文档（download.md）" || bad "唯一那个没刷到"
 chk "★刷完仍只有一个文档带标记" \
     "$(grep -rl --include='*.md' -E '^<!-- >>> wtool:downloads >>> -->[[:space:]]*$' "$WS18" 2>/dev/null | wc -l | tr -d ' ')" "1"

@@ -1,6 +1,7 @@
 # wtool 接口契约（spec v1.0.0）
 
-> 本文是 `wtool-bootstrap` 与各项目仓库之间的**唯一契约**。
+> 本文是 `wtool-base-tools`（2026-10-13 前叫 `bootstrap` / GitHub `wtool-bootstrap`，
+> ADR-0045 §7.1）与各项目仓库之间的**唯一契约**。
 > 改引擎前先改这里；改这里就要考虑向后兼容。
 
 ---
@@ -102,7 +103,7 @@ connection reset），pull 走 `skopeo`（它写 OCI 布局时会合并 `index.j
 没有标记块或没有 `gh` 就跳过。
 
 **宿主文件：工作区里带标记的文档必须**唯一**（ADR-0042）。** 目标不写死路径，靠标记自己
-声明（`grep -rl` 找**整行就是标记**的 `*.md`）。今天这个宿主是 `wtool-base/download.md`
+声明（`grep -rl` 找**整行就是标记**的 `*.md`）。今天这个宿主是 `wtool-doc/download.md`
 （README 里只有一行指过去的链接，不再带标记）。带标记的文档**多于一个**时它
 **拒绝刷新**（列出全部候选、返回非零、一个字节都不动）—— 以前是 `| head -1`，
 两个文档都带标记时**不报错**、只刷遍历顺序靠前的那个，另一份就永远停在旧版本。
@@ -237,7 +238,7 @@ wtool: 冲突：$WTOOL_HOME/usr/bin/fzf 已被 tools/musl-bins/fzf 占用，term
 ## 2. 角色划分
 
 ```
-wtool-bootstrap/            引擎（全机器唯一一份）
+wtool-base-tools/           引擎（全机器唯一一份）
 ├── wtool.sh                CLI：install / uninstall / sudo-install / sudo-uninstall /
 │                           bootstrap / sudo-bootstrap / build /
 │                           pack-release / publish-release / download-release / unpack-release /
@@ -545,7 +546,7 @@ env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_
 
 | 承诺 | 做法 |
 |---|---|
-| 未知 `schema` → 拒绝并提示升级 bootstrap | `SCHEMA_SUPPORTED` 白名单 |
+| 未知 `schema` → 拒绝并提示升级 wtool-base-tools | `SCHEMA_SUPPORTED` 白名单 |
 | 未知元素 → 报错（而不是静默忽略），**`x-*` 也一样报错** | 避免拼写错误悄悄生效。`<wtool>` 里**没有**"留给用户的自定义元素"这回事：`lib/wtool_plan.py` 对任何不认识的标签都拒绝（实测 `<x-note>` → `error: 未知元素 <x-note>`，退出码 1）。报错本身给出真出路（`<include src="wtool.local.xml" optional="true"/>`），**不再**教人写 `x-*`（那是它刚拒绝的东西，照做还是同一个错 —— BL-23） |
 | 未知属性 → 目前静默忽略 | 便于老引擎读新清单的"降级运行" |
 | **旧标签：一部分删、一部分仍然认** | `<link>`（任何写法）**已经删掉解析**（ADR-0045 / D3，报错并给出照做就行的改法）；`<env src= shells=>` / `<provision>` / `<system-file>` 仍然认，但每次解析都警告 |
@@ -584,7 +585,7 @@ env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_
 | install-env | `tests/install_env_test.sh` | 67 | `install.sh` 第 0 步：镜像测速（按速度降序，不是字符串排序）、交互挑源 / 非交互自动选最快、换源前备份 + 不好用能退回去、`WTOOL_MIRROR=<代号|主机名|official>`、挑过一次就复用（`WTOOL_MIRROR=pick` 强制重测）、`container-raw.sh --user` 的**三件事**与提示文案不漂移 |
 | layer | `tests/layer_test.sh` | 50 | `__layer/<target>/` 那棵 OCI 镜像目录：写/读、blob 去重、index 合并、`unpack-layer` 解 blob + `OWNED.tsv` 扫描（**被拒之后重跑不许被当成已导出**）、`push-layer`（打桩 docker）、`pull-layer`（打桩 skopeo）、老名字指路 |
 
-共 **917** 条断言（2026-10-09 实测：`cd bootstrap/tests && ./run_all.sh`；
+共 **1267** 条断言（2026-10-13 实测：`cd wtool-base-tools/tests && ./run_all.sh`；
 `run_all.sh` **文件头**注释里那几行逐组条数也同步成了这一版，但**以它跑出来的 PASS 行为准**）：
 
 ```sh
@@ -600,7 +601,7 @@ env 文件应当立刻把它们拷进自己的变量（例：`export WTOOL_TMUX_
 
 | 类 | 变量 | 谁产生 | 何时有效 | 重启 shell 后 |
 |---|---|---|---|---|
-| **A 长期** | `WTOOL_PREFIX` | `bootstrap` 项目的 `env.zsh`/`env.bash` | 每次开 shell | ✅ 有 |
+| **A 长期** | `WTOOL_PREFIX` | `wtool-base-tools` 项目的 `env.zsh`/`env.bash` | 每次开 shell | ✅ 有 |
 | **A 长期** | `WTOOL_OS_ID` / `WTOOL_OS_VERSION` / `WTOOL_OS_CODENAME` / `WTOOL_OS_LIKE` | 同上（`lib/wtool_os.sh` 读 `/etc/os-release`） | 每次开 shell | ✅ 有 |
 | **A 长期** | `WTOOL_ARCH` / `WTOOL_JOBS` | 同上 | 每次开 shell | ✅ 有 |
 | **A 长期** | `PATH` += `$WTOOL_PREFIX/bin` 和 `$WTOOL_PROJECT_DIR/bin`（`wtool` 命令） | 同上 | 每次开 shell | ✅ 有 |
@@ -825,7 +826,7 @@ $WTOOL_HOME/install.sh
 ```
 
 ⚠️ **项目名不写死在代码里**：`<安装器项目>` = 本脚本所在目录的上一级、相对工作区根
-的路径（今天叫 `bootstrap`，改名成 `wtool-base-tools` 时这里一个字都不用动）。
+的路径（今天叫 `wtool-base-tools` —— 2026-10-13 由 `bootstrap` 改名，这里一个字都没动过）。
 
 六项职责，**每一步失败都非 0 退出并说清是哪一步**：
 
@@ -1349,7 +1350,7 @@ blob 按内容命名所以父链天然只存一份。五条命令分工：
 ┌──────────────────────┬──────┬────────┬─────────┬───────────┬────────┬─────────┬────────┬─────────┬──────────┬────────┐
 │ 项目                 │ prio │ build  │ install │ uninstall │  sudo  │ sudo-un │  pack  │ publish │ download │ layer  │
 ├──────────────────────┼──────┼────────┼─────────┼───────────┼────────┼─────────┼────────┼─────────┼──────────┼────────┤
-│ bootstrap            │ 5    │ 不支持 │ 已完成  │ 可执行    │ 不支持 │ 不支持  │ 可执行 │ 可执行  │ 未发布   │ 不支持 │
+│ wtool-base-tools     │ 5    │ 不支持 │ 已完成  │ 可执行    │ 不支持 │ 不支持  │ 可执行 │ 可执行  │ 未发布   │ 不支持 │
 │ os/ubuntu            │ 5    │ 不支持 │ 不支持  │ 不支持    │ 已完成 │ 可执行  │ 可执行 │ 可执行  │ 未发布   │ 不支持 │
 │ editor/astronvim_v5  │ 70   │ 可执行 │ 待产出  │ 未安装    │ 不支持 │ 不支持  │ 待产出 │ 可执行  │ 未发布   │ 可执行 │
 └──────────────────────┴──────┴────────┴─────────┴───────────┴────────┴─────────┴────────┴─────────┴──────────┴────────┘
@@ -1429,11 +1430,11 @@ wtool _complete <正在敲的词> [已经敲过的词...]   # 内部命令（下
 
 两份脚本：`completion/wtool.bash`（`complete -F`）、`completion/wtool.zsh`
 （`compdef`；compinit 没跑过时会自己跑一次，否则纯 zsh 下 Tab 只会补文件名）。
-它们由 `bootstrap` 项目的 `env.bash` / `env.zsh` 自动 source —— 也就是
+它们由 `wtool-base-tools` 项目的 `env.bash` / `env.zsh` 自动 source —— 也就是
 **装完 wtool、开个新 shell 就有**，不用手配。
 
 `tests/contract_test.sh` 场景 13 守着：`WTOOL_SUBCOMMANDS` 那 **18** 条命令都在候选里
-（实测 `sh bootstrap/wtool.sh _complete ''` 输出 18 行）、内部命令不在、
+（实测 `sh wtool-base-tools/wtool.sh _complete ''` 输出 18 行）、内部命令不在、
 前缀过滤对、每个命令的开关补得出来、两个脚本被 env 挂上、bash 里
 `complete -p wtool` 注册成功、zsh 里 `$_comps[wtool]` 是 `_wtool`。
 

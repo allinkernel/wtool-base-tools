@@ -1,5 +1,6 @@
 #!/bin/sh
-# wtool —— wtool 集合的引擎（唯一一份，住在 wtool-bootstrap 里）
+# wtool —— wtool 集合的引擎（唯一一份，住在 wtool-base-tools 里；2026-10-13 由
+# `wtool-bootstrap` / `bootstrap` 改名，ADR-0045 §7.1）
 #
 #   ── 日常三条 ───────────────────────────────────────────────
 #   wtool sudo-install <项目>... [--dry-run] [--force]
@@ -3229,7 +3230,7 @@ EOF
 
     _c "# wtool 环境变量 —— 由 \`wtool doctor\` 生成（原来那条 wtool env 已经并进来）"
     _c "# 立即生效： eval \"\$(wtool doctor --quiet)\""
-    _c "# 长期生效： 装 bootstrap 项目（cd bootstrap && ./install.sh），它会自动导出这些"
+    _c "# 长期生效： 装 wtool-base-tools 项目（cd wtool-base-tools && ./install.sh），它会自动导出这些"
     _c ""
     _c "# ── wtool 自身的位置 ──────────────────────────────"
     _c "# 引擎所在目录（含 wtool.sh / lib / templates）"

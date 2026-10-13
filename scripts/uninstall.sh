@@ -1,13 +1,14 @@
 #!/bin/sh
-# bootstrap 的卸载器 —— 撤销 ./install.sh 做的事。
+# wtool-base-tools 的卸载器 —— 撤销 ./install.sh 做的事。（2026-10-13 前这个项目叫 bootstrap）
 #
 # 只做可逆的事：
 #   1. 让 wtool 把各项目的 install 逆着做一遍（wtool uninstall）
 #   2. 收掉 install.sh 建的**两条入口链**（`$WTOOL_HOME/install.sh` →
 #      `wtool/install.sh` → `<项目>/scripts/install.sh`，ADR-0045 §1.8 职责①）
 #      —— 清单在账本里：`$WTOOL_HOME/var/installer/links.tsv`
-#   3. 顺手收掉**老位置** `$WTOOL_HOME/bootstrap` 的悬空链（D23 之后不再有它；
-#      只删软链，绝不动实体目录）
+#   3. 顺手收掉**老位置** `$WTOOL_HOME/bootstrap` 的悬空链（ADR-0045 D23 之前引擎
+#      自举到那儿、之后不再有它 —— **这是历史路径字面量，不是项目名**；只删软链，
+#      绝不动实体目录）
 #
 # 不碰系统依赖（apt 装的东西可能别的软件也在用），也不删工作区本身。
 #
@@ -26,8 +27,8 @@ done
 here=$(cd -- "$(dirname -- "$self")" && pwd)          # = <项目>/scripts
 proj=$(cd -- "$here/.." && pwd)                     # = <项目>
 
-say() { printf 'wtool-bootstrap: %s\n' "$*"; }
-die() { printf 'wtool-bootstrap: 错误: %s\n' "$*" >&2; exit 1; }
+say() { printf 'wtool-base-tools: %s\n' "$*"; }
+die() { printf 'wtool-base-tools: 错误: %s\n' "$*" >&2; exit 1; }
 
 HOME_DIR=${HOME:-/root}
 # `$WTOOL_HOME` = `.wtool` 根目录（ADR-0045 / D47）；没有才退回 `$HOME/.wtool`

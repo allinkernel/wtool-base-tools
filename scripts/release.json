@@ -1,9 +1,9 @@
 {
   "schema": 1,
-  "project": "bootstrap",
-  "repo": "allinkernel/wtool-bootstrap",
+  "project": "wtool-base-tools",
+  "repo": "allinkernel/wtool-base-tools",
   "tag": "ds_dev-2026-10-09",
-  "base_url": "https://github.com/allinkernel/wtool-bootstrap/releases/download/ds_dev-2026-10-09",
+  "base_url": "https://github.com/allinkernel/wtool-base-tools/releases/download/ds_dev-2026-10-09",
   "commit": "fa91244d6307bd44f4b46c6617a5a86b0511672c",
   "packed_at": "2026-10-09T15:32:00+0800",
   "published_at": "2026-10-09T15:33:46+08:00",
@@ -36,5 +36,5 @@
       "sha256": "293baf2f7fd911d30fe2b172688492d20cb987bf4a7a2c0df1df2c7bb63d7ef9"
     }
   ],
-  "how": "wtool download-release bootstrap   # 下到项目的 __release/（按本文件的 sha256 校验）\nwtool unpack-release bootstrap     # 拼分卷 + 把源码铺回项目目录\nwtool install bootstrap            # 装到本机"
+  "how": "wtool download-release wtool-base-tools   # 下到项目的 __release/（按本文件的 sha256 校验）\nwtool unpack-release wtool-base-tools     # 拼分卷 + 把源码铺回项目目录\nwtool install wtool-base-tools            # 装到本机"
 }

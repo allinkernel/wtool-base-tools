@@ -6,7 +6,7 @@
 #   ① 两条入口链的形状
 #        $WTOOL_HOME/install.sh → wtool/install.sh → <安装器项目>/scripts/install.sh
 #      （两条都是**相对**链 —— 两端都在 .wtool 里，整棵搬走也有效）
-#      项目名**不写死**：这里用的就是当前这份 bootstrap 的拷贝，改名那一块不用动这里
+#      项目名**不写死**：这里用的就是当前这份 wtool-base-tools 的拷贝，改名那一块不用动这里
 #   ①b 工作区根入口（install.sh / uninstall.sh）在"没有 repo 客户端"的工作区里补齐
 #   ② var/ 账本：installer/{actions.tsv,links.tsv}；**删掉 var/ 之后 check 必须非 0**
 #      （D42 的判据就是这一条：不许静默"一切对得上"）
@@ -55,7 +55,7 @@ trap 'rm -rf -- "$T"' EXIT INT TERM
 FIX_PATH="$(dirname -- "$(command -v python3)"):$(dirname -- "$(command -v git)"):/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 # ── 夹具 ────────────────────────────────────────────────────────────────
-# 安装器项目 = **当前这份 bootstrap 的拷贝**（只拷引擎真正要用的那些）。
+# 安装器项目 = **当前这份 wtool-base-tools 的拷贝**（只拷引擎真正要用的那些）。
 # 用拷贝而不是原地跑：install.sh 会往工作区根补入口链，别动真工作区。
 mkproj() {   # <项目目录>
     _p=$1; mkdir -p "$_p"
@@ -73,7 +73,7 @@ cat > "$T/live-default.xml" <<'XML'
 <manifest>
   <remote name="github" fetch=".."/>
   <default revision="main" remote="github"/>
-  <project path="bootstrap" name="allinkernel/wtool-bootstrap"/>
+  <project path="wtool-base-tools" name="allinkernel/wtool-base-tools"/>
 </manifest>
 XML
 mkdir -p "$T/mrepo"
@@ -103,25 +103,25 @@ mkfix() {   # <名字> <full|bundle|lone> → 打印夹具目录
     case $_mode in
         full)
             mkdir -p "$_d/ws"
-            mkproj "$_d/ws/bootstrap"
+            mkproj "$_d/ws/wtool-base-tools"
             mklive "$_d/ws" ;;
         bundle)
             # bundle / 目标机：没有工作区，`$WTOOL_HOME/wtool/` **就是**工作区根；
             # 三件套随包而来（default.xml 是**副本**，不是链）。
             mkdir -p "$_d/home/.wtool/wtool/.repo/manifests"
-            mkproj "$_d/home/.wtool/wtool/bootstrap"
+            mkproj "$_d/home/.wtool/wtool/wtool-base-tools"
             cp -- "$T/live-default.xml" "$_d/home/.wtool/wtool/.repo/manifests/default.xml"
             ( cd "$_d/home/.wtool/wtool/.repo/manifests" \
                 && sha256sum default.xml > default.xml.sha256 )
             printf '%s\n' "$LIVE_CID" \
                 > "$_d/home/.wtool/wtool/.repo/manifests/default.xml.commitid"
             # 种子包形态的入口（现在的 pack 侧就是这么建的：一条相对链指到项目脚本）
-            ln -s wtool/bootstrap/scripts/install.sh "$_d/home/.wtool/install.sh" ;;
+            ln -s wtool/wtool-base-tools/scripts/install.sh "$_d/home/.wtool/install.sh" ;;
         lone)
             # "只有 wtool 一份"（§1.10）：没有 .repo 元数据，也没有包内三件套
             mkdir -p "$_d/home/.wtool/wtool"
-            mkproj "$_d/home/.wtool/wtool/bootstrap"
-            ln -s wtool/bootstrap/scripts/install.sh "$_d/home/.wtool/install.sh" ;;
+            mkproj "$_d/home/.wtool/wtool/wtool-base-tools"
+            ln -s wtool/wtool-base-tools/scripts/install.sh "$_d/home/.wtool/install.sh" ;;
     esac
     printf '%s' "$_d"
 }
@@ -139,7 +139,7 @@ runfix() {   # <夹具> <入口> [参数…]
 newfix() {   # <名字> <模式> → 建夹具、跑一遍，把目录与退出码留给调用方
     F=$(mkfix "$1" "$2")
     if [ "$2" = full ]; then
-        ENTRY=$F/ws/bootstrap/scripts/install.sh
+        ENTRY=$F/ws/wtool-base-tools/scripts/install.sh
     else
         ENTRY=$F/home/.wtool/install.sh
     fi
@@ -162,14 +162,14 @@ chk "★.commitid 对得上 live 清单仓的 HEAD" "$(cat -- "$M/default.xml.co
 echo
 echo "== 2. 两条入口链 + 工作区根入口（职责①/①b）=="
 chk "★\$WTOOL_HOME/install.sh 解析到安装器项目里那个真脚本" \
-    "$(readlink -f -- "$B/install.sh")" "$F/ws/bootstrap/scripts/install.sh"
+    "$(readlink -f -- "$B/install.sh")" "$F/ws/wtool-base-tools/scripts/install.sh"
 chk "第一跳是**相对**链（wtool/install.sh）" "$(readlink -- "$B/install.sh")" "wtool/install.sh"
 chk "★第二跳也相对（<项目>/scripts/install.sh）" "$(readlink -- "$B/wtool/install.sh")" \
-    "bootstrap/scripts/install.sh"
+    "wtool-base-tools/scripts/install.sh"
 chk "① 的判据：L1 位置上那个 install.sh 可执行" \
-    "$([ -x "$B/wtool/bootstrap/scripts/install.sh" ] && echo yes || echo no)" "yes"
-chk "①b：工作区根 install.sh 补上了" "$(readlink -- "$F/ws/install.sh")" "bootstrap/scripts/install.sh"
-chk "①b：工作区根 uninstall.sh 补上了" "$(readlink -- "$F/ws/uninstall.sh")" "bootstrap/scripts/uninstall.sh"
+    "$([ -x "$B/wtool/wtool-base-tools/scripts/install.sh" ] && echo yes || echo no)" "yes"
+chk "①b：工作区根 install.sh 补上了" "$(readlink -- "$F/ws/install.sh")" "wtool-base-tools/scripts/install.sh"
+chk "①b：工作区根 uninstall.sh 补上了" "$(readlink -- "$F/ws/uninstall.sh")" "wtool-base-tools/scripts/uninstall.sh"
 
 echo
 echo "== 3. var/ 账本（职责②）=="
@@ -189,7 +189,7 @@ has "env.zsh 在" "$B/env.zsh"
 has "env.bash 在（两个 shell 都要有）" "$B/env.bash"
 chk "第一个 env 块就是安装器项目自己" \
     "$(awk '/^# --- wtool:/{sub(/^# --- wtool:/,""); sub(/ \(priority.*/,""); print; exit}' "$B/env.zsh")" \
-    "bootstrap"
+    "wtool-base-tools"
 
 echo
 echo "== 5. 自检（职责⑤）：**新进程 + 干净 PATH** 里 wtool 可用 =="
@@ -199,7 +199,7 @@ for _sh in zsh bash; do
         'WTOOL_HOME=$1; export WTOOL_HOME; . "$WTOOL_HOME/env.'"$_sh"'" >/dev/null 2>&1; printf "%s|%s" "$?" "$(command -v wtool)"' \
         _ "$B" 2>/dev/null || true)
     chk "★$_sh：source env.$_sh **返回 0** 且 wtool 可解析（新进程 + 干净 PATH）" \
-        "$_got" "0|$B/wtool/bootstrap/bin/wtool"
+        "$_got" "0|$B/wtool/wtool-base-tools/bin/wtool"
 done
 # ‼️ "source 返回 0"单独守一条：这条链的**末尾状态**会一路传回去 ——
 #    实测（容器验收）：`completion/wtool.zsh` 末行写成 `(( … )) && compdef …`，
@@ -261,7 +261,7 @@ else
     ok "没有 script 命令，跳过 pty 那条（其余照测）"
 fi
 # --write-rc：命令行上明确同意 → 非交互也写
-F9=$(mkfix wrc full); ENTRY9=$F9/ws/bootstrap/scripts/install.sh
+F9=$(mkfix wrc full); ENTRY9=$F9/ws/wtool-base-tools/scripts/install.sh
 RC9=$(runfix "$F9" "$ENTRY9" --write-rc)
 chk "--write-rc：非交互也写" "$RC9" "0"
 chk "--write-rc：最后两行" "$(tail -2 "$F9/home/.zshrc" | tr '\n' '|')" \
@@ -277,10 +277,10 @@ chk "★.sha256 没被覆盖（还是包内那份）" "$(cat -- "$M/default.xml.
     "$(cd -- "$M" && sha256sum default.xml)"
 chk ".commitid 没被覆盖" "$(cat -- "$M/default.xml.commitid")" "$LIVE_CID"
 has "★回归：bundle 的项目目录还在（L1 位置上就是实体，绝不能被备份走）" \
-    "$B/wtool/bootstrap/wtool.sh"
-hasnt "  也没有 .wtool-bak.* 残渣" "$(ls -d "$B/wtool"/bootstrap.wtool-bak.* 2>/dev/null | head -1 || echo /nonexistent)"
+    "$B/wtool/wtool-base-tools/wtool.sh"
+hasnt "  也没有 .wtool-bak.* 残渣" "$(ls -d "$B/wtool"/wtool-base-tools.wtool-bak.* 2>/dev/null | head -1 || echo /nonexistent)"
 chk "入口链在 bundle 里也归一成两跳" "$(readlink -- "$B/install.sh")" "wtool/install.sh"
-chk "  （第二跳）" "$(readlink -- "$B/wtool/install.sh")" "bootstrap/scripts/install.sh"
+chk "  （第二跳）" "$(readlink -- "$B/wtool/install.sh")" "wtool-base-tools/scripts/install.sh"
 
 echo
 echo "== 10. bundle：对不上 / 缺件 → **停手非 0** =="
@@ -316,32 +316,32 @@ has "env.zsh 照样建（wtool 自己能用）" "$B/env.zsh"
 echo
 echo "== 12. 六步各自的失败路径（D42：每一步失败都要非 0）=="
 F1=$(mkfix f1 full)          # ① 清单坏 → 引擎拒绝
-printf '<wtool schema="1"><export_bin src="src/x"/></wtool>\n' > "$F1/ws/bootstrap/wtool.xml"
-r=$(runfix "$F1" "$F1/ws/bootstrap/scripts/install.sh")
+printf '<wtool schema="1"><export_bin src="src/x"/></wtool>\n' > "$F1/ws/wtool-base-tools/wtool.xml"
+r=$(runfix "$F1" "$F1/ws/wtool-base-tools/scripts/install.sh")
 [ "$r" != 0 ] && ok "① 引擎装不上 → 非 0" || bad "① 失败了却返回 0"
 grep -q '① 失败' "$F1/log" && ok "  说的是第 ① 步" || bad "  没点出是第 ① 步"
 
 F2=$(mkfix f2 full)          # ② var/installer 是个普通文件
 mkdir -p "$F2/home/.wtool/var"; : > "$F2/home/.wtool/var/installer"
-r=$(runfix "$F2" "$F2/ws/bootstrap/scripts/install.sh")
+r=$(runfix "$F2" "$F2/ws/wtool-base-tools/scripts/install.sh")
 [ "$r" != 0 ] && ok "② 建不了账本 → 非 0" || bad "② 失败了却返回 0"
 grep -q '② 失败' "$F2/log" && ok "  说的是第 ② 步" || bad "  没点出是第 ② 步"
 
 F3=$(mkfix f3 full)          # ③ 满血工作区但 live 清单没了（工作区是坏的）
 rm -f "$F3/ws/.repo/manifests/default.xml"
-r=$(runfix "$F3" "$F3/ws/bootstrap/scripts/install.sh")
+r=$(runfix "$F3" "$F3/ws/wtool-base-tools/scripts/install.sh")
 [ "$r" != 0 ] && ok "③ 满血却没有 live 清单 → 非 0" || bad "③ 这种情况居然过了"
 grep -q '③ 失败' "$F3/log" && ok "  说的是第 ③ 步" || bad "  没点出是第 ③ 步"
 
 F4=$(mkfix f4 full)          # ④ env 汇总没出来
 mkdir -p "$F4/home/.wtool/env.bash"
-r=$(runfix "$F4" "$F4/ws/bootstrap/scripts/install.sh")
+r=$(runfix "$F4" "$F4/ws/wtool-base-tools/scripts/install.sh")
 [ "$r" != 0 ] && ok "④ env.{zsh,bash} 没出来 → 非 0" || bad "④ 失败了却返回 0"
 grep -q '④ 失败' "$F4/log" && ok "  说的是第 ④ 步" || bad "  没点出是第 ④ 步"
 
 F5=$(mkfix f5 full)          # ⑤ source 之后找不到 wtool
-rm -f "$F5/ws/bootstrap/bin/wtool"
-r=$(runfix "$F5" "$F5/ws/bootstrap/scripts/install.sh")
+rm -f "$F5/ws/wtool-base-tools/bin/wtool"
+r=$(runfix "$F5" "$F5/ws/wtool-base-tools/scripts/install.sh")
 [ "$r" != 0 ] && ok "⑤ 子进程里 wtool 不可用 → 非 0" || bad "⑤ 失败了却返回 0"
 grep -q '⑤ 失败' "$F5/log" && ok "  说的是第 ⑤ 步" || bad "  没点出是第 ⑤ 步"
 grep -q '找不到 wtool 命令' "$F5/log" && ok "  还指出了是哪一小步（不是笼统的失败）" \
@@ -349,12 +349,12 @@ grep -q '找不到 wtool 命令' "$F5/log" && ok "  还指出了是哪一小步�
 
 echo
 echo "== 13. D42 的判据：**删掉 var/ 之后 check 必须报错** =="
-F6=$(mkfix f6 full); ENTRY6=$F6/ws/bootstrap/scripts/install.sh; B6=$F6/home/.wtool
+F6=$(mkfix f6 full); ENTRY6=$F6/ws/wtool-base-tools/scripts/install.sh; B6=$F6/home/.wtool
 r=$(runfix "$F6" "$ENTRY6")
 chk "先装好，check 干净（0）" \
-    "$(env -i PATH="$FIX_PATH" HOME="$F6/home" WTOOL_HOME="$B6" sh "$F6/ws/bootstrap/wtool.sh" check >/dev/null 2>&1; echo $?)" "0"
+    "$(env -i PATH="$FIX_PATH" HOME="$F6/home" WTOOL_HOME="$B6" sh "$F6/ws/wtool-base-tools/wtool.sh" check >/dev/null 2>&1; echo $?)" "0"
 rm -rf -- "$B6/var"
-_out=$(env -i PATH="$FIX_PATH" HOME="$F6/home" WTOOL_HOME="$B6" sh "$F6/ws/bootstrap/wtool.sh" check 2>&1) && r=0 || r=$?
+_out=$(env -i PATH="$FIX_PATH" HOME="$F6/home" WTOOL_HOME="$B6" sh "$F6/ws/wtool-base-tools/wtool.sh" check 2>&1) && r=0 || r=$?
 [ "$r" != 0 ] && ok "★删掉 var/ → check 非 0（不再假绿）" || bad "删掉 var/ 还报一切对得上"
 case $_out in *"账本目录不见了"*) ok "  指出了是账本不见了，并给了重建办法" ;;
              *) bad "  没说清是账本不见了" "$_out" ;; esac
@@ -362,13 +362,13 @@ case $_out in *"账本目录不见了"*) ok "  指出了是账本不见了，并
 rm -rf -- "$B6/var"   # 上面已经删过了，这里恢复一套：重装一次再删链
 r=$(runfix "$F6" "$ENTRY6")
 rm -f -- "$B6/wtool/install.sh"
-_out=$(env -i PATH="$FIX_PATH" HOME="$F6/home" WTOOL_HOME="$B6" sh "$F6/ws/bootstrap/wtool.sh" check 2>&1) && r=0 || r=$?
+_out=$(env -i PATH="$FIX_PATH" HOME="$F6/home" WTOOL_HOME="$B6" sh "$F6/ws/wtool-base-tools/wtool.sh" check 2>&1) && r=0 || r=$?
 [ "$r" != 0 ] && ok "入口链没了 → check 非 0" || bad "入口链没了 check 还说对得上"
 case $_out in *"入口链"*) ok "  说的是入口链（职责①）" ;; *) bad "  没说清是哪条链" "$_out" ;; esac
 
 echo
 echo "== 14. --dry-run：一个字节都不写 =="
-F7=$(mkfix f7 full); ENTRY7=$F7/ws/bootstrap/scripts/install.sh
+F7=$(mkfix f7 full); ENTRY7=$F7/ws/wtool-base-tools/scripts/install.sh
 r=$(runfix "$F7" "$ENTRY7" --dry-run)
 chk "--dry-run 退出码 0" "$r" "0"
 hasnt "  \$HOME/.wtool 没被建" "$F7/home/.wtool"
@@ -377,18 +377,18 @@ grep -q '\[dry-run\]' "$F7/log" && ok "  打了要做什么" || bad "  什么都
 
 echo
 echo "== 15. uninstall.sh：收掉 install.sh 建的东西（人手动那条路）=="
-F8=$(mkfix f8 full); ENTRY8=$F8/ws/bootstrap/scripts/install.sh; B8=$F8/home/.wtool
+F8=$(mkfix f8 full); ENTRY8=$F8/ws/wtool-base-tools/scripts/install.sh; B8=$F8/home/.wtool
 r=$(runfix "$F8" "$ENTRY8")
 chk "先装好" "$r" "0"
 _u=0
-env -i PATH="$FIX_PATH" HOME="$F8/home" sh "$F8/ws/bootstrap/scripts/uninstall.sh" \
+env -i PATH="$FIX_PATH" HOME="$F8/home" sh "$F8/ws/wtool-base-tools/scripts/uninstall.sh" \
     > "$F8/un.log" 2>&1 || _u=$?
 chk "uninstall.sh 退出码 0" "$_u" "0"
 hasnt "两条入口链都收掉了（\$WTOOL_HOME/install.sh）" "$B8/install.sh"
 hasnt "两条入口链都收掉了（\$WTOOL_HOME/wtool/install.sh）" "$B8/wtool/install.sh"
 hasnt "var/installer 的账也收掉了" "$B8/var/installer"
-has "★工作区里那份项目一个字节没动（卸载不删源码）" "$F8/ws/bootstrap/wtool.sh"
-hasnt "引擎把 L1 也逆放掉了（那是它的账）" "$B8/wtool/bootstrap"
+has "★工作区里那份项目一个字节没动（卸载不删源码）" "$F8/ws/wtool-base-tools/wtool.sh"
+hasnt "引擎把 L1 也逆放掉了（那是它的账）" "$B8/wtool/wtool-base-tools"
 grep -q '已删除' "$F8/un.log" && ok "说了收掉了什么" || bad "没说收掉了什么" "$(tail -5 "$F8/un.log")"
 grep -q 'manifest 三件套' "$F8/un.log" && ok "说清了三件套不收（那不是安装器的账）" \
     || bad "没说清三件套的下场"

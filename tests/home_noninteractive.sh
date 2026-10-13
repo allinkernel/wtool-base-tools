@@ -22,7 +22,7 @@ export HOME=/root
 echo "=== 非交互（< /dev/null + timeout 20） ==="
 echo "  stdin 是 tty 吗 : $([ -t 0 ] && echo yes || echo no)"
 _start=$(date +%s)
-WTOOL_ROOT=/work/ws timeout 20 sh /work/bootstrap/wtool.sh install editor/demo > /tmp/ni.log 2>&1 < /dev/null
+WTOOL_ROOT=/work/ws timeout 20 sh /work/wtool-base-tools/wtool.sh install editor/demo > /tmp/ni.log 2>&1 < /dev/null
 _rc=$?
 _end=$(date +%s)
 echo "  退出码=$_rc  耗时=$((_end - _start))s  （124 = 超时 = 挂了）"
@@ -31,7 +31,7 @@ echo "  rc 里那两行 : $(grep -c 'WTOOL_HOME' /root/.zshrc || true)  ← 应�
 echo
 echo "=== 管道输入（printf | wtool install） ==="
 _start=$(date +%s)
-printf '' | WTOOL_ROOT=/work/ws timeout 20 sh /work/bootstrap/wtool.sh install editor/demo > /tmp/ni2.log 2>&1
+printf '' | WTOOL_ROOT=/work/ws timeout 20 sh /work/wtool-base-tools/wtool.sh install editor/demo > /tmp/ni2.log 2>&1
 _rc=$?
 _end=$(date +%s)
 echo "  退出码=$_rc  耗时=$((_end - _start))s"
@@ -44,7 +44,7 @@ echo "=== bash / dash 也各来一次（两个 shell 都不许挂） ==="
 for sh in bash dash; do
   if command -v "$sh" >/dev/null 2>&1; then
     _start=$(date +%s)
-    WTOOL_ROOT=/work/ws timeout 20 "$sh" /work/bootstrap/wtool.sh install editor/demo > /tmp/ni.$sh.log 2>&1 < /dev/null
+    WTOOL_ROOT=/work/ws timeout 20 "$sh" /work/wtool-base-tools/wtool.sh install editor/demo > /tmp/ni.$sh.log 2>&1 < /dev/null
     _rc=$?
     _end=$(date +%s)
     echo "  $sh: 退出码=$_rc 耗时=$((_end - _start))s"
