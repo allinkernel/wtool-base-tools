@@ -755,8 +755,12 @@ env_git_ownership() {
     command -v git >/dev/null 2>&1 || return 0
     # ⚠️ 别拿**工作区根目录**去试：它是 repo 客户端，**不是 git 仓库**
     #    （`git -C /wtool rev-parse` 必然失败）。要试就试里面某个项目。
+    # ‼️ **不写死项目名**（原来是 `"$WTOOL_WS_DIR/bootstrap"` 打头）：安装器项目
+    #    改名（bootstrap → wtool-base-tools）之后那个候选就永远不存在了，虽然下面
+    #    的 `*/` 兜底还能兜住，但"先试哪个"这件事不该靠一个会过期的名字。
+    #    调用方（install.sh）已经把项目目录喂进 `WTOOL_WS_DIR` 的同级，扫一遍就行。
     _go_probe=""
-    for _go_cand in "$WTOOL_WS_DIR/bootstrap" "$WTOOL_WS_DIR"/*/; do
+    for _go_cand in "$WTOOL_WS_DIR"/*/ "$WTOOL_WS_DIR"/*/*/; do
         [ -d "$_go_cand/.git" ] || [ -f "$_go_cand/.git" ] || continue
         _go_probe=$_go_cand
         break
