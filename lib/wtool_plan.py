@@ -1642,7 +1642,10 @@ def plan_install(args, scratch):
 
     # ---- 磁盘冲突：落点已被别的东西占着（不是软链 / 软链指向别处）----------
     l1 = l1_path(home, project_id)
-    dests = [(l1, project_root)]
+    # bundle / 目标机：`l1` 就是项目目录本身（见下面 1) 那段）—— 那个"落点"
+    # 天然存在、天然不是软链，不该报"已存在且不是软链"，更不该被备份走。
+    l1_is_self = os.path.abspath(l1) == os.path.abspath(project_root)
+    dests = [] if l1_is_self else [(l1, project_root)]
     for entry in entries:
         for dest, _item, src in getattr(entry, "links", ()) or ():
             dests.append((dest, l2_target(project_id, src)))
@@ -1680,7 +1683,19 @@ def plan_install(args, scratch):
     # 1) L1「项目接入链」：<dot>/wtool/<项目路径> → 工作区里那个项目目录
     #    **绝对**路径（D11：断了能一眼看懂指哪）+ **按项目惰性创建**（D5：
     #    只建装过的那个项目，不是一次把整棵工作区都链进来）。
-    add_link("dir", l1, project_root)
+    #
+    #    ‼️ **bundle / 目标机（D45）**：那种机器上没有工作区，`$WTOOL_HOME/wtool/`
+    #    **就是**工作区根 —— 于是 `l1` 和 `project_root` 是**同一个路径**，
+    #    L1 位置上本来就是**实体目录**（D45："L1 必须实体化"）。这里没有"链"
+    #    可建：真去建就是自己指自己，而且 `wt_link_create` 见到"已存在且不是
+    #    软链"会先把它**备份走**（实测：整个项目被改名成
+    #    `<项目>.wtool-bak.<时间戳>`，L1 变成自指链，install 当场崩）
+    #    —— 所以这一条只**登记**，不建链、不进 journal（没有可逆的东西）。
+    if l1_is_self:
+        rows.append(("reg", "dir", l1, project_root, "", ""))
+        owned.add(os.path.normpath(l1))
+    else:
+        add_link("dir", l1, project_root)
 
     # 2) L2「项目导出链」：<dot>/usr/<part>/<条目> → ../../wtool/<项目>/__output/…
     #    **相对**目标（两端都在 .wtool 里，tar 走之后依然有效，D45）。

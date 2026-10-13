@@ -231,6 +231,19 @@ wt_journal_owns() {
 
 wt_link_create() {
     _dest=$1; _target=$2
+    # ‼️ 落点和目标**本来就是同一个东西**（bundle / 目标机：`$WTOOL_HOME/wtool/<项目>`
+    #    就是项目目录本身，见 wtool_plan.py 的 plan_install ①）→ 没有链可建，
+    #    直接返回。**这一条必须排在最前**：下面的 `-e` 分支会把它当"用户的真实
+    #    文件"，`--force` 时**备份走**（实测：整个项目被改名成
+    #    `<项目>.wtool-bak.<时间戳>`，L1 变成自己指自己的链，install 当场崩）。
+    #    判据用 `readlink -f`：文件和目录都适用，两边都得真存在。
+    if [ -e "$_dest" ] && [ ! -L "$_dest" ]; then
+        _dest_real=$(readlink -f -- "$_dest" 2>/dev/null || true)
+        _target_real=$(readlink -f -- "$_target" 2>/dev/null || true)
+        if [ -n "$_dest_real" ] && [ "$_dest_real" = "$_target_real" ]; then
+            return 0
+        fi
+    fi
     if [ -L "$_dest" ]; then
         _cur=$(readlink -- "$_dest")
         if [ "$_cur" = "$_target" ]; then
