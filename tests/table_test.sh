@@ -47,9 +47,12 @@ trap 'rm -rf -- "$T"' EXIT INT TERM
 WS="$T/ws"
 S="$T/state"
 # 第 3 节要**真跑** wtool install —— 它会往这两个临时目录里铺东西（这正是要验的）
-export WTOOL_HOME="$T/home" WTOOL_STATE="$S" WTOOL_ROOT="$WS"
-mkdir -p "$WTOOL_HOME" "$S" "$WS"
-printf '# 用户自己的 zshrc\nsetopt auto_cd\n' > "$WTOOL_HOME/.zshrc"
+# 新口径：WTOOL_HOME 就是 .wtool 根（$S 是它下面的账本 var/）
+export WTOOL_HOME="$T/home/.wtool" WTOOL_STATE="$T/home/.wtool/var" \
+    WTOOL_MANAGED_HOME="$T/home" WTOOL_LOG_ROOT="$T/logs" WTOOL_ROOT="$WS"
+S="$WTOOL_STATE"
+mkdir -p "$WTOOL_HOME" "$S" "$WS" "$WTOOL_MANAGED_HOME"
+printf '# 用户自己的 zshrc\nsetopt auto_cd\n' > "$WTOOL_MANAGED_HOME/.zshrc"
 
 # 四种格子的标签（带颜色）。颜色错了也是错，所以逐个写死。
 C_NONE=$(printf '\033[31m不支持\033[0m')
@@ -242,7 +245,7 @@ else
 fi
 chk "★装过之后格子变 已完成（绿）" \
     "$(cell scripted 4)" "$C_DONE"
-[ -d "$WTOOL_HOME/.wtool/wtool/scripted" ] \
+[ -d "$WTOOL_HOME/wtool/scripted" ] \
     && ok "东西真的铺进了临时 \$WTOOL_HOME（L1 接入链在）" \
     || bad "临时 \$WTOOL_HOME 里没有 L1 链（install 没真跑？）"
 

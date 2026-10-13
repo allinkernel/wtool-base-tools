@@ -35,7 +35,10 @@ trap 'rm -rf -- "$T"' EXIT INT TERM
 newhome() {
     H=$(mktemp -d "$T/home.XXXXXX")
     printf '# 用户自己的 zshrc\nsetopt auto_cd\n' > "$H/.zshrc"
-    export WTOOL_HOME="$H" WTOOL_STATE="$H.state"
+    # 新口径：WTOOL_HOME 就是 .wtool 根；账本在 var/ 下。
+    export WTOOL_HOME="$H/.wtool" WTOOL_STATE="$H/.wtool/var"
+    export WTOOL_MANAGED_HOME="$H"
+    export WTOOL_LOG_ROOT="$T/logs"
     export WTOOL_ROOT="$T/ws"
 }
 mkproj() {   # <相对路径>：建项目目录 + git 仓库（install 要求干净仓库）
@@ -106,19 +109,19 @@ hasnt "★<generate> 本轮不执行（__output/fzf.zsh 没被生成）" "$P/__o
 
 "$WT" install "$P" > "$T/i1.log" 2>&1 || bad "install 执行" "$(cat "$T/i1.log")"
 
-L1="$WTOOL_HOME/.wtool/wtool/tools/demo"
-L2="$WTOOL_HOME/.wtool/usr/bin/rg"
+L1="$WTOOL_HOME/wtool/tools/demo"
+L2="$WTOOL_HOME/usr/bin/rg"
 [ -L "$L1" ] && ok "L1 建出来了" || bad "L1 没建出来"
 case "$(readlink "$L1" 2>/dev/null)" in
     /*) ok "L1 指向**绝对**路径（D11）" ;;
     *)  bad "L1 不是绝对路径" "$(readlink "$L1" 2>/dev/null)" ;;
 esac
 chk "L1 指向工作区里那个项目目录" "$P" "$(readlink "$L1" 2>/dev/null)"
-[ -d "$WTOOL_HOME/.wtool/wtool" ] && [ ! -L "$WTOOL_HOME/.wtool/wtool" ] \
+[ -d "$WTOOL_HOME/wtool" ] && [ ! -L "$WTOOL_HOME/wtool" ] \
     && ok "\$WTOOL_HOME/wtool 是实体目录（L1 一条一链，D5）" \
     || bad "\$WTOOL_HOME/wtool 不是实体目录"
 # 惰性：只建装过的那个项目
-[ -L "$WTOOL_HOME/.wtool/wtool/tools" ] && bad "L1 把父目录也做成了链" \
+[ -L "$WTOOL_HOME/wtool/tools" ] && bad "L1 把父目录也做成了链" \
     || ok "L1 的父目录是实体目录（只有项目那一条是链）"
 
 [ -L "$L2" ] && ok "L2（export_bin name=rg）建出来了" || bad "L2 没建出来"
@@ -126,17 +129,17 @@ chk "L2 指向**相对**路径（D45：两端都在 .wtool 里）" \
     "../../wtool/tools/demo/__output/rg-dbg" "$(readlink "$L2" 2>/dev/null)"
 check_content=$(cat "$L2" 2>/dev/null || true)
 chk "顺着 L2 读得到内容" "rgbin" "$check_content"
-[ -e "$WTOOL_HOME/.wtool/usr/share" ] && [ ! -L "$WTOOL_HOME/.wtool/usr/share" ] \
+[ -e "$WTOOL_HOME/usr/share" ] && [ ! -L "$WTOOL_HOME/usr/share" ] \
     && ok "usr/share 是**实体目录**（多项目共享，D7）" \
     || bad "usr/share 不是实体目录"
 chk "export_usr 逐条目建了 usr/bin/fzf" \
     "../../wtool/tools/demo/__output/usr/bin/fzf" \
-    "$(readlink "$WTOOL_HOME/.wtool/usr/bin/fzf" 2>/dev/null)"
+    "$(readlink "$WTOOL_HOME/usr/bin/fzf" 2>/dev/null)"
 chk "export_usr 把目录条目也建了链（usr/share/man）" \
     "../../wtool/tools/demo/__output/usr/share/man" \
-    "$(readlink "$WTOOL_HOME/.wtool/usr/share/man" 2>/dev/null)"
+    "$(readlink "$WTOOL_HOME/usr/share/man" 2>/dev/null)"
 chk "usr/bin 下两条并存" "fzf rg" \
-    "$(ls "$WTOOL_HOME/.wtool/usr/bin" 2>/dev/null | tr '\n' ' ' | sed 's/ $//')"
+    "$(ls "$WTOOL_HOME/usr/bin" 2>/dev/null | tr '\n' ' ' | sed 's/ $//')"
 
 # 幂等：第二次 install 一个字都不用改
 _s1=$(find "$WTOOL_HOME" -mindepth 1 -printf '%y %p -> %l\n' | LC_ALL=C sort)
@@ -224,8 +227,8 @@ gitci "$P"
 "$WT" install "$P" > /dev/null 2>&1 || bad "install"
 
 J="$WTOOL_STATE/tools/ledger/journal.tsv"
-L1="$WTOOL_HOME/.wtool/wtool/tools/ledger"
-L2="$WTOOL_HOME/.wtool/usr/bin/led"
+L1="$WTOOL_HOME/wtool/tools/ledger"
+L2="$WTOOL_HOME/usr/bin/led"
 grep -q "^link	dir	$L1	$P	" "$J" && ok "★L1 进了账本（link dir <L1> <项目目录>）" \
     || bad "★L1 没进账本" "$(cat "$J")"
 grep -q "^link	file	$L2	" "$J" && ok "L2 也进了账本" || bad "L2 没进账本" "$(cat "$J")"
@@ -307,7 +310,7 @@ case $_out in
 esac
 chk "冲突之后落点还是 A 的（没被改坏）" \
     "../../wtool/tools/musl-bins/__output/usr/bin/fzf" \
-    "$(readlink "$WTOOL_HOME/.wtool/usr/bin/fzf" 2>/dev/null)"
+    "$(readlink "$WTOOL_HOME/usr/bin/fzf" 2>/dev/null)"
 _rc=0
 _out=$("$WT" install "$B" --takeover 2>&1) || _rc=$?
 [ "$_rc" != 0 ] && ok "★没有 --takeover 这个口子（敲了就是不认识）" || bad "--takeover 被认了"
@@ -326,12 +329,12 @@ printf 'export T=1\n' > "$C/env.zsh"
 wxml "$C" source '<zshrc src="env.zsh"/>'
 gitci "$C"
 "$WT" install "$C" > "$T/i5.log" 2>&1 || bad "① 类 install" "$(cat "$T/i5.log")"
-[ -d "$WTOOL_HOME/.wtool/wtool/terminal/tmux" ] && ok "① 类有 L1（项目在哪）" \
+[ -d "$WTOOL_HOME/wtool/terminal/tmux" ] && ok "① 类有 L1（项目在哪）" \
     || bad "① 类没有 L1"
-hasnt "① 类不建任何 L2（usr/bin 下没有它的东西）" "$WTOOL_HOME/.wtool/usr/bin/tmux.conf"
+hasnt "① 类不建任何 L2（usr/bin 下没有它的东西）" "$WTOOL_HOME/usr/bin/tmux.conf"
 # 顺着 L1 读得到源码本身 —— 这就是 ① 类"源码即产物"的判据
 chk "顺着 L1 读到源码文件" "set -g mouse on" \
-    "$(cat "$WTOOL_HOME/.wtool/wtool/terminal/tmux/tmux.conf" 2>/dev/null)"
+    "$(cat "$WTOOL_HOME/wtool/terminal/tmux/tmux.conf" 2>/dev/null)"
 
 # --------------------------------------------------------------------------
 printf '\nexport_test: PASS %d  FAIL %d\n' "$pass" "$fail"

@@ -80,7 +80,8 @@ except Exception:
 wt() {
     _w_bin=$1; _w_root=$2; _w_state=$3; shift 3
     PATH="$_w_bin:$PATH" WTOOL_ROOT="$_w_root" WTOOL_STATE="$_w_state" \
-        WTOOL_HOME="$T/home" "$WT" "$@"
+        WTOOL_HOME="$T/home/.wtool" WTOOL_MANAGED_HOME="$T/home" \
+        WTOOL_LOG_ROOT="$T/logs" "$WT" "$@"
 }
 
 # 把小项目塞进 git（脏检查要求项目是干净仓库；__release/ 和 __output/ 是生成物，忽略）

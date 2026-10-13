@@ -33,7 +33,9 @@ trap 'rm -rf -- "$T"' EXIT INT TERM
 
 # 环境里继承来的 WTOOL_* 会指到真 $HOME / 真工作区，先清掉
 for _v in $(env | grep -o '^WTOOL_[A-Za-z_]*'); do unset "$_v"; done
-export WTOOL_ROOT="$T/ws" WTOOL_STATE="$T/state" WTOOL_HOME="$T/home"
+export WTOOL_ROOT="$T/ws" WTOOL_HOME="$T/home/.wtool" \
+    WTOOL_STATE="$T/home/.wtool/var" WTOOL_MANAGED_HOME="$T/home" \
+    WTOOL_LOG_ROOT="$T/logs"
 mkdir -p "$WTOOL_ROOT/terminal/demo/scripts" "$WTOOL_ROOT/terminal/demo/__output/ubuntu_24.04" \
          "$WTOOL_STATE" "$WTOOL_HOME" "$T/bin"
 

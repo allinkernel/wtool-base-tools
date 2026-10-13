@@ -39,7 +39,9 @@ chk()  { [ "$2" = "$3" ] && ok "$1" || bad "$1" "期望 [$3]  实际 [$2]"; }
 T=$(mktemp -d "${TMPDIR:-/tmp}/wtool-dbuild.XXXXXX")
 trap 'rm -rf -- "$T"' EXIT INT TERM
 for _v in $(env | grep -o '^WTOOL_[A-Za-z_]*'); do unset "$_v"; done
-export WTOOL_ROOT="$T/ws" WTOOL_STATE="$T/state" WTOOL_HOME="$T/home"
+export WTOOL_ROOT="$T/ws" WTOOL_HOME="$T/home/.wtool" \
+    WTOOL_STATE="$T/home/.wtool/var" WTOOL_MANAGED_HOME="$T/home" \
+    WTOOL_LOG_ROOT="$T/logs"
 mkdir -p "$WTOOL_STATE" "$WTOOL_HOME" "$T/bin" "$T/fix" "$T/diff" "$T/fakeroot"
 
 P="$WTOOL_ROOT/editor/demo"

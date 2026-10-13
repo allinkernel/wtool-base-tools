@@ -32,8 +32,9 @@ chk()   { [ "$2" = "$3" ] && ok "$1" || bad "$1" "期望 [$3]  实际 [$2]"; }
 py()  { python3 -W ignore "$@"; }
 T=$(mktemp -d "${TMPDIR:-/tmp}/wtool-rel.XXXXXX")
 trap 'rm -rf -- "$T"' EXIT INT TERM
-export WTOOL_HOME="$T/home" WTOOL_STATE="$T/state"
-mkdir -p "$WTOOL_HOME"
+export WTOOL_HOME="$T/home/.wtool" WTOOL_STATE="$T/home/.wtool/var" \
+    WTOOL_MANAGED_HOME="$T/home" WTOOL_LOG_ROOT="$T/logs"
+mkdir -p "$WTOOL_HOME" "$WTOOL_MANAGED_HOME"
 
 # ⚠️ 下面所有 fixture 都声明 `kind="docker"`（ADR-0045 / D49 的类型门禁）：
 #    `pack-release` / `unpack-release` 是**非离线族**，只对 ③ 类有意义 ——

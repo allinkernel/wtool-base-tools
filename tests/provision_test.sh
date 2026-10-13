@@ -20,8 +20,10 @@ newenv() {
     # 注意：必须在当前 shell 里调用（不能写成 newenv，子 shell 会丢掉 export）
     H=$(mktemp -d "${TMPDIR:-/tmp}/wtool-prov.XXXXXX")
     mkdir -p "$H/home" "$H/prefix" "$H/src" "$H/upstream" "$H/ws"
-    export WTOOL_HOME="$H/home"
-    export WTOOL_STATE="$H/state"
+    export WTOOL_HOME="$H/home/.wtool"
+    export WTOOL_STATE="$H/home/.wtool/var"
+    export WTOOL_MANAGED_HOME="$H/home"
+    export WTOOL_LOG_ROOT="$H/logs"
     # 项目都建在工作区里：**项目身份 = 它相对工作区根的路径**（ADR-0037）。
     # 下面断言里那些 `state/os/test/...` 就是这么来的。
     export WTOOL_ROOT="$H/ws"

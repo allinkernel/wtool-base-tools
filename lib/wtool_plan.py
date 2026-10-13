@@ -3221,20 +3221,36 @@ def render_env_file(home, state, shell, exclude=""):
     """
     home = os.path.abspath(home)
     blocks = collect_env_blocks(state, shell, exclude=exclude)
-    if not blocks:
+    # 这个 shell 一个项目的块都没有，但**只要还有项目装着**，两个文件就都要在
+    # （D42：`install.sh` 的职责④是"建 env.{zsh,bash}"）。理由是最难查的半装状态：
+    # 公司机器上没有 zsh 时，用户照着文档写 `source …/env.bash`，文件不存在
+    # → `source: No such file`，或者（更坏）被 rc 里的 `-f` 判据静默跳过，
+    # 敲 `wtool` 却是 command not found。没有块的那个文件里**只有校验片段**，
+    # 照样能一眼看出"该在你的 rc 里写哪两行"。
+    if not blocks and not _installed_ids(state, exclude, home):
         return None
     parts = [ENV_AGG_HEADER]
     for _prio, pid, text in blocks:
         src = os.path.join(home, STATE_VAR_SUBDIR, pid, "env.%s" % shell)
         rel = os.path.relpath(src, home)
         parts.append("")
-        parts.append("# >>> wtool:%s >>> (priority %d)" % (pid, _prio))
-        parts.append('if [ -f "${WTOOL_HOME}/%s" ]; then . "${WTOOL_HOME}/%s"; fi'
-                     % (rel, rel))
-        parts.append("# <<< wtool:%s <<<" % pid)
+        # ‼️ 这一行**故意不写成** `# >>> wtool:<项目> >>>`：那个形状是**受管块的
+        #    开始标记**（`BLOCK_BEGIN_RE` / `find_blocks` 认它）。汇总文件里若也
+        #    出现同形的行，`check` 的"旧块要迁移"和任何按标记切块的代码都会把它
+        #    数进去（实测：两个项目 → 汇总里 4 个"开始标记"，顺序断言跟着翻倍）。
+        parts.append("# --- wtool:%s (priority %d) ---" % (pid, _prio))
+        # ① 引擎给的那几个变量（WTOOL_PROJECT_ID / PROJECT_DIR / PROJECT_ROOT）
+        #    + source 项目**自己**声明的那份 env 文件（`wtool.xml` 的 src=）——
+        #    块文件本身就是这么拼的（见 render_block），原样并进来。
         body = text.rstrip("\n")
         if body:
             parts.append(body)
+        # ② 再 source 一次**账本里的那份副本**：项目里的 env 文件被删掉/改名时，
+        #    已经装过的那份内容还在（这条兜底让"装完就能用"不依赖磁盘上那份源码）。
+        parts.append("# 兜底：账本里的那份副本（项目里的 env 文件不在时也生效）")
+        parts.append('if [ -f "${WTOOL_HOME}/%s" ]; then . "${WTOOL_HOME}/%s"; fi'
+                     % (rel, rel))
+        parts.append("# <<< wtool:%s <<<" % pid)
     return "\n".join(ENV_CHECK_LINES + parts).rstrip("\n") + "\n"
 
 

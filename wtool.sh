@@ -1829,12 +1829,35 @@ cmd_uninstall() {
             rmdir -- "$_p" 2>/dev/null || break
             _p=$(dirname -- "$_p")
         done
-        # registry 空了就删掉；state 目录空了也删掉，做到"装完卸完不留痕"
+        # registry 空了就删掉；账本目录、`$WTOOL_HOME` 空了也删掉，
+        # 做到"装完卸完不留痕"
         if [ -f "$WTOOL_REGISTRY" ] && [ ! -s "$WTOOL_REGISTRY" ]; then
             rm -f -- "$WTOOL_REGISTRY"
         fi
+        # ‼️ 顺序有讲究：第 4.5 步的 wt_env_sync **也写文件**（它每次都重算
+        #    `env.{zsh,bash}`，而 wt_atomic_write 会顺手往 `generated.tsv`
+        #    记一笔）—— 所以"哪些文件是 wtool 生成的"那张表必须**最后**收，
+        #    否则清完又冒出来，`$WTOOL_STATE` 永远删不掉、`$WTOOL_HOME` 跟着留壳。
+        #    （实测：pairing 场景 1/7 的"卸完与装前一致"就是因为这个红的。）
+        #
+        # ‼️ 这里**不能写 `[ -f x ] && rm -f x`**：文件不在时整行退出码是 1，
+        #    `set -e` 会**当场终止脚本**，后面两句永远跑不到 —— 表现成
+        #    "空目录删不掉"（实测踩过，就是这一处）。写成 if 才安全。
+        if [ -f "$WTOOL_STATE/generated.tsv" ]; then
+            rm -f -- "$WTOOL_STATE/generated.tsv"
+        fi
+        # 写锁（`$WTOOL_STATE/.lock` 是**目录当锁**）到命令结束才释放，
+        # 所以这一刻它还占着账本目录 —— 不先摘掉，"账本空了"永远不成立。
+        # 我们正持有它（wt_state_lock 校验过 pid），摘掉是安全的。
+        if [ -d "$WTOOL_STATE/.lock" ] && [ "${WTOOL_LOCK_OWNER:-}" = "$$" ]; then
+            rm -rf -- "$WTOOL_STATE/.lock"
+        fi
         if [ -d "$WTOOL_STATE" ] && [ -z "$(ls -A -- "$WTOOL_STATE" 2>/dev/null)" ]; then
             rmdir -- "$WTOOL_STATE" 2>/dev/null || true
+        fi
+        # 账本空了、`$WTOOL_HOME` 也空了 → 它自己收走（还有项目时装着不动）。
+        if [ -d "$WTOOL_HOME" ] && [ -z "$(ls -A -- "$WTOOL_HOME" 2>/dev/null)" ]; then
+            rmdir -- "$WTOOL_HOME" 2>/dev/null || true
         fi
     fi
     wt_info "uninstall 完成"

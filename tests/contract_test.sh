@@ -36,7 +36,11 @@ newhome() {
     printf '# 用户自己的 zshrc\nsetopt auto_cd\nexport MY_STUFF=1\n' > "$H/.zshrc"
     # state 每个场景一份：共用一份的话，前面场景留下的 state 会让
     # "还有没有项目装着"算错（~/usr 的生命周期那一场就是这么被坑的）
-    export WTOOL_HOME="$H" WTOOL_STATE="$H.state"
+    # 新口径（ADR-0045 / D47）：WTOOL_HOME **就是** .wtool 根；账本在它下面 var/。
+    # WTOOL_MANAGED_HOME = 假 $HOME（~/usr 那条链和 rc 落点靠它）。
+    export WTOOL_HOME="$H/.wtool" WTOOL_STATE="$H/.wtool/var"
+    export WTOOL_MANAGED_HOME="$H"
+    export WTOOL_LOG_ROOT="$T/logs"
     export WTOOL_ROOT="$T/ws"
 }
 mkproj() {   # <相对路径>（这个路径**就是**项目身份，ADR-0037）
@@ -79,8 +83,8 @@ cat > "$P/scripts/install.sh" <<'EOF'
 #!/bin/sh
 if [ "${1:-}" = "--uninstall" ]; then
     # 卸载时要**先**拆完 L1/L2 链才轮到脚本（§4.2 的 ②' → ①'）
-    if [ -e "$WTOOL_HOME/.wtool/usr/bin/fzf" ] \
-       || [ -e "$WTOOL_HOME/.wtool/wtool/terminal/tmux" ]; then
+    if [ -e "$WTOOL_HOME/usr/bin/fzf" ] \
+       || [ -e "$WTOOL_HOME/wtool/terminal/tmux" ]; then
         echo "links-still-there" > "$WTOOL_PROJECT_DIR/order-uninstall.txt"
     else
         echo "links-gone" > "$WTOOL_PROJECT_DIR/order-uninstall.txt"
@@ -88,8 +92,8 @@ if [ "${1:-}" = "--uninstall" ]; then
     exit 0
 fi
 # ① 类才"源码即产物"；这里是 ②③ 类的形状：项目脚本还能往影子 HOME 铺自己的东西
-mkdir -p "$WTOOL_HOME/.wtool/.config/foo"
-printf 'payload\n' > "$WTOOL_HOME/.wtool/.config/foo/foo.conf"
+mkdir -p "$WTOOL_HOME/.config/foo"
+printf 'payload\n' > "$WTOOL_HOME/.config/foo/foo.conf"
 EOF
 cat > "$P/wtool.xml" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -110,22 +114,22 @@ chk "新标签的清单 validate 通过" "$_rc" "0"
 "$WT" install "$P" > "$T/i1.log" 2>&1 || bad "install 执行" "$(cat "$T/i1.log")"
 
 # ---- L1「项目接入链」：<dot>/wtool/<项目路径> → 工作区项目（**绝对**）--------
-L1="$WTOOL_HOME/.wtool/wtool/terminal/tmux"
+L1="$WTOOL_HOME/wtool/terminal/tmux"
 [ -L "$L1" ] && ok "L1 链建出来了" || bad "L1 链没建出来"
 check "L1 指向工作区里那个项目（绝对路径）" "$P" "$(readlink "$L1" 2>/dev/null)"
 case "$(readlink "$L1" 2>/dev/null)" in
     /*) ok "L1 是**绝对**链（D11）" ;;
     *)  bad "L1 不是绝对链" ;;
 esac
-[ -d "$WTOOL_HOME/.wtool/wtool" ] && [ ! -L "$WTOOL_HOME/.wtool/wtool" ] \
+[ -d "$WTOOL_HOME/wtool" ] && [ ! -L "$WTOOL_HOME/wtool" ] \
     && ok "\$WTOOL_HOME/wtool 是实体目录（L1 一条一链）" \
     || bad "\$WTOOL_HOME/wtool 不是实体目录"
 # 惰性：只建装过的那个项目，别的项目一条都不建（D5）
-[ -e "$WTOOL_HOME/.wtool/wtool/terminal" ] \
+[ -e "$WTOOL_HOME/wtool/terminal" ] \
     && ok "L1 按项目路径分层（terminal/tmux）" || bad "L1 分层不对"
 
 # ---- L2「项目导出链」：<dot>/usr/<part>/<条目> → ../../wtool/<项目>/…（**相对**）----
-L2BIN="$WTOOL_HOME/.wtool/usr/bin/rg"
+L2BIN="$WTOOL_HOME/usr/bin/rg"
 [ -L "$L2BIN" ] && ok "L2（export_bin）建出来了" || bad "L2（export_bin）没建出来"
 check "L2 是**相对**链（跟着 .wtool 走，D45）" \
     "../../wtool/terminal/tmux/__output/rg-dbg" "$(readlink "$L2BIN" 2>/dev/null)"
@@ -134,45 +138,45 @@ check "顺着链读到内容" "rgbin" "$(cat "$L2BIN" 2>/dev/null)"
 # export_usr 也逐条目建了 usr/bin 下的那一条（同一张 usr/bin 里两条并存）
 check "export_usr 逐条目建了 usr/bin/fzf 那一条" \
     "../../wtool/terminal/tmux/__output/usr/bin/fzf" \
-    "$(readlink "$WTOOL_HOME/.wtool/usr/bin/fzf" 2>/dev/null)"
+    "$(readlink "$WTOOL_HOME/usr/bin/fzf" 2>/dev/null)"
 # export_usr：每个直接子项各展开、**按条目**建链，usr/<part> 自己是实体目录
-[ -d "$WTOOL_HOME/.wtool/usr/share" ] && [ ! -L "$WTOOL_HOME/.wtool/usr/share" ] \
+[ -d "$WTOOL_HOME/usr/share" ] && [ ! -L "$WTOOL_HOME/usr/share" ] \
     && ok "usr/share 是实体目录（多项目共享，D7）" || bad "usr/share 不是实体目录"
 check "export_usr 逐条目建了 usr/share/man" \
     "../../wtool/terminal/tmux/__output/usr/share/man" \
-    "$(readlink "$WTOOL_HOME/.wtool/usr/share/man" 2>/dev/null)"
+    "$(readlink "$WTOOL_HOME/usr/share/man" 2>/dev/null)"
 # 同一个 usr/bin 下 fzf 只有一条（export_bin 那条），没有整目录替换
 check "usr/bin 下两条并存（多项目共享这张表）" "fzf rg" \
-    "$(ls "$WTOOL_HOME/.wtool/usr/bin" 2>/dev/null | tr '\n' ' ' | sed 's/ $//')"
+    "$(ls "$WTOOL_HOME/usr/bin" 2>/dev/null | tr '\n' ' ' | sed 's/ $//')"
 
 # ~/usr 这条全局软链
 [ -L "$WTOOL_HOME/usr" ] && ok "~/usr 建出来了" || bad "~/usr 没建出来"
-check "~/usr 指向 ~/.wtool/usr" "$WTOOL_HOME/.wtool/usr" \
+check "~/usr 指向 ~/.wtool/usr" "$WTOOL_HOME/usr" \
     "$(readlink "$WTOOL_HOME/usr" 2>/dev/null)"
 
 # 新标签的路径也要幂等（L1+L2 + env.bash，重复 install 不该有任何变化）
 _snap1=$(find "$WTOOL_HOME" -mindepth 1 -printf '%y %p -> %l\n' | LC_ALL=C sort)
-_rc1=$(cat "$WTOOL_HOME/.zshrc")
+_rc1=$(cat "$WTOOL_MANAGED_HOME/.zshrc")
 "$WT" install "$P" > "$T/i1b.log" 2>&1 || bad "第二次 install 执行"
 _snap2=$(find "$WTOOL_HOME" -mindepth 1 -printf '%y %p -> %l\n' | LC_ALL=C sort)
 check "第二次 install 不改变文件树" "$_snap1" "$_snap2"
-check "第二次 install 不改变 rc 内容" "$_rc1" "$(cat "$WTOOL_HOME/.zshrc")"
+check "第二次 install 不改变 rc 内容" "$_rc1" "$(cat "$WTOOL_MANAGED_HOME/.zshrc")"
 grep -q '没有需要变更的内容' "$T/i1b.log" && ok "第二次 install 报无变更" \
     || bad "第二次 install 没报无变更" "$(cat "$T/i1b.log")"
 
 # env 两份都进了汇总：汇总文件里放的是**块**（运行时 source 项目的 env 文件），
 # 不是把内容抄进去 —— 所以查的是块和它 source 的那一行
-grep -q 'wtool:terminal/tmux' "$WTOOL_HOME/.wtool/.zshrc" \
+grep -q 'wtool:terminal/tmux' "$WTOOL_MANAGED_HOME/.zshrc" \
     && ok "zshrc 的块进了汇总" || bad "zshrc 的块没进汇总"
-grep -q 'env.zsh' "$WTOOL_HOME/.wtool/.zshrc" \
+grep -q 'env.zsh' "$WTOOL_MANAGED_HOME/.zshrc" \
     && ok "zshrc 的块 source 的是 env.zsh" || bad "zshrc 的块 source 错了"
-grep -q 'env.bash' "$WTOOL_HOME/.wtool/.bashrc" \
+grep -q 'env.bash' "$WTOOL_MANAGED_HOME/.bashrc" \
     && ok "bashrc 的块 source 的是 env.bash" || bad "bashrc 的块没进汇总"
 # 块里的 WTOOL_PROJECT_DIR 必须是 **L1** 那条（ADR-0045 起不再有中转链接）
 grep -q 'WTOOL_PROJECT_DIR="\$HOME/.wtool/wtool/terminal/tmux"' \
-    "$WTOOL_HOME/.wtool/.zshrc" \
+    "$WTOOL_MANAGED_HOME/.zshrc" \
     && ok "env 块里的 WTOOL_PROJECT_DIR 是 L1 路径" \
-    || bad "env 块里的 WTOOL_PROJECT_DIR 不是 L1 路径" "$(cat "$WTOOL_HOME/.wtool/.zshrc")"
+    || bad "env 块里的 WTOOL_PROJECT_DIR 不是 L1 路径" "$(cat "$WTOOL_MANAGED_HOME/.zshrc")"
 # 真 source 一遍：变量真的出来了才算数
 _got=$(env -i HOME="$WTOOL_HOME" sh -c '. "$HOME/.wtool/.zshrc"; printf "%s" "${TMUX_MARK:-}"')
 check "source 汇总文件后变量真的在" "1" "$_got"
@@ -236,7 +240,7 @@ grep -q 'wtool download' "$T/i3.log" && ok "给了可复制的命令" || bad "�
 mkdir -p "$P2/__output/usr/bin"
 printf 'built\n' > "$P2/__output/usr/bin/x"
 "$WT" install "$P2" > "$T/i3b.log" 2>&1 || bad "有 __output/ 之后 install 执行" "$(cat "$T/i3b.log")"
-[ -L "$WTOOL_HOME/.wtool/usr/bin/x" ] && ok "有 __output/ 之后就装上了" \
+[ -L "$WTOOL_HOME/usr/bin/x" ] && ok "有 __output/ 之后就装上了" \
     || bad "有 __output/ 也没装上"
 
 # 场景 3c：旧目录名的迁移提示（2026-10 的改名：release/ → __output/、publish/ → __release/）
@@ -313,11 +317,11 @@ git -C "$A" add -A && git -C "$A" -c user.name=t -c user.email=t@t commit -qm in
 git -C "$B" add -A && git -C "$B" -c user.name=t -c user.email=t@t commit -qm init
 
 "$WT" install "$A" > /dev/null 2>&1 || bad "装 A"
-[ -L "$WTOOL_HOME/.wtool/usr/bin/shared" ] && ok "A 的 L2 链建出来了" \
+[ -L "$WTOOL_HOME/usr/bin/shared" ] && ok "A 的 L2 链建出来了" \
     || bad "A 的 L2 链没建出来"
 check "A 的 L2 链指向 A 的 __output" \
     "../../wtool/a/one/__output/usr/bin/shared" \
-    "$(readlink "$WTOOL_HOME/.wtool/usr/bin/shared" 2>/dev/null)"
+    "$(readlink "$WTOOL_HOME/usr/bin/shared" 2>/dev/null)"
 
 _rc=0
 _out=$("$WT" install "$B" 2>&1) || _rc=$?
@@ -341,12 +345,12 @@ case $_out2 in
 esac
 check "冲突之后落点还是 A 的（没被改坏）" \
     "../../wtool/a/one/__output/usr/bin/shared" \
-    "$(readlink "$WTOOL_HOME/.wtool/usr/bin/shared" 2>/dev/null)"
+    "$(readlink "$WTOOL_HOME/usr/bin/shared" 2>/dev/null)"
 
 # registry 里那条登记仍然归 a/one
 if [ -f "$WTOOL_STATE/registry.tsv" ]; then
     check "登记表里落点归 a/one" "a/one" \
-        "$(awk -F'\t' -v d="$WTOOL_HOME/.wtool/usr/bin/shared" '$1==d{print $2}' "$WTOOL_STATE/registry.tsv")"
+        "$(awk -F'\t' -v d="$WTOOL_HOME/usr/bin/shared" '$1==d{print $2}' "$WTOOL_STATE/registry.tsv")"
 fi
 
 # --------------------------------------------------------------------------
@@ -360,7 +364,7 @@ for spec in "c/one Cone" "d/two Dtwo"; do
     git -C "$T/ws/$1" add -A && git -C "$T/ws/$1" -c user.name=t -c user.email=t@t commit -qm init
 done
 # 先放一个"编译产物"在影子 HOME 里：~/usr 收走时**只该删软链**
-mkdir -p "$WTOOL_HOME/.wtool/usr/bin"; printf 'bin\n' > "$WTOOL_HOME/.wtool/usr/bin/x"
+mkdir -p "$WTOOL_HOME/usr/bin"; printf 'bin\n' > "$WTOOL_HOME/usr/bin/x"
 "$WT" install "$C" > /dev/null 2>&1
 "$WT" install "$D" > /dev/null 2>&1
 [ -L "$WTOOL_HOME/usr" ] && ok "两个项目时 ~/usr 在" || bad "~/usr 不在"
@@ -368,7 +372,7 @@ mkdir -p "$WTOOL_HOME/.wtool/usr/bin"; printf 'bin\n' > "$WTOOL_HOME/.wtool/usr/
 [ -L "$WTOOL_HOME/usr" ] && ok "还剩一个项目时 ~/usr 留着" || bad "提前把 ~/usr 收走了"
 "$WT" uninstall "$D" > /dev/null 2>&1
 [ -e "$WTOOL_HOME/usr" ] && bad "一个项目都不剩了 ~/usr 还在" || ok "最后一个项目走了 ~/usr 也收走"
-[ -d "$WTOOL_HOME/.wtool/usr" ] && ok "只删软链，影子 HOME 里的实体不动" \
+[ -d "$WTOOL_HOME/usr" ] && ok "只删软链，影子 HOME 里的实体不动" \
     || bad "把 ~/.wtool/usr 实体也删了"
 
 # --------------------------------------------------------------------------
@@ -385,9 +389,9 @@ git -C "$Hh" add -A && git -C "$Hh" -c user.name=t -c user.email=t@t commit -qm 
 # 项目目录先"消失"（模拟仓库被删）：all 照样要能卸掉
 mv "$Hh" "$Hh.gone"
 "$WT" uninstall all > "$T/ua.log" 2>&1 || bad "uninstall all 执行" "$(cat "$T/ua.log")"
-[ -e "$WTOOL_HOME/.wtool/usr/bin/Gone" ] && bad "all 没卸掉 g/one" \
+[ -e "$WTOOL_HOME/usr/bin/Gone" ] && bad "all 没卸掉 g/one" \
     || ok "uninstall all 卸掉了 g/one"
-[ -e "$WTOOL_HOME/.wtool/usr/bin/Htwo" ] && bad "all 没卸掉 h/two（项目目录已不在）" \
+[ -e "$WTOOL_HOME/usr/bin/Htwo" ] && bad "all 没卸掉 h/two（项目目录已不在）" \
     || ok "项目目录不在也能卸（靠 state 的账）"
 [ -e "$WTOOL_HOME/usr" ] && bad "all 之后 ~/usr 还在" || ok "all 之后 ~/usr 收走了"
 
@@ -400,27 +404,27 @@ mkexport "$E" e docker '<zshrc src="env.zsh"/>'
 printf 'export E=1\n' > "$E/env.zsh"
 git -C "$E" add -A && git -C "$E" -c user.name=t -c user.email=t@t commit -qm init
 "$WT" install "$E" > /dev/null 2>&1
-mkdir -p "$WTOOL_HOME/.wtool/usr/bin"; printf 'bin\n' > "$WTOOL_HOME/.wtool/usr/bin/e"
+mkdir -p "$WTOOL_HOME/usr/bin"; printf 'bin\n' > "$WTOOL_HOME/usr/bin/e"
 printf '不是 wtool 的东西\n' > "$WTOOL_HOME/keepme"
 
 # 确认词不对 → 什么都不做
 _rc=0
 printf 'yes\n' | "$WT" kill-self-forever > "$T/kill1.log" 2>&1 || _rc=$?
 [ "$_rc" != 0 ] && ok "确认词不对 → 拒绝执行" || bad "确认词不对还执行了"
-[ -L "$WTOOL_HOME/.wtool/usr/bin/e" ] && ok "拒绝之后什么都没删" || bad "拒绝之后东西没了"
+[ -L "$WTOOL_HOME/usr/bin/e" ] && ok "拒绝之后什么都没删" || bad "拒绝之后东西没了"
 grep -q 'KILL-SELF-FOREVER' "$T/kill1.log" && ok "提示了要输入什么" || bad "没提示确认词"
 grep -q '不删' "$T/kill1.log" && ok "列清了不删什么（sudo 装的、别人的）" || bad "没说清不删什么"
 
 _rc=0
 "$WT" kill-self-forever --yes > "$T/kill2.log" 2>&1 || _rc=$?
 chk "--yes 执行成功" "$_rc" "0"
-[ -e "$WTOOL_HOME/.wtool" ] && bad "~/.wtool 还在" || ok "~/.wtool 删干净了"
-[ -e "$WTOOL_HOME/.wtool/usr/bin/e" ] && bad "L2 链还在" || ok "L2 链删干净了"
+[ -e "$WTOOL_HOME" ] && bad "~/.wtool 还在" || ok "~/.wtool 删干净了"
+[ -e "$WTOOL_HOME/usr/bin/e" ] && bad "L2 链还在" || ok "L2 链删干净了"
 [ -e "$WTOOL_STATE" ] && bad "state 还在" || ok "state 也删了"
-grep -q 'wtool' "$WTOOL_HOME/.zshrc" && bad "rc 里的 loader 块还在" || ok "rc 里的 loader 块剥掉了"
+grep -q 'wtool' "$WTOOL_MANAGED_HOME/.zshrc" && bad "rc 里的 loader 块还在" || ok "rc 里的 loader 块剥掉了"
 check "rc 回到用户原来的内容" \
     "$(printf '# 用户自己的 zshrc\nsetopt auto_cd\nexport MY_STUFF=1')" \
-    "$(cat "$WTOOL_HOME/.zshrc")"
+    "$(cat "$WTOOL_MANAGED_HOME/.zshrc")"
 [ -f "$WTOOL_HOME/keepme" ] && ok "不是 wtool 的东西一个字节没动" || bad "删了不属于它的文件"
 
 # --------------------------------------------------------------------------
@@ -477,7 +481,7 @@ case $_v in
     *) bad "validate 没提示旧写法" "$_v" ;;
 esac
 "$WT" install "$G" > /dev/null 2>&1 || bad "旧写法的清单装不上"
-[ -d "$WTOOL_HOME/.wtool/wtool/g/legacyenv" ] \
+[ -d "$WTOOL_HOME/wtool/g/legacyenv" ] \
     && ok "① 类项目装着就有 L1（不需要任何导出标签）" || bad "① 类项目没建出 L1"
 # ⚠️ 把那份**故意写坏**的清单（f/legacy）从工作区里挪走：后面几个场景会
 #    `wtool check` **整棵工作区**，留着它就会一路报"清单有问题"——
@@ -631,7 +635,7 @@ case $_out in
     *bashrc*) bad "两个汇总文件都在时就报 bashrc 有问题" "$_out" ;;
     *) ok "两个汇总文件都在时 check 不报" ;;
 esac
-rm -f "$WTOOL_HOME/.wtool/.bashrc"
+rm -f "$WTOOL_MANAGED_HOME/.bashrc"
 _rc=0
 _out=$("$WT" check "$PB" 2>&1) || _rc=$?
 case $_out in
@@ -659,10 +663,10 @@ git -C "$PI" add -A && git -C "$PI" -c user.name=t -c user.email=t@t commit -qm 
 _rc=0
 _out=$("$WT" install terminal/instid 2>&1) || _rc=$?
 chk "install 认项目 id" "$_rc" "0"
-[ -L "$WTOOL_HOME/.wtool/usr/bin/instid" ] && ok "按 id 真装上了" \
+[ -L "$WTOOL_HOME/usr/bin/instid" ] && ok "按 id 真装上了" \
     || bad "按 id 没装上" "$_out"
 "$WT" uninstall terminal/instid >/dev/null 2>&1 || true
-[ -L "$WTOOL_HOME/.wtool/usr/bin/instid" ] && bad "uninstall <路径> 没撤掉" \
+[ -L "$WTOOL_HOME/usr/bin/instid" ] && bad "uninstall <路径> 没撤掉" \
     || ok "uninstall <路径> 撤掉了"
 
 # 不带任何开关的**裸路径**也要认（install 认了，uninstall 不认就会死在 cd 上）
@@ -670,13 +674,13 @@ chk "install 认项目 id" "$_rc" "0"
 _rc=0
 _out=$("$WT" uninstall terminal/instid 2>&1) || _rc=$?
 chk "uninstall 也认裸项目 id" "$_rc" "0"
-[ -e "$WTOOL_HOME/.wtool/usr/bin/instid" ] && bad "裸 id 没撤掉" || ok "裸 id 撤掉了"
+[ -e "$WTOOL_HOME/usr/bin/instid" ] && bad "裸 id 没撤掉" || ok "裸 id 撤掉了"
 
 # ② install all（= wtool bootstrap：装所有"不需要你决策"的项目）
 _rc=0
 _out=$("$WT" install all 2>&1) || _rc=$?
 chk "install all 退出码 0" "$_rc" "0"
-[ -L "$WTOOL_HOME/.wtool/usr/bin/instid" ] && ok "install all 把项目装上了" \
+[ -L "$WTOOL_HOME/usr/bin/instid" ] && ok "install all 把项目装上了" \
     || bad "install all 没装上" "$_out"
 # dry-run 要在一个**干净的家目录**里验：刚装过的话"没有需要变更的内容"，
 # 什么都不会打印（那条断言会假失败）
@@ -689,7 +693,7 @@ case $_out in
     *"[dry-run]"*) ok "install all 也吃 --dry-run（打了计划）" ;;
     *) bad "install all --dry-run 没生效" "$_out" ;;
 esac
-[ -e "$WTOOL_HOME/.wtool/usr/bin/instid" ] && bad "dry-run 居然真装了" \
+[ -e "$WTOOL_HOME/usr/bin/instid" ] && bad "dry-run 居然真装了" \
     || ok "dry-run 一个字节没动"
 
 # --------------------------------------------------------------------------
@@ -720,37 +724,37 @@ prune_manifest \
   '<export_bin src="__output/usr/bin/b"/>' \
   '<export_usr src="__output/usr" part="share"/>'
 "$WT" install "$PP" >/dev/null 2>&1 || bad "第一遍没装上（后面的断言都不成立）"
-{ [ -L "$WTOOL_HOME/.wtool/usr/bin/a" ] && [ -L "$WTOOL_HOME/.wtool/usr/bin/b" ] \
-  && [ -L "$WTOOL_HOME/.wtool/usr/share/s" ]; } \
+{ [ -L "$WTOOL_HOME/usr/bin/a" ] && [ -L "$WTOOL_HOME/usr/bin/b" ] \
+  && [ -L "$WTOOL_HOME/usr/share/s" ]; } \
     && ok "三条 L2 链都建了" || bad "第一遍没建全"
-[ -d "$WTOOL_HOME/.wtool/usr/share" ] && [ ! -L "$WTOOL_HOME/.wtool/usr/share" ] \
+[ -d "$WTOOL_HOME/usr/share" ] && [ ! -L "$WTOOL_HOME/usr/share" ] \
     && ok "usr/share 是实体目录（--prune 要能收走它下面的链）" || bad "usr/share 不是实体目录"
 # 用户自己（不是 wtool）放的一条软链：--prune 一个字节都不许碰
-ln -s /etc/hostname "$WTOOL_HOME/.wtool/usr/bin/user-made"
+ln -s /etc/hostname "$WTOOL_HOME/usr/bin/user-made"
 
 # 清单里删掉 b，重装
 prune_manifest \
   '<export_bin src="__output/usr/bin/a"/>' \
   '<export_usr src="__output/usr" part="share"/>'
 "$WT" install "$PP" >/dev/null 2>&1 || bad "删掉 b 之后重装失败"
-[ -L "$WTOOL_HOME/.wtool/usr/bin/b" ] \
+[ -L "$WTOOL_HOME/usr/bin/b" ] \
     && ok "不带 --prune 时旧链留着（BL-15 的症状，故意的）" \
     || bad "什么都没做旧链就没了（那这条不是可选项了）"
 
 # ① --dry-run 只说不做
 "$WT" install "$PP" --prune --dry-run >/dev/null 2>&1 || bad "--prune --dry-run 失败"
-[ -L "$WTOOL_HOME/.wtool/usr/bin/b" ] && ok "--prune --dry-run 一个字节没动" || bad "dry-run 居然真删了"
+[ -L "$WTOOL_HOME/usr/bin/b" ] && ok "--prune --dry-run 一个字节没动" || bad "dry-run 居然真删了"
 
 # ② --prune 真删，而且只删该删的
 _rc=0
 _out=$("$WT" install "$PP" --prune 2>&1) || _rc=$?
 chk "--prune 退出码 0" "$_rc" "0"
-[ -L "$WTOOL_HOME/.wtool/usr/bin/b" ] && bad "--prune 没删掉旧链" "$_out" \
+[ -L "$WTOOL_HOME/usr/bin/b" ] && bad "--prune 没删掉旧链" "$_out" \
     || ok "--prune 删掉了旧链（清单里没有 b 了）"
-[ -L "$WTOOL_HOME/.wtool/usr/bin/a" ] && ok "清单里还有的那条留着" || bad "--prune 连在册的也删了"
-[ -L "$WTOOL_HOME/.wtool/usr/share/s" ] && ok "另一条落点（usr/share/s）也留着" \
+[ -L "$WTOOL_HOME/usr/bin/a" ] && ok "清单里还有的那条留着" || bad "--prune 连在册的也删了"
+[ -L "$WTOOL_HOME/usr/share/s" ] && ok "另一条落点（usr/share/s）也留着" \
     || bad "--prune 删了别的落点"
-[ -L "$WTOOL_HOME/.wtool/usr/bin/user-made" ] && ok "不是我们建的软链不碰" \
+[ -L "$WTOOL_HOME/usr/bin/user-made" ] && ok "不是我们建的软链不碰" \
     || bad "--prune 删了用户自己的软链"
 grep -q 'usr/bin/b' "$WTOOL_STATE/terminal/pruneproj/journal.tsv" 2>/dev/null \
     && bad "账还留在 journal 里（下次 --prune 会再删一遍）" || ok "journal 里那条账销掉了"
@@ -761,7 +765,7 @@ grep -q 'usr/bin/b' "$WTOOL_STATE/registry.tsv" 2>/dev/null \
 _rc=0
 _out=$("$WT" install "$PP" --prune 2>&1) || _rc=$?
 chk "重复 --prune 退出码 0" "$_rc" "0"
-[ -L "$WTOOL_HOME/.wtool/usr/bin/a" ] && [ -L "$WTOOL_HOME/.wtool/usr/bin/user-made" ] \
+[ -L "$WTOOL_HOME/usr/bin/a" ] && [ -L "$WTOOL_HOME/usr/bin/user-made" ] \
     && ok "重复 --prune 没伤到别人" || bad "重复 --prune 删多了"
 
 # ④ 刹车：落点已经归了**另一个项目**（链接搬了家）→ 不删，留给那个项目
@@ -778,7 +782,7 @@ git -C "$PQ" add -A && git -C "$PQ" -c user.name=t -c user.email=t@t commit -qm 
 "$WT" install "$PQ" --force >/dev/null 2>&1 || bad "第二个项目（同一个落点）没装上"
 prune_manifest '<export_bin src="__output/usr/share/s"/>'
 "$WT" install "$PP" --prune >/dev/null 2>&1 || bad "第二个项目装上之后 --prune 失败"
-[ -L "$WTOOL_HOME/.wtool/usr/bin/a" ] && ok "落点归了别的项目时不越权（链留着）" \
+[ -L "$WTOOL_HOME/usr/bin/a" ] && ok "落点归了别的项目时不越权（链留着）" \
     || bad "--prune 删了别的项目正在用的链"
 
 # --------------------------------------------------------------------------
@@ -809,7 +813,7 @@ git -C "$PW" add -A && git -C "$PW" -c user.name=t -c user.email=t@t commit -qm 
 # ② 有人正占着（holder pid 是活的）：**不硬闯**，报清楚，什么都不动
 mkdir -p "$WTOOL_STATE/.lock"
 printf '%s\n' "$$" > "$WTOOL_STATE/.lock/pid"
-rm -f "$WTOOL_HOME/.wtool/usr/bin/lockproj"
+rm -f "$WTOOL_HOME/usr/bin/lockproj"
 _rc=0
 _out=$(WTOOL_LOCK_TIMEOUT=0 "$WT" install "$PW" 2>&1) || _rc=$?
 [ "$_rc" != 0 ] && ok "锁被占着时拒绝跑（不当成成功）" || bad "锁被占着还照跑"
@@ -817,7 +821,7 @@ case $_out in
     *"正在改状态目录"*) ok "说清了是谁占着、怎么办" ;;
     *) bad "等锁失败时没说清" "$_out" ;;
 esac
-[ -L "$WTOOL_HOME/.wtool/usr/bin/lockproj" ] && bad "抢锁失败却已经动手改了东西" \
+[ -L "$WTOOL_HOME/usr/bin/lockproj" ] && bad "抢锁失败却已经动手改了东西" \
     || ok "抢锁失败时一个字节都没动"
 rm -rf "$WTOOL_STATE/.lock"
 
@@ -827,7 +831,7 @@ printf '999999\n' > "$WTOOL_STATE/.lock/pid"
 _rc=0
 _out=$(WTOOL_LOCK_TIMEOUT=0 "$WT" install "$PW" 2>&1) || _rc=$?
 chk "占用者死了时自动接管" "$_rc" "0"
-[ -L "$WTOOL_HOME/.wtool/usr/bin/lockproj" ] && ok "接管之后正常装上了" \
+[ -L "$WTOOL_HOME/usr/bin/lockproj" ] && ok "接管之后正常装上了" \
     || bad "接管了却没装上" "$_out"
 [ -e "$WTOOL_STATE/.lock" ] && bad "接管之后没放锁" || ok "接管之后照样放锁"
 
@@ -1063,7 +1067,7 @@ case $_out in
     *"WTOOL_PREFIX="*) ok "打印了关键环境变量（WTOOL_PREFIX 等）" ;;
     *) bad "没打印环境变量" "$_out" ;;
 esac
-if [ -e "$WTOOL_HOME/.wtool/usr/bin/dry.conf" ]; then
+if [ -e "$WTOOL_HOME/usr/bin/dry.conf" ]; then
     bad "install --dry-run 真落了软链"
 else
     ok "install --dry-run 一个软链都没落"
@@ -1086,7 +1090,7 @@ esac
 
 # uninstall 得先真装上才有东西可撤（上面全是 dry-run，磁盘上还什么都没有）
 "$WT" install dry/proj > "$T/i15.log" 2>&1 || bad "（前置）真装一遍失败" "$(cat "$T/i15.log")"
-[ -L "$WTOOL_HOME/.wtool/usr/bin/dry" ] && ok "（前置）真装之后 L2 链在" \
+[ -L "$WTOOL_HOME/usr/bin/dry" ] && ok "（前置）真装之后 L2 链在" \
     || bad "（前置）真装没建成"
 #   项目只能按**路径**给（ADR-0037 删掉了 --id）。以前 `--id` / 裸 id 那条路
 #   拿不到 project_root，项目脚本那一步会被静默跳过；BL-47/BL-48 修好之后
@@ -1102,7 +1106,7 @@ if [ -e "$P4/uninstall-called.txt" ]; then
 else
     ok "uninstall --dry-run 没跑项目脚本"
 fi
-[ -L "$WTOOL_HOME/.wtool/usr/bin/dry" ] && ok "uninstall --dry-run 之后 L2 链还在" \
+[ -L "$WTOOL_HOME/usr/bin/dry" ] && ok "uninstall --dry-run 之后 L2 链还在" \
     || bad "uninstall --dry-run 把软链拆了"
 case $_out in
     *"install.sh"*) ok "uninstall --dry-run 也打印了脚本路径" ;;
@@ -1271,7 +1275,7 @@ EOF
 # 三棵树：项目目录 / 影子 HOME / state
 _s17_snap() { { find "$WTOOL_ROOT" "$WTOOL_HOME" "$WTOOL_STATE" -mindepth 1 2>/dev/null || true; } | sort; }
 _s17_dangling() { find "$WTOOL_HOME" -xtype l 2>/dev/null | wc -l | tr -d ' '; }
-_s17_blocks() { grep -o '^# >>> wtool:[^ ]*' "$WTOOL_HOME/.wtool/.zshrc" 2>/dev/null | sed 's/^# >>> //' | tr '\n' ' '; }
+_s17_blocks() { grep -o '^# >>> wtool:[^ ]*' "$WTOOL_MANAGED_HOME/.zshrc" 2>/dev/null | sed 's/^# >>> //' | tr '\n' ' '; }
 
 _s17_mk "moval/one"
 "$WT" install moval/one > "$T/s17i.log" 2>&1 || bad "（前置）装 moval/one 失败" "$(cat "$T/s17i.log")"
@@ -1299,9 +1303,9 @@ chk "★move 退出 0" "$_rc" "0"
 [ -f "$WTOOL_STATE/moval/two/meta.tsv" ] && ok "state 建在新路径下" || bad "state 没建在新路径下"
 [ -e "$WTOOL_STATE/moval/one" ] && bad "★旧 state 目录没删掉（残渣）" || ok "旧 state 目录已收走"
 # L1 链：只有新路径那条，且不悬空
-[ -d "$WTOOL_HOME/.wtool/wtool/moval/two" ] && ok "L1 链指向新路径" \
+[ -d "$WTOOL_HOME/wtool/moval/two" ] && ok "L1 链指向新路径" \
     || bad "L1 链没建在新路径"
-[ -e "$WTOOL_HOME/.wtool/wtool/moval/one" ] && bad "★旧 L1 链还在（悬空链）" \
+[ -e "$WTOOL_HOME/wtool/moval/one" ] && bad "★旧 L1 链还在（悬空链）" \
     || ok "旧 L1 链已收走"
 chk "★影子 HOME 里没有悬空软链" "0" "$(_s17_dangling)"
 # 汇总文件里的块：只有新路径那个

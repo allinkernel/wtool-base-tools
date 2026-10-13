@@ -39,7 +39,7 @@ say "1. install.sh —— 准备环境 + 装 wtool 自己（四步，做完就�
 cd /wtool && ./install.sh
 
 say "2. 让当前 shell 认识 wtool（照 README 的 eval 那条路），再看现状"
-eval "$(sh "$HOME/.wtool/bootstrap/wtool.sh" doctor --quiet)" || true
+eval "$(sh "$WTOOL_HOME/bootstrap/wtool.sh" doctor --quiet)" || true
 printf 'wtool  : %s\n' "$(command -v wtool || echo 还是没有)"
 command -v wtool >/dev/null || { echo "❌ install.sh 装完了却敲不到 wtool"; exit 1; }
 wtool version
@@ -104,16 +104,16 @@ done
 
 say "3e. install → 检查 L1/L2 两条链 → uninstall 完全回退"
 wtool install terminal/demo
-printf 'L1（项目在哪）: %s -> %s\n' "$WTOOL_HOME/.wtool/wtool/terminal/demo" \
-    "$(readlink "$WTOOL_HOME/.wtool/wtool/terminal/demo")"
-printf 'L2（提供什么）: %s -> %s\n' "$WTOOL_HOME/.wtool/usr/bin/demo" \
-    "$(readlink "$WTOOL_HOME/.wtool/usr/bin/demo")"
-[ -f "$WTOOL_HOME/.wtool/usr/bin/demo" ] \
-    && [ -L "$WTOOL_HOME/.wtool/wtool/terminal/demo" ] \
+printf 'L1（项目在哪）: %s -> %s\n' "$WTOOL_HOME/wtool/terminal/demo" \
+    "$(readlink "$WTOOL_HOME/wtool/terminal/demo")"
+printf 'L2（提供什么）: %s -> %s\n' "$WTOOL_HOME/usr/bin/demo" \
+    "$(readlink "$WTOOL_HOME/usr/bin/demo")"
+[ -f "$WTOOL_HOME/usr/bin/demo" ] \
+    && [ -L "$WTOOL_HOME/wtool/terminal/demo" ] \
     || { echo "❌ 没装上"; exit 1; }
 wtool uninstall terminal/demo
-if [ -e "$WTOOL_HOME/.wtool/usr/bin/demo" ] \
-   || [ -e "$WTOOL_HOME/.wtool/wtool/terminal/demo" ]; then
+if [ -e "$WTOOL_HOME/usr/bin/demo" ] \
+   || [ -e "$WTOOL_HOME/wtool/terminal/demo" ]; then
     echo "❌ uninstall 没撤干净"; exit 1
 fi
 echo "✅ 装得上、撤得干净（L1/L2 全在 \$WTOOL_HOME 里，没碰真 \$HOME）"
@@ -149,9 +149,9 @@ wtool layer-save terminal/demo --image=whatever 2>&1 | head -3 || true
 say "3h. 需求 2 的形状：install 认项目 id，也认 all"
 wtool install terminal/demo >/dev/null && echo "✅ install <项目 id> 能装" || { echo "❌ install <id> 不行"; exit 1; }
 wtool uninstall terminal/demo >/dev/null 2>&1 || true
-[ -e "$WTOOL_HOME/.wtool/usr/bin/demo" ] && { echo "❌ uninstall 没撤掉"; exit 1; } || echo "✅ uninstall <路径> 撤掉了"
+[ -e "$WTOOL_HOME/usr/bin/demo" ] && { echo "❌ uninstall 没撤掉"; exit 1; } || echo "✅ uninstall <路径> 撤掉了"
 wtool install all 2>&1 | tail -3
-[ -f "$WTOOL_HOME/.wtool/usr/bin/demo" ] && echo "✅ install all 装上了（= wtool bootstrap）" || { echo "❌ install all 不行"; exit 1; }
+[ -f "$WTOOL_HOME/usr/bin/demo" ] && echo "✅ install all 装上了（= wtool bootstrap）" || { echo "❌ install all 不行"; exit 1; }
 
 say "4. 真工作区里的项目（这一条只看它说不说实话，不动网络、不写文件）"
 echo "--- 4a. 项目表里的 astronvim（它声明了 <build kind=\"docker\"/>）---"

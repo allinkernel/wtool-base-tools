@@ -105,7 +105,8 @@ done
 printf '\n===== 4. 在同步出来的副本上跑 install / uninstall =====\n'
 HOME_FAKE="$WORK/home"; mkdir -p "$HOME_FAKE"
 printf '# 我的 zshrc\n' > "$HOME_FAKE/.zshrc"
-export WTOOL_HOME="$HOME_FAKE" WTOOL_STATE="$WORK/state"
+export WTOOL_HOME="$HOME_FAKE/.wtool" WTOOL_STATE="$HOME_FAKE/.wtool/var" \
+    WTOOL_MANAGED_HOME="$HOME_FAKE" WTOOL_LOG_ROOT="$WORK/logs"
 before=$(find "$HOME_FAKE" -mindepth 1 -printf '%y %P -> %l\n' | sort)
 for spec in $PROJECTS; do
     p=${spec%%:*}
