@@ -26,12 +26,22 @@
 #                             --dry-run 不跑项目脚本、uninstall 认 id 也跑项目脚本、
 #                             补全表与参数解析对得上、--id 老写法指路、wtool move、
 #                             改名残渣 check 报得出来；rc 那两行：缺→报、旧标记块→
-#                             替换、替换完→幂等；~/usr 在**被管理的家目录**里（311 条 ——
-#                             ADR-0045 第 3 块 + 第 5a 块：302→311）
+#                             替换、替换完→幂等；~/usr 在**被管理的家目录**里（313 条 ——
+#                             2026-10-13 实测；注释里原来写的 311 是过期值，
+#                             ADR-0045 第 3 块 + 第 5a 块：302→313）
 #   tests/export_test.sh      新标签 + L1/L2 两类链（ADR-0045 第 3 块）：15 条坏输入
 #                             各报错非 0、L1 绝对且**进账本**（悬空 check 必须报出来）、
 #                             L2 相对且 usr/<part> 是实体目录、冲突文案含"找助手"
-#                             （77 条）
+#                             （78 条 —— 2026-10-13 第 ⑦.2 块：+1 条"validate 不执行
+#                             <generate>"；原来那两条"第二次 install 报无变更"改成
+#                             "generate 每次都重跑、但产物逐字节一样"）
+#   tests/muslbin_test.sh     ② 类（kind="muslbin"）的下载→解包→安装 + <generate>
+#                             （ADR-0045 第 ⑦.2 块）：download-release 读 <muslbin>
+#                             （sha256 不匹配非 0 且不留半成品 / --dry-run 不下 /
+#                             幂等跳过）、unpack-release 认 member=/dest=（.tar.gz /
+#                             .zip / 裸文件三种资产、member 写错列出归档成员）、
+#                             <generate>（cmd+script、进 journal、uninstall 删、
+#                             重复 install 幂等、失败/空产物非 0）（96 条）
 #   tests/layer_test.sh       __layer/<target>/ 那棵 OCI 镜像目录（打桩 docker/skopeo，不联网）（50 条）
 #   tests/docker_build_test.sh kind=docker 的引擎驱动构建（打桩 docker，不联网）；构建日志落在
 #                             **本机日志** $WTOOL_LOG_DIR/<项目>/build-logs/，账本里不再有它（102 条）
@@ -44,11 +54,19 @@
 #                             pty 答 y 才写 / 写了也只有两行"、--dry-run 零副作用
 #                             含 uninstall.sh 对称收尾那两场
 #                             （89 条 —— 2026-10-13，第 5b 块新加）
-#                             —— 十二组共 1267 条（2026-10-13 实测；ADR-0045 第 5b 块：
+#                             —— 十三组共 1364 条（2026-10-13 实测；ADR-0045 第 ⑦.2 块：
+#                             1267→1364 = 新增 muslbin 96 条 + export 场景 1 拆出
+#                             一条"validate 不执行 <generate>"（77→78）。其余 11 组
+#                             逐条不变（pairing 56 / sudo-install 40 / publish 192 /
+#                             table 106 / release-copy 17 / release 158 / contract 313 /
+#                             layer 50 / docker-build 102 / install-env 67 / installer 89）。
+#                             上一轮（第 5b 块）：
 #                             1177→1267 = 新增 installer 89 条 + pairing 场景 9 多一条
 #                             "D23 老位置不该存在"（55→56）；同时把 pairing 那两条断言
 #                             改到新位置（$WTOOL_HOME/wtool-base-tools → wtool/wtool-base-tools））。
 #                             要数字请以**跑出来的 PASS 行**为准。
+#   tests/muslbin_acceptance.sh ② 类**真联网**下载→解包→install→敲那个工具的容器验收
+#                             （人工跑，见文件头：docker run --network=host + 宿主工具挂载）
 #   tests/docker_build_real.sh 同一件事的**真 docker** 冒烟测试（人工跑，见文件头）
 #   tests/container_test.sh   容器里从零装一遍（需要 docker，见文件头注释）
 #   tests/container_acceptance.sh  人工总验收：把它喂给容器里的 container-raw.sh（见文件头）
@@ -56,28 +74,30 @@
 set -eu
 here=$(cd -- "$(dirname -- "$0")" && pwd)
 
-printf '########## 1/12 pairing（install/uninstall）##########\n'
+printf '########## 1/13 pairing（install/uninstall）##########\n'
 sh "$here/pairing_test.sh"
-printf '\n########## 2/12 sudo-install（系统文件/source/task）##########\n'
+printf '\n########## 2/13 sudo-install（系统文件/source/task）##########\n'
 sh "$here/provision_test.sh"
-printf '\n########## 3/12 publish-release（只上传 + release.json）##########\n'
+printf '\n########## 3/13 publish-release（只上传 + release.json）##########\n'
 sh "$here/publish_test.sh"
-printf '\n########## 4/12 table（能力表格）##########\n'
+printf '\n########## 4/13 table（能力表格）##########\n'
 sh "$here/table_test.sh"
-printf '\n########## 5/12 release-copy（解压出来的工作区）##########\n'
+printf '\n########## 5/13 release-copy（解压出来的工作区）##########\n'
 sh "$here/release_copy_test.sh"
-printf '\n########## 6/12 pack-release / unpack-release / download-release ##########\n'
+printf '\n########## 6/13 pack-release / unpack-release / download-release ##########\n'
 sh "$here/release_test.sh"
-printf '\n########## 7/12 新契约（标签/两跳/顺序/check/repair/kill）##########\n'
+printf '\n########## 7/13 新契约（标签/两跳/顺序/check/repair/kill）##########\n'
 sh "$here/contract_test.sh"
-printf '\n########## 8/12 __layer/（OCI 镜像目录）##########\n'
+printf '\n########## 8/13 __layer/（OCI 镜像目录）##########\n'
 sh "$here/layer_test.sh"
-printf '\n########## 9/12 引擎驱动容器构建（kind=docker）##########\n'
+printf '\n########## 9/13 引擎驱动容器构建（kind=docker）##########\n'
 sh "$here/docker_build_test.sh"
-printf '\n########## 10/12 install.sh 第 0 步（镜像测速 / 挑源 / 换源与退路）##########\n'
+printf '\n########## 10/13 install.sh 第 0 步（镜像测速 / 挑源 / 换源与退路）##########\n'
 sh "$here/install_env_test.sh"
-printf '\n########## 11/12 install.sh 六项职责 + manifest 三件套（第 5b 块）##########\n'
+printf '\n########## 11/13 install.sh 六项职责 + manifest 三件套（第 5b 块）##########\n'
 sh "$here/installer_test.sh"
-printf '\n########## 12/12 新标签 + L1/L2（ADR-0045 第 3 块）##########\n'
+printf '\n########## 12/13 新标签 + L1/L2（ADR-0045 第 3 块）##########\n'
 sh "$here/export_test.sh"
+printf '\n########## 13/13 ② 类下载/解包 + <generate>（ADR-0045 第 ⑦.2 块）##########\n'
+sh "$here/muslbin_test.sh"
 printf '\n全部通过。\n'

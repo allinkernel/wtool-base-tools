@@ -29,6 +29,14 @@ export GIT_EXEC_PATH=/h/usr/lib/git-core
 # 宿主代理（`--network=host` 下 127.0.0.1 才是宿主）
 export http_proxy=http://127.0.0.1:7897 https_proxy=http://127.0.0.1:7897
 export HTTP_PROXY="$http_proxy" HTTPS_PROXY="$https_proxy"
+# ‼️ **CA 证书也要从宿主接进来**：基础镜像里没有 ca-certificates，而 `curl` 是宿主的
+#    （挂在 /h/usr/bin）—— 它默认去 `/etc/ssl/certs/ca-certificates.crt` 找根证书，
+#    找不到就报 "error setting certificate file"，表现为 **HTTP 000 / 一个字节都下不来**。
+#    症状看着像"网络不通/代理坏了"，实际是证书路径的事（实测踩过）。
+if [ -d /h/etc/ssl/certs ] && [ ! -e /etc/ssl/certs ]; then
+    mkdir -p /etc/ssl
+    ln -sfn /h/etc/ssl/certs /etc/ssl/certs
+fi
 # git 要有个身份才能 commit（假工作区要建成 git 仓库）
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t
 export GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
@@ -67,7 +75,7 @@ git -C "$WTOOL_ROOT" init -q
 git -C "$WTOOL_ROOT" add -A
 git -C "$WTOOL_ROOT" commit -qm "容器验收：三个 ② 类项目"
 
-e2e_one() {   # <工具名> <期望的 --version 前缀>
+e2e_one() {   # <工具名> <--version 输出里必须出现的那一段>
     _t=$1; _want=$2
     _pid="tools/musl-bins/$_t"
     echo
@@ -86,9 +94,11 @@ e2e_one() {   # <工具名> <期望的 --version 前缀>
     echo "--- ④ $WTOOL_HOME/usr/bin/$_t --version"
     _v=$("$WTOOL_HOME/usr/bin/$_t" --version 2>&1 | head -1)
     echo "    $_v"
+    # 期望值用"必须出现的子串"：各工具的 --version 格式不统一
+    # （fzf 只打版本号、procs 打一堆环境信息），盯着前缀会冤枉好的
     case $_v in
-        "$_want"*) echo "    ✅ 跑起来了" ;;
-        *)         echo "    ❌ 期望以 [$_want] 开头"; exit 1 ;;
+        *"$_want"*) echo "    ✅ 跑起来了" ;;
+        *)          echo "    ❌ 输出里没有 [$_want]"; exit 1 ;;
     esac
     echo "--- ⑤ check"
     $WT check >/dev/null && echo "    ✅ check 干净"
@@ -104,7 +114,7 @@ e2e_one procs "procs "
 
 echo
 echo "########## C. 带 <generate> 的：fzf ##########"
-e2e_one fzf "fzf "
+e2e_one fzf "0.74.5"
 FZ="$WTOOL_ROOT/tools/musl-bins/fzf"
 echo "--- <generate> 的产物（install 时生成的）"
 ls -l "$FZ/__output/fzf.zsh" "$FZ/__output/fzf.bash" | sed 's/^/    /'
@@ -116,6 +126,7 @@ echo "--- source 项目的 env.zsh，看补全/按键绑定有没有真的进到
 # 判据取"fzf 相关的别名 + 函数 ≥ 1"：fzf 各个版本的 `--zsh` 输出不一样
 # （老版定义 fzf-file-widget 这类函数，新版还会加别名），盯着某一个名字会过时。
 # 有没有 zsh 不影响别的结论 —— 生成物本身下面照样验（非空 + 进账 + 卸载删掉）。
+zsh -n "$FZ/__output/fzf.zsh" && echo "    ✅ 生成物是语法正确的 zsh（zsh -n 通过）"
 cat > "$WORK/fzf-check.zsh" <<'ZEOF'
 . "$WTOOL_HOME/wtool/tools/musl-bins/fzf/env.zsh" >/dev/null 2>&1 || true
 _a=$(alias 2>/dev/null | grep -c "^fzf" || true)
@@ -129,8 +140,12 @@ else
 fi
 ZEOF
 if command -v zsh >/dev/null 2>&1; then
+    # ‼️ 必须用 **-i**（交互式）：fzf 的 `--zsh` 输出把按键绑定/补全包在
+    #    `if [[ $- == *i* ]]` 里 —— 非交互的 `zsh -c` 一个定义都不会注册，
+    #    那不是"生成物坏了"，是**没在用户真正用它的那个环境里试**
+    #    （实测踩过：非交互下别名 0 个 / 函数 0 个，差点误判成没 source 进来）。
     if ! env -i HOME="$HOME" PATH="$PATH" WTOOL_HOME="$WTOOL_HOME" \
-             LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}" zsh "$WORK/fzf-check.zsh"; then
+             LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}" zsh -f -i "$WORK/fzf-check.zsh" 2>/dev/null; then
         echo "    ❌ source env.zsh 之后 fzf 的定义没进来"; exit 1
     fi
 else
@@ -153,6 +168,9 @@ echo "########## D. sha256 不匹配：必须非 0、且不留半成品 ########
 BAD="$WTOOL_ROOT/tools/musl-bins/batsha"
 mkdir -p "$BAD"
 cp -a "$WTOOL_ROOT/tools/musl-bins/bat/." "$BAD/"
+# ‼️ 把 A 段下好的那份 **先清掉**：不清的话下面"不留半成品"的断言测的是
+#    A 段留下来的好文件，而不是这次失败下载的结果（实测踩过：假红一次）。
+rm -rf "$BAD/__release"
 # 把清单里的 sha256 改坏一个字符（**只改这一处**：这正是"上游重打了 tag"的形状）
 python3 - "$BAD/wtool.xml" <<'PY'
 import re, sys
@@ -172,8 +190,11 @@ _rc=$?
 set -e
 echo "    退出码 = $_rc"
 [ "$_rc" != 0 ] || { echo "    ❌ sha256 不匹配却成功了"; exit 1; }
-[ ! -e "$BAD/__release" ] || { ls -A "$BAD/__release" | grep . && { echo "    ❌ __release/ 里留了东西"; exit 1; }; }
-echo "    ✅ 非 0，且 __release/ 里没有半成品"
+_left=$(ls -A "$BAD/__release" 2>/dev/null || true)
+if [ -n "$_left" ]; then
+    echo "    ❌ __release/ 里留了东西："$_left; exit 1
+fi
+echo "    ✅ 非 0，且 __release/ 里没有半成品（连 .part 都没有）"
 
 echo
 echo "########## E. 三个工具一起再 check 一次 ##########"
