@@ -41,7 +41,8 @@
 #                             幂等跳过）、unpack-release 认 member=/dest=（.tar.gz /
 #                             .zip / 裸文件三种资产、member 写错列出归档成员）、
 #                             <generate>（cmd+script、进 journal、uninstall 删、
-#                             重复 install 幂等、失败/空产物非 0）（96 条）
+#                             重复 install 幂等、失败/空产物/--dry-run 零副作用非 0、
+#                             cmd 里的制表符两种写法两种结果）（104 条）
 #   tests/layer_test.sh       __layer/<target>/ 那棵 OCI 镜像目录（打桩 docker/skopeo，不联网）（50 条）
 #   tests/docker_build_test.sh kind=docker 的引擎驱动构建（打桩 docker，不联网）；构建日志落在
 #                             **本机日志** $WTOOL_LOG_DIR/<项目>/build-logs/，账本里不再有它（102 条）
@@ -54,8 +55,8 @@
 #                             pty 答 y 才写 / 写了也只有两行"、--dry-run 零副作用
 #                             含 uninstall.sh 对称收尾那两场
 #                             （89 条 —— 2026-10-13，第 5b 块新加）
-#                             —— 十三组共 1364 条（2026-10-13 实测；ADR-0045 第 ⑦.2 块：
-#                             1267→1364 = 新增 muslbin 96 条 + export 场景 1 拆出
+#                             —— 十三组共 1372 条（2026-10-13 实测；ADR-0045 第 ⑦.2 块：
+#                             1267→1372 = 新增 muslbin 104 条 + export 场景 1 拆出
 #                             一条"validate 不执行 <generate>"（77→78）。其余 11 组
 #                             逐条不变（pairing 56 / sudo-install 40 / publish 192 /
 #                             table 106 / release-copy 17 / release 158 / contract 313 /

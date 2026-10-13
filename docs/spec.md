@@ -233,6 +233,12 @@ wtool: 冲突：$WTOOL_HOME/usr/bin/fzf 已被 tools/musl-bins/fzf 占用，term
 （敲了就是"未知参数"）。上下级也算冲突：一条 `usr/share/man`（目录链）和别人的
 `usr/share/man/x` 会**写进对方的目录里**，同样报错。
 
+> **已知的一处真冲突（2026-10-13，ADR-0045 第 ⑦.2 块实测）**：新的
+> `tools/musl-bins/fzf`（`<export_bin src="__output/usr/bin/fzf">`）与旧的
+> `terminal/fzf` 都要 `$WTOOL_HOME/usr/bin/fzf` → 谁后装谁**报冲突**，这是**正确行为**
+> （D8/D60：只报错、不抢占）。**退役 `terminal/fzf` 是用户那次"一次性切换"里的事**
+> （和 `$HOME` 那两行、本地目录改名一起做），本轮**不动**旧项目、也不绕开这条冲突。
+
 ---
 
 ## 2. 角色划分

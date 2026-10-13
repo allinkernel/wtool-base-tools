@@ -511,7 +511,54 @@ case $_out in
     *) bad "没说清" "$_out" ;;
 esac
 hasnt "失败时不留半个生成物" "$F/__output/x.zsh"
-hasnt "失败时不留临时文件" "$F/__output/x.zsh.wtool-new.$$"
+# 临时文件（`<dest>.wtool-new.<引擎 pid>`）也不许留 —— 用通配找，不猜 pid
+chk "失败时不留临时文件" \
+    "$(find "$F/__output" -name 'x.zsh.wtool-new.*' 2>/dev/null | wc -l | tr -d ' ')" "0"
+
+# ---- --dry-run：只打印"会生成哪个路径、跑什么"，不跑不写 ----
+newhome
+DRY=$(mkproj "tools/gen-dry")
+mkdir -p "$DRY/__output"
+wxml "$DRY" docker \
+    '<generate dest="__output/dry.zsh" cmd="echo hi"/>' \
+    '<generate dest="__output/dry.bash" script="scripts/x.bash"/>'
+mkdir -p "$DRY/scripts"; printf '#!/bin/sh\necho hi\n' > "$DRY/scripts/x.bash"
+gitci "$DRY"
+_rc=0
+_out=$("$WT" install "$DRY" --dry-run 2>&1) || _rc=$?
+chk "--dry-run install 退出码 0" "$_rc" "0"
+case $_out in
+    *"[dry-run] 生成"*"dry.zsh"*) ok "★dry-run 打印了会生成哪个路径" ;;
+    *) bad "dry-run 没打印生成计划" "$_out" ;;
+esac
+hasnt "★--dry-run 没有真跑 <generate>（产物不存在）" "$DRY/__output/dry.zsh"
+hasnt "--dry-run 也没跑 script 那条" "$DRY/__output/dry.bash"
+
+# ---- cmd 里的制表符/换行：两种写法、两种结果（都钉一条，这是反直觉的地方）----
+# ① **字面**制表符写进 XML 属性 → XML 规范要求属性值规范化，`#x9` 变成**空格**
+#    （所以它到不了 TSV，产物内容是 "a b"）
+# ② **字符引用** `&#9;` → 规范化**不**碰它，真制表符会一路走到计划表（TSV）里 →
+#    必须**解析期报错**（不然列会静默串位，比报错难查得多）
+TB=$(mkproj "tools/gen-tab")
+wxml "$TB" docker \
+    '<generate dest="__output/t.zsh" cmd="echo a	b"/>'
+gitci "$TB"
+_rc=0
+_out=$("$WT" install "$TB" 2>&1) || _rc=$?
+chk "① 字面制表符：XML 规范化成空格，install 照常成功" "$_rc" "0"
+chk "① 产物是 'a b'（制表符已经变成空格）" "$(cat "$TB/__output/t.zsh" 2>/dev/null)" "a b"
+
+TR=$(mkproj "tools/gen-tabref")
+wxml "$TR" docker \
+    '<generate dest="__output/t.zsh" cmd="echo a&#9;b"/>'
+gitci "$TR"
+_rc=0
+_out=$("$WT" validate "$TR" 2>&1) || _rc=$?
+[ "$_rc" != 0 ] && ok "② 字符引用 &#9; 的制表符 → 非 0" || bad "带真制表符的 cmd 放行了" "$_out"
+case $_out in
+    *"制表符"*) ok "说清了是制表符/换行的问题" ;;
+    *) bad "没说清" "$_out" ;;
+esac
 
 E=$(mkproj "tools/gen-empty")
 mkdir -p "$E/__output"

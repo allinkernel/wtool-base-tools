@@ -1037,6 +1037,13 @@ def _parse_export(tag, child, meta, errors, warnings, manifest_path):
             errors.append("<generate script=%r> 必须是不含 .. 的相对路径（%s）"
                           % (script, manifest_path))
             return None
+        # 计划表是**制表符分隔**的 TSV（plan.tsv），cmd 里混进制表符/换行会把行拆坏
+        # —— 那种错会静默成"后面的列整体前移"，比报错难查得多。
+        if cmd and any(ch in cmd for ch in "\t\n\r"):
+            errors.append("<generate dest=%r> 的 cmd= 里不能有制表符或换行"
+                          "（计划表是 TSV；要跑多行就用 script= 写个脚本）（%s）"
+                          % (dest, manifest_path))
+            return None
         return Entry("generate", dest, dest=dest, cmd=cmd, script=script,
                      manifest=manifest_path)
 
