@@ -99,12 +99,14 @@ WTOOL_ARTIFACTS / WTOOL_STATE_DIR
 
 ## 自举
 
-`bootstrap` 本身也是一个 wtool 项目：
+`bootstrap` 本身也是一个 wtool 项目。`install.sh` 是**安装器的唯一入口**（六项职责
+见 `docs/spec.md` §12）：
 
 ```sh
-cd bootstrap && ./install.sh     # 建 ~/.wtool/wtool/bootstrap（L1 链）+ 写 rc 块
-exec zsh                          # 之后 wtool / WTOOL_PREFIX / OS 变量就位
-wtool doctor
+cd bootstrap && ./install.sh     # ① L1 链 + 两条入口链 ② var/ 账本 ③ manifest 三件套
+                                 # ④ env.{zsh,bash} ⑤ 新进程里 source + wtool check
+exec zsh                         # ⑥ rc 那两行**默认只打印**，你贴一下（或回答 y 让它代写）
+wtool doctor                     # 之后 wtool / WTOOL_PREFIX / OS 变量就位
 ```
 
 ## 依赖

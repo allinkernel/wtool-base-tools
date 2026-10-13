@@ -810,6 +810,86 @@ apt-get update && apt-get install -y --no-install-recommends \
 
 `wtool bootstrap` 必须在第 1 步之后才能跑；引擎检测到缺 `python3` 会直接报错。
 
+### `install.sh` 的六项职责（ADR-0045 §1.8 / D42）
+
+`install.sh` 是**安装器的唯一入口**，它对用户只承诺一句话：
+
+> **source 了 `$WTOOL_HOME/env.zsh`（bash 用 `env.bash`）之后，`wtool` 这条命令就能用。**
+
+它不装任何项目（那是 `wtool bootstrap` 的事）。三条入口：
+
+```
+$WTOOL_HOME/install.sh
+   └─► $WTOOL_HOME/wtool/install.sh
+          └─► $WTOOL_HOME/wtool/<安装器项目>/scripts/install.sh      ← 唯一入口
+```
+
+⚠️ **项目名不写死在代码里**：`<安装器项目>` = 本脚本所在目录的上一级、相对工作区根
+的路径（今天叫 `bootstrap`，改名成 `wtool-base-tools` 时这里一个字都不用动）。
+
+六项职责，**每一步失败都非 0 退出并说清是哪一步**：
+
+| # | 职责 | 落点 / 判据 |
+|---|---|---|
+| 第 0 步 | 准备运行环境（探测发行版 → `install-<os><ver>.sh`） | 见 §12 与 §10.5 |
+| ① | 装安装器项目本体（`wtool install <自己> --force`）+ **两条入口链** | `[ -x "$WTOOL_HOME/wtool/<项目>/wtool.sh" ]`；`readlink -f "$WTOOL_HOME/install.sh"` = 项目里那个 `scripts/install.sh`。两条链都是**相对**链（两端都在 `.wtool` 里 → 整棵搬走照样有效） |
+| ①b | 工作区根入口（`install.sh` / `uninstall.sh` / `README.md` / `guide.md`） | 没有 repo 客户端的工作区（发布包解开的）靠它补齐；目标不存在就**跳过并说明**（不静默） |
+| ② | 建 `var/` 账本，并记下**这次动作** | 引擎的账在 `$WTOOL_HOME/var/{registry.tsv,<项目>/}`；安装器自己的两笔在 `var/installer/`：`actions.tsv`（时间线，追加）、`links.tsv`（两条入口链，截断重写 → 幂等）。**删掉 `var/` 之后 `wtool check` 必须非 0**（D42 的判据）—— 见 §16 |
+| ③ | 建 **manifest 三件套** | 见下面「manifest 三件套」 |
+| ④ | 建 `env.{zsh,bash}`，**先**加载安装器项目自己 | 两个文件都得在；按 `(priority, 项目路径)` 排序，安装器项目 `priority=5`（最早）→ `wtool` 命令与 `$WTOOL_HOME/usr/bin` 先就位 |
+| ⑤ | **自检**：起一个新的 zsh/bash 子进程，`source env.<shell>` + `wtool check` | 子进程退出码 0。**只摘 `WTOOL_*` 变量 + 摘掉 PATH 里的 wtool 目录**（不是 `env -i` 清空一切：实测容器里宿主挂进来的 python3 靠 `LD_LIBRARY_PATH` 找 libexpat，一清就死在引擎之前）。判据是"**这个** `WTOOL_HOME` 里的 `wtool`"，不只是"PATH 上有 wtool"（装过两份时会假绿）。失败退出码：3=`source` 失败 / 4=找不到（或不是这个 home 里的）`wtool` / 5=`$WTOOL_HOME/usr/bin` 不在 PATH / 6=`wtool check` 报问题 |
+| ⑥ | **问过用户才**改 rc | rc 最后两行 = `export WTOOL_HOME=…` + `source ${WTOOL_HOME}/env.{zsh,bash}`。默认**只打印**；只有**交互确认**（有终端才问，回答 `y`）或 `--write-rc`（命令行上已明确同意）才代写；**非交互（`< /dev/null` / 管道 / CI）不问、不写、也不挂住**。写之前先看是不是已经有了（幂等：跑十遍也只有两行） |
+
+用法：
+
+```sh
+./install.sh                   # 装到 $WTOOL_HOME；没给就 $HOME/.wtool
+./install.sh --dry-run         # 只说要做什么，一个字节都不写
+./install.sh --home <目录>     # 装到别处（= rc 里那行 `export WTOOL_HOME=<目录>`）
+./install.sh --write-rc        # 你已经在命令行上明确同意写 rc 那两行（不再问）
+./install.sh --no-rc           # 连问都不问，只打印
+WTOOL_MIRROR=… ./install.sh    # 顺带换 apt 源（§10.5）
+```
+
+⚠️ **被引擎调用时立刻退出 0**：`wtool install/uninstall <安装器项目>` 会跑到
+`scripts/install.sh`（卸载那条路带的是 `--uninstall`）。这条早退必须抢在
+**参数解析之前、第 0 步之前** —— 否则 `--uninstall` 会撞上"未知参数"，而第 0 步会
+在引擎正装东西的时候去跑 apt（两条都实测踩过）。
+
+⚠️ **`env.{zsh,bash}` 整条 source 链的末尾状态必须是 0**：这包括它 source 的项目
+env 块、以及那些块再 source 的补全文件。实测踩过：`completion/wtool.zsh` 末行写成
+`(( … )) && compdef …`，`compdef` 拿不到时短路成 1 → `source env.zsh` 返回 1 →
+⑤ 自检失败，用户看到的是一句跟 completion 毫无关系的报错。**末行要么是 `if …; then
+…; fi`，要么显式收尾成 0。**
+
+### manifest 三件套（ADR-0045 §1.6 / D18 / D20）
+
+```
+$WTOOL_HOME/wtool/.repo/manifests/default.xml            ← 保留 `.repo` 段（D18）：
+                                                           解析代码只有一条路径
+$WTOOL_HOME/wtool/.repo/manifests/default.xml.sha256
+$WTOOL_HOME/wtool/.repo/manifests/default.xml.commitid
+```
+
+`install.sh` 的职责③建它们，两种环境两种做法（**第三种不硬失败**）：
+
+| 环境 | 判据 | `default.xml` | `.sha256` / `.commitid` |
+|---|---|---|---|
+| **满血工作区** | `$WS/.repo/projects` **且** `.repo/project-objects`（D17） | **指向 live 清单的绝对链**（`$WS/.repo/manifests/default.xml`）—— 永远跟 live 同步 | **现场算**：`sha256sum` + `git -C $WS/.repo/manifests rev-parse HEAD`。同一个位置同时有 live 与包内副本时**以 live 为准**，差一行就报出来 |
+| **bundle / 无 repo** | 上面两条缺，但三件套随包来了 | **包内副本**（实体文件） | **只校验、不覆盖**：`.sha256` 对不上 → **停手非 0**；缺件 / `commitid` 不是 id → **停手非 0** |
+| 只有 wtool 一份（§1.10） | 两者都没有 | 建不出来 | **只警告，不硬失败**：这种机器上 `install`/`check` 都不读三件套，只是 `pack-release` / `pack-offline-release` 用不了 |
+
+格式（两条都照抄命令的输出，用户能直接核）：
+
+```console
+$ cat $WTOOL_HOME/wtool/.repo/manifests/default.xml.sha256
+e922b0dc8df97e29cfd0add349a5fcb01a64ea6852cfca9b50bdf60ccd39f19a  default.xml
+$ (cd $WTOOL_HOME/wtool/.repo/manifests && sha256sum default.xml)   # 逐字相同
+$ sha256sum -c default.xml.sha256                                   # default.xml: OK
+$ cat $WTOOL_HOME/wtool/.repo/manifests/default.xml.commitid
+2e8b3025ca1cbed1ff317d6b9e6360aea4d3b95c        # = live 清单仓的 HEAD
+```
+
 ---
 
 ## 13. 构建层：`<build kind>` 决定形状与驱动方式（ADR-025 / ADR-0029）
@@ -1369,6 +1449,13 @@ wtool _complete <正在敲的词> [已经敲过的词...]   # 内部命令（下
 报的东西包括：软链不见了 / 被换成了实体 / 指向变了 / 声明了却从没装过（只有在明确
 点名一个项目时才说）/ env 块丢了 / 汇总文件或 loader 块与"还有几个项目装着"对不上 /
 `~/usr` 不见了或指向不对。
+
+第 5b 块（ADR-0045 / D42）又加了两条**全局**检查，都是"删了它 check 会假绿"的地方：
+
+| 检查 | 判据 | 为什么必须有 |
+|---|---|---|
+| **账本目录不见了** | `$WTOOL_HOME/var/` 不在，但 wtool 生成的文件还在（`env.{zsh,bash}` / `install.sh` / `wtool/install.sh` / 三件套） | 账本一删，`check` 反而**一条都不报**（"该有什么"本身就存在账本里）。实测旧行为：`rm -rf $WTOOL_HOME/var && wtool check` → "一切对得上"。⚠️ 判据**不能**用 `wtool/` / `usr/`：`uninstall all` 之后它们照样在 |
+| **安装器的两条入口链** | `var/installer/links.tsv` 里逐条验"还是不是软链、还指不指向当初那个目标" | 这两条链不归任何项目，引擎的 journal 不管它们。**有记录才查** —— 只跑过 `wtool install <项目>` 的机器没有这两条链，不该报红 |
 
 ### `wtool repair [<项目>|all]`
 

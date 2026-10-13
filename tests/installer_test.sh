@@ -376,6 +376,24 @@ chk "  rc 也没动" "$(grep -c 'WTOOL_HOME' "$F7/home/.zshrc" || true)" "0"
 grep -q '\[dry-run\]' "$F7/log" && ok "  打了要做什么" || bad "  什么都没说"
 
 echo
+echo "== 15. uninstall.sh：收掉 install.sh 建的东西（人手动那条路）=="
+F8=$(mkfix f8 full); ENTRY8=$F8/ws/bootstrap/scripts/install.sh; B8=$F8/home/.wtool
+r=$(runfix "$F8" "$ENTRY8")
+chk "先装好" "$r" "0"
+_u=0
+env -i PATH="$FIX_PATH" HOME="$F8/home" sh "$F8/ws/bootstrap/scripts/uninstall.sh" \
+    > "$F8/un.log" 2>&1 || _u=$?
+chk "uninstall.sh 退出码 0" "$_u" "0"
+hasnt "两条入口链都收掉了（\$WTOOL_HOME/install.sh）" "$B8/install.sh"
+hasnt "两条入口链都收掉了（\$WTOOL_HOME/wtool/install.sh）" "$B8/wtool/install.sh"
+hasnt "var/installer 的账也收掉了" "$B8/var/installer"
+has "★工作区里那份项目一个字节没动（卸载不删源码）" "$F8/ws/bootstrap/wtool.sh"
+hasnt "引擎把 L1 也逆放掉了（那是它的账）" "$B8/wtool/bootstrap"
+grep -q '已删除' "$F8/un.log" && ok "说了收掉了什么" || bad "没说收掉了什么" "$(tail -5 "$F8/un.log")"
+grep -q 'manifest 三件套' "$F8/un.log" && ok "说清了三件套不收（那不是安装器的账）" \
+    || bad "没说清三件套的下场"
+
+echo
 echo "installer_test: PASS $pass  FAIL $fail"
 [ "$fail" = 0 ] || exit 1
 exit 0

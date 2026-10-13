@@ -42,11 +42,13 @@
 #                             （满血=绝对链+现场算 / bundle=只校验不覆盖）、
 #                             六步**各自的**失败路径都非 0、rc"非交互一个字节都不写 /
 #                             pty 答 y 才写 / 写了也只有两行"、--dry-run 零副作用
-#                             （78 条 —— 2026-10-13，第 5b 块新加）
-#                             —— 十二组共 1255 条（2026-10-13 实测；ADR-0045 第 5b 块：
-#                             1177→1255 = 新增 installer 78 条；同时 pairing 场景 9 的
-#                             两条断言改到新位置（$WTOOL_HOME/bootstrap → wtool/bootstrap，
-#                             D23），条数不变）。要数字请以**跑出来的 PASS 行**为准。
+#                             含 uninstall.sh 对称收尾那两场
+#                             （89 条 —— 2026-10-13，第 5b 块新加）
+#                             —— 十二组共 1267 条（2026-10-13 实测；ADR-0045 第 5b 块：
+#                             1177→1267 = 新增 installer 89 条 + pairing 场景 9 多一条
+#                             "D23 老位置不该存在"（55→56）；同时把 pairing 那两条断言
+#                             改到新位置（$WTOOL_HOME/bootstrap → wtool/bootstrap））。
+#                             要数字请以**跑出来的 PASS 行**为准。
 #   tests/docker_build_real.sh 同一件事的**真 docker** 冒烟测试（人工跑，见文件头）
 #   tests/container_test.sh   容器里从零装一遍（需要 docker，见文件头注释）
 #   tests/container_acceptance.sh  人工总验收：把它喂给容器里的 container-raw.sh（见文件头）
