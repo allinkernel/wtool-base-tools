@@ -1881,7 +1881,6 @@ wt_pack_offline_all() {
     # （`wtool pack-offline-release all` 默认先查再打），同一屏里说两遍只会淹掉重点。
 
     _oa_asset=$(awk -F'\t' '$1=="asset"{print $2}' "$_oa_scratch/all.tsv")
-    _oa_prefix=$(awk -F'\t' '$1=="prefix"{print $2}' "$_oa_scratch/all.tsv")
     _oa_check=$(awk -F'\t' '$1=="check"{print $2}' "$_oa_scratch/all.tsv")
     _oa_nproj=$(awk -F'\t' '$1=="projects"{print $2}' "$_oa_scratch/all.tsv")
     _oa_nfile=$(awk -F'\t' '$1=="files"{print $2}' "$_oa_scratch/all.tsv")
