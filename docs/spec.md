@@ -57,13 +57,24 @@
                                                          __output/ → __release/（**不联网**；只 ③ 类）
   wtool publish-release [<项目>...] [--tag=TAG] [--dry-run] [--force]
                         [--allow-foreign] [--out=DIR]     __release/ → GitHub Release（**只上传**；只 ③ 类）
-  wtool pack-offline-release <项目>...|all [--volume-size=32M] [--dry-run]
-                                                         **离线族**：自足包 → <项目>/__release/
+  wtool pack-offline-release <项目>...|each [--volume-size=32M] [--dry-run]
+                                                         **离线族·逐项目**：自足包 → <项目>/__release/
                                                          （① source-offline.zip；②③ release-offline.zip；
                                                           安装器项目 wtool-base-tools.tar.gz = .wtool/ 树）
-  wtool publish-offline-release <项目>...|all [--tag=offline-<日期>] [--dry-run] [--force]
+  wtool pack-offline-release all [--check|--no-check|--check-only] [--os-version=<ver>]
+                        [--out=DIR] [--volume-size=32M]
+                                                         **整机迁移包**（D55）：$WTOOL_HOME → 一份能搬走的
+                                                         .wtool 树（L1 实体化 / L2 留链 / __output 只带被
+                                                         <export_*> 指定的那部分）→ $WTOOL_ROOT/__release/
+                                                         wtool-all-ubuntu<版本>.tar.gz（可分卷）；
+                                                         默认**先查再打、打完再查**（判据见下）
+  wtool publish-offline-release <项目>...|each [--tag=offline-<日期>] [--dry-run] [--force]
                         [--allow-foreign] [--repo=O/R]    自足包 + 校验文件 → **offline-<日期>** 那个 release 页
                                                          （和开发机那一族**分开**：两个 tag / 两个页面，D56）
+  wtool publish-offline-release all [--tag=offline-<日期>] [--dry-run] [--target=<sha>]
+                        [--repo=O/R] [--out=DIR] [--os-version=<ver>]
+                                                         整机迁移包 → **清单里 wtool-doc 那个仓**的 release 页
+                                                         （§7.2 第 6 条；仓库名从清单查，不写死）
   wtool download-release [<项目>...|all] [--dry-run]      GitHub Release → __release/（**只下载**；②③）
   wtool unpack-release <项目>... [--from=目录]             __release/ → 项目 __output/（**不联网**；
                                                          解到哪读 release.json 的对照表 —— 声明式，D57）
@@ -1314,15 +1325,62 @@ wtool download-release all                    # 上面两种都算
   不依赖 wtool**，用户 `sh check-hash.sh` 就跑（拼回整包的命令也写在注释里）。
 - 落在 `<项目>/__release/`，只清**本族**这一版会重新生成的文件（不碰 `release.zip` /
   `dist.json` / 用户自己的东西）。
-- `all` = 工作区里所有项目（三类都支持离线族）。
+- `each` = 工作区里所有项目各产一个（三类都支持离线族）。
 - **两个 `pack-*` 都会刷新** `scripts/release.json` 的 `artifacts` 对照表；
   **两个 `publish-*` 各写自己那族的 tag**（`tag` / `offlineTag`）——
   合并写在 py 里（`release-json --existing`），谁也不许抹掉别人的账。
 
+#### `all` vs `each`：**整机迁移包**和**逐项目自足包**是两件事（D55，2026-10-14 落地）
+
+| | `pack-offline-release each` | `pack-offline-release all` |
+|---|---|---|
+| 打的是什么 | **每个项目各一个包**（工作区里有几个项目就有几个） | **整台机器的 `$WTOOL_HOME`**（一个包） |
+| 给谁 | **已经有 `.wtool`**、只缺某个项目的断网机 | **换机器**：把开发机的 `.wtool` 整体搬到一个没有网的机器上 |
+| 形状 | 顶层 `wtool/<项目路径>/…`（`cp -a wtool/. "$WTOOL_HOME/wtool/"` 合并） | 顶层 **`.wtool/`**（`tar xf` 即得，改 rc 里 `export WTOOL_HOME=` 指过去就能用） |
+| 里面有什么 | ① 源码 / ②③`__output/`（整棵）+ 声明面 | **只放账本算出来的闭包**：L1（`wtool/<项目>`）**实体化**、L2（`usr/…`）**保持为链**、`__output` 只带被 `<export_*>` / `<generate>` 指定的那部分（D45） |
+| 装什么 | 一个项目的链 | 这台机器上**装过的所有项目**（闭包由 `$WTOOL_HOME/var/<项目>/meta.tsv` 定，不是"工作区里有什么"） |
+| 目标机要不要先有 wtool | 要（合并进已有的 `.wtool`） | **不要**（包里就是一份 `.wtool`） |
+| 资产名 | ① `source-offline.zip` / ②③ `release-offline.zip` / 安装器 `wtool-base-tools.tar.gz` | **`wtool-all-ubuntu<版本>.tar.gz`**（发行版写在名字里：包里那份 `zsh` 是按它编的，glibc 要求不同） |
+| 发布落点 | 各项目**自己的** release 页，tag `offline-<日期>` | **`wtool-doc`** 的 release 页（DESIGN §7.2 第 6 条；仓库从 `.repo/manifests/default.xml` 里查，**不写死**） |
+| `--check` | 无 | **有**，而且默认开（先查再打、打完再查一遍包） |
+
+> ⚠️ **改名说明（2026-10-14）**：`all` 这个词以前指的是"逐项目各产一个包"。
+> 按 D55（用户 2026-10-13 定）**`all` 让给整机迁移包**，逐项目那条改叫 **`each`** ——
+> **能力一个都没少**，两条路各自都还在（`publish-offline-release` 同样：`all` = 整机包 → wtool-doc，
+> `each` = 逐项目 → 各自的 release 页）。
+
+**整机包的 `--check` 四条判据**（DESIGN §2.4 / D39 + D44 + D45；实现只有一处：
+`wtool_plan.py` 的 `offline-all-check`）：
+
+1. **L1 已实体化**：包里 `$WTOOL_HOME/wtool/<项目>` 是**实体目录**（不是链、不悬空，且非空）；
+2. **L2 仍是链、且包内可解析**：`usr/…` 下仍是**相对**软链，目标在包内存在
+   （**不许**被实体化成真文件）；
+3. **没有禁品实体化进来**：`.git`、`.repo/projects`、`.repo/project-objects`、`__layer`；
+   `__output` 允许，但只允许被 `<export_*>` / `<generate>` 指定的那部分（其余出现要报告）；
+4. **异常报告、不静默**：体积异常（默认 >1G 或单文件 >200M）、以及闭包之外仍指向包外的链
+   —— 都**打印出来让人决定**（不是悄悄放过）。
+
+另外查：包顶层**只有 `.wtool/`**、**没有 `dist.json`**（离线族，D51）、
+manifest 三件套**自洽**（`.sha256` 与包内 `default.xml` 逐字对得上 —— 目标机
+`install.sh` 对"包里来的"三件套是**只校验、不覆盖**，对不上就报错停手）。
+
+**打包在哪打**（`--os-version=`）：包里那份 ③ 类产物是按发行版编的，
+`__output/usr` 只是一条"选本机那套"的软链。所以整机包**按发行版分三份**，
+在**对应发行版的容器里**打（`--os-version=<22.04|24.04|26.04>`，不给就跟本机走）——
+它会把 `__output/usr/…` 解析成 `__output/ubuntu_<版本>/usr/…` 再拷进包，盖在**声明的那个路径**上，
+这样 L2 那条相对链在包里照样解析得到。
+
+**整机包的可选项**：`--check` / `--no-check`（默认**先查再打**）、`--check-only`（只查不打；
+包在就查包、不在就查活的工作区）、`--out=DIR`（默认 `$WTOOL_ROOT/__release/`）、
+`--volume-size=`（默认 32M，超了就分卷 + `check-hash-ubuntu<版本>.sh`）。
+
 **`publish-offline-release`**：只上传**离线族**的文件（自足包 + `.sha256` +
-分卷 + `check-hash.sh`；判据在 `wtool_plan.py` 的 `offline-assets`），
+分卷 + `check-hash*.sh`；判据在 `wtool_plan.py` 的 `offline-assets`），
 目标 tag 默认 `offline-<今天>`，`--tag=` 给的**必须含 `offline`**（否则拒 —— D56 的硬要求），
 建 tag 时用打包时记在 `__release/.offline` 里的 commit 当 `--target`（同 ADR-0041 的理由）。
+`publish-offline-release all`（整机包）的 `--target` 整机包**没有单一 commit**
+（它的内容来自 N 个仓）→ 用 `--target=<sha>` 显式给（例如 `wtool-doc` 自己的 HEAD，
+那样 tag 指向"讲这个包的那版文档"）。
 
 **断网机上换 / 升级一个项目**（顺序不能变，D52）：
 
@@ -1337,10 +1395,10 @@ wtool install shell/zsh                          # ⑤ 重新装
 第 ② 步**必须手工 `rm -rf`**：`wtool uninstall` 只逆放它自己建的链接与账本，**不删**
 `.wtool/wtool/<项目>` —— 那是从包里**合并**进来的，不在账本里；不删就会新旧文件混杂。
 
-> ⚠️ **`pack-offline-release all` 这个名字有歧义**（待用户拍板）：DESIGN §2.4 / §8.2 把
-> `all` 留给**整机迁移包**（L1 实体化 + L2 留链 + `--check` + 分卷 `wtool-all.tar.gz`），
-> 那一条**还没实现**。今天 `all` = 工作区里所有项目各产一个自足包（本轮用户口径）。
-> 落地整机包时要二选一：整机包改名，或给逐项目那条加开关。
+> ⚠️ **`all` 和 `each` 是两个意思**（2026-10-14 落地，D55）：`all` = **整机迁移包**
+> （L1 实体化 + L2 留链 + `--check` + 分卷 `wtool-all-ubuntu<版本>.tar.gz`，发到 wtool-doc），
+> `each` = 工作区里每个项目各产一个自足包（**这条就是 `all` 以前的意思**）。
+> 两者的对照表、判据、打包在哪打，见上一节「`all` vs `each`」。
 
 ### publish-release：只上传
 

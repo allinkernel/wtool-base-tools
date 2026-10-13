@@ -45,15 +45,25 @@
 #   wtool publish-release [<项目>...] [--tag=TAG] [--dry-run] [--force]
 #                       把 <项目>/__release/ 里的东西传到 GitHub Release（**只上传**），
 #                       成功之后写 scripts/release.json（下载清单，记得提交）
-#   wtool pack-offline-release <项目>...|all [--volume-size=32M] [--dry-run]
-#                       **离线族**：产自足包到 <项目>/__release/ —— ① source-offline.zip、
-#                       ②③ release-offline.zip、安装器项目 wtool-base-tools.tar.gz
-#                       （解开是 .wtool/ 树）；包里是"离线机 wtool install 需要的东西"
+#   wtool pack-offline-release <项目>...|each [--volume-size=32M] [--dry-run]
+#                       **离线族·逐项目**：产自足包到 <项目>/__release/ ——
+#                       ① source-offline.zip、②③ release-offline.zip、
+#                       安装器项目 wtool-base-tools.tar.gz（解开是 .wtool/ 树）；
+#                       包里是"离线机 wtool install 需要的东西"
 #                       （wtool.xml + env.* + 源码或产物），**不放 dist.json**；
 #                       旁边写 <包名>.sha256，分卷时再给 check-hash.sh（不依赖 wtool）
-#   wtool publish-offline-release <项目>...|all [--tag=offline-YYYY-MM-DD] [--dry-run]
+#   wtool pack-offline-release all [--check|--no-check|--check-only] [--os-version=]
+#                       **整机迁移包**（另一件事，D55）：把**这台机器的
+#                       $WTOOL_HOME** 变成一份能搬走的 .wtool 树（L1 实体化 /
+#                       L2 留链 / 只带被 <export_*> 指定的 __output）→
+#                       $WTOOL_ROOT/__release/wtool-all-ubuntu<版本>.tar.gz（可分卷）。
+#                       默认**先查再打**：不通过就不打包；打完再查一遍包
+#   wtool publish-offline-release <项目>...|each [--tag=offline-YYYY-MM-DD] [--dry-run]
 #                       把自足包 + 校验文件传到 **offline-<日期>** 那个 release 页
 #                       （和开发机那族的 tag/release 页**分开**，ADR-0045 / D56）
+#   wtool publish-offline-release all [--repo=owner/name] [--tag=offline-YYYY-MM-DD]
+#                       整机迁移包 → **清单里 wtool-doc 那个仓**的 release 页
+#                       （设计 §7.2 第 6 条：wtool-doc 承载整机包）
 #   wtool unpack-layer   <项目> [--layer=] [--target=]
 #                       __layer/<target>/ 的顶层 blob → __output/<target>/<层>/。**不联网、不要 docker**
 #   wtool push-layer     <项目>... [--registry=<前缀>] [--target=] [--layer=]
@@ -364,7 +374,10 @@ wt_expand_targets() {   # <过滤条件> <参数...>
     _et_filter=$1; shift
     _et_out=""
     for _et_a in "$@"; do
-        if [ "$_et_a" = "all" ]; then
+        # `all` 和 `each` 在这里是**同一个意思**：工作区里所有项目，展开成一张名单。
+        # 分开只是为了读起来对：`pack-offline-release all` 打的是**整台机器**
+        # （一个包），所以那里逐项目那条必须显式写成 `each`（见 docs/spec.md）。
+        if [ "$_et_a" = "all" ] || [ "$_et_a" = "each" ]; then
             _et_out="$_et_out $(wt_all_projects "$_et_filter" | tr '\n' ' ')"
         else
             _et_out="$_et_out $_et_a"
@@ -2636,18 +2649,35 @@ cmd_pack_release() {
 # ⚠️ DESIGN §2.4 / §8.2 把这个词留给了**整机迁移包**（L1 实体化 + L2 留链 + `--check`），
 #    那一条**还没实现** —— 落地时这个名字要二选一（整机包改名 / 逐项目加开关）。
 # --------------------------------------------------------------------------
+# `all` = **整机迁移包**（DESIGN §2.4 / §7.2 / D55：L1 实体化 + L2 留链 + `--check` +
+#   分卷 `wtool-all*.tar.gz`）—— 给"换台机器、那台没网"的人。
+# `each` = **逐项目自足包**：工作区里每个项目各产一个（① `source-offline.zip` /
+#   ②③ `release-offline.zip` / 安装器 `wtool-base-tools.tar.gz`）—— 给"已经有
+#   `.wtool`、只缺某个项目"的断网机。
+# ⚠️ 这两个词以前是一个（`all` 就是逐项目）。按 D55 把 `all` 让给整机包，
+#    逐项目那条改叫 `each`，**能力一个都没少**（对照表见 docs/spec.md）。
+# --------------------------------------------------------------------------
 cmd_pack_offline_release() {
     _targets=""
     _vol_override=""
+    _out_override=""
+    _osver_override=""
+    _check=1
+    _check_only=0
     for arg in "$@"; do
         case $arg in
             --dry-run)        WTOOL_DRY_RUN=1 ;;
             --volume-size=*)  _vol_override=${arg#--volume-size=} ;;
+            --check)          _check=1 ;;
+            --no-check)       _check=0 ;;
+            --check-only)     _check_only=1; _check=1 ;;
+            --out=*)          _out_override=${arg#--out=} ;;
+            --os-version=*)   _osver_override=${arg#--os-version=} ;;
             -*)               wt_die "未知参数: $arg" ;;
             *)                _targets="$_targets $arg" ;;
         esac
     done
-    [ -n "$_targets" ] || wt_die "用法: wtool pack-offline-release <项目>...|all [--volume-size=32M] [--dry-run]
+    [ -n "$_targets" ] || wt_die "用法: wtool pack-offline-release <项目>...|all|each [选项]
 
   产**离线自足包**到 <项目>/__release/ —— 按 kind 定名：
     ① 纯源码            → source-offline.zip
@@ -2655,14 +2685,63 @@ cmd_pack_offline_release() {
     安装器项目（引擎自己）→ wtool-base-tools.tar.gz（解开是 .wtool/ 树）
   包内第一层是 wtool/<项目路径>/…（解压即合并进 \$WTOOL_HOME/wtool）；
   **不放 dist.json**；旁边写 <包名>.sha256，分卷时再给 check-hash.sh（不依赖 wtool）。
-  断网机：unzip → cp -a wtool/. \"\$WTOOL_HOME/wtool/\" → wtool install <项目>"
-    [ -n "$_vol_override" ] || _vol_override=${WTOOL_VOLUME_SIZE:-32M}
+  断网机：unzip → cp -a wtool/. \"\$WTOOL_HOME/wtool/\" → wtool install <项目>
 
-    _targets=$(wt_expand_targets "" $_targets)
-    [ -n "$(printf '%s' "$_targets" | tr -d ' ')" ] || wt_die "没有匹配的项目"
+  all   **整机迁移包**（另一件事，D55）：把**这台机器的 \$WTOOL_HOME** 变成一份能搬走
+        的 .wtool 树（L1 实体化 / L2 留链 / 只带被 <export_*> 指定的 __output），
+        打成 wtool-all-ubuntu<版本>.tar.gz（可分卷）→ 解开来顶层是 .wtool/，
+        改 rc 里 export WTOOL_HOME= 指过去就能用。产物落 \$WTOOL_ROOT/__release/（--out= 可改）。
+        选项：--check / --no-check（默认**先查再打**）、--check-only（只查不打）、
+              --os-version=<22.04|24.04|26.04>（按发行版挑 __output 里那套产物）
+  each  逐项目各产一个自足包（= 这个词以前给 all 的意思，一个都没少）"
+    [ -n "$_vol_override" ] || _vol_override=${WTOOL_VOLUME_SIZE:-32M}
 
     _scratch=$(mktemp -d "${TMPDIR:-/tmp}/wtool-offline.XXXXXX")
     trap 'rm -rf -- "$_scratch"' EXIT INT TERM
+    _osver=${_osver_override:-${WTOOL_OS_VERSION:-}}
+
+    # ---- 整机迁移包（all）--------------------------------------------------
+    case " $_targets " in
+        *" all "*)
+            if [ "$(printf '%s' "$_targets" | tr -d ' ')" != "all" ]; then
+                wt_die "all（整机迁移包）不能和别的目标混在一起 —— 它打的是**整台机器**。
+  逐项目请用：wtool pack-offline-release each"
+            fi
+            _pub=${_out_override:-$WTOOL_ROOT/__release}
+            _asset=$(python3 "$PY" bundle-asset --os-version "$_osver")
+            if [ "$_check_only" = 1 ]; then
+                if [ -f "$_pub/$_asset" ]; then
+                    wt_info "── 只查包：$_pub/$_asset"
+                    python3 "$PY" offline-all-check --tar "$_pub/$_asset" \
+                        --scratch "$_scratch/chk" --os-version "$_osver" || return $?
+                else
+                    wt_info "── 只查**活的工作区**（$_pub/$_asset 还不存在，没打包过）"
+                    python3 "$PY" offline-all-plan --home "$WTOOL_HOME" --root "$WTOOL_ROOT" \
+                        --scratch "$_scratch/plan" --os-version "$_osver" || return $?
+                fi
+                return 0
+            fi
+            if [ "$_check" = 1 ]; then
+                wt_info "── 整机迁移包：**先查再打**（闭包不完整就不打包）"
+                python3 "$PY" offline-all-plan --home "$WTOOL_HOME" --root "$WTOOL_ROOT" \
+                    --scratch "$_scratch/pre" --os-version "$_osver" >&2 \
+                    || wt_die "整机包的闭包检查不通过（见上面的 error）—— 不打包"
+            fi
+            wt_pack_offline_all "$_vol_override" "$_scratch/pack" \
+                "$_out_override" "$_osver"
+            if [ "$_check" = 1 ]; then
+                _asset=$(awk -F'\t' '$1=="asset"{print $2}' "$_scratch/pack/all.tsv")
+                wt_info "── 打完再查一遍**包**（判据 1–4：L1 实体 / L2 留链 / 无禁品 / 异常报告）"
+                python3 "$PY" offline-all-check --tar "$_pub/$_asset" \
+                    --scratch "$_scratch/chk" --os-version "$_osver" \
+                    || { wt_warn "整机包**检查不通过** —— 包留在 $_pub/ 让人看，别急着发"; return 1; }
+            fi
+            return 0
+            ;;
+    esac
+
+    _targets=$(wt_expand_targets "" $_targets)
+    [ -n "$(printf '%s' "$_targets" | tr -d ' ')" ] || wt_die "没有匹配的项目"
 
     _done=0
     for _want in $_targets; do
@@ -3114,8 +3193,8 @@ wt_complete_flags() {   # <命令> —— 候选开关，一行一个（**只列
         build)              printf '%s\n' --dry-run --force --jobs= --target= --rebuild ;;
         pack-release)       printf '%s\n' --dry-run --force --tag= --volume-size= --repo= ;;
         publish-release)    printf '%s\n' --dry-run --force --tag= --allow-foreign --out= ;;
-        pack-offline-release)    printf '%s\n' --dry-run --volume-size= ;;
-        publish-offline-release) printf '%s\n' --dry-run --force --tag= --allow-foreign --repo= ;;
+        pack-offline-release)    printf '%s\n' --dry-run --volume-size= --check --no-check --check-only --out= --os-version= ;;
+        publish-offline-release) printf '%s\n' --dry-run --force --tag= --allow-foreign --repo= --target= --out= --os-version= ;;
         download-release)   printf '%s\n' --dry-run ;;
         unpack-release)     printf '%s\n' --dry-run --from= ;;
         sudo-install)       printf '%s\n' --dry-run --force ;;
@@ -3900,6 +3979,9 @@ cmd_publish_offline_release() {
     _want=""
     _tag_override=""
     _repo_override=""
+    _target_override=""
+    _out_override=""
+    _osver_override=""
     for arg in "$@"; do
         case $arg in
             --dry-run)       WTOOL_DRY_RUN=1 ;;
@@ -3907,25 +3989,109 @@ cmd_publish_offline_release() {
             --allow-foreign) WTOOL_ALLOW_FOREIGN=1 ;;
             --tag=*)         _tag_override=${arg#--tag=} ;;
             --repo=*)        _repo_override=${arg#--repo=} ;;
+            --target=*)      _target_override=${arg#--target=} ;;
+            --out=*)         _out_override=${arg#--out=} ;;
+            --os-version=*)  _osver_override=${arg#--os-version=} ;;
             -*)              wt_die "未知参数: $arg" ;;
             *)               _want="$_want $arg" ;;
         esac
     done
-    [ -n "$_want" ] || wt_die "用法: wtool publish-offline-release <项目>...|all [--tag=offline-YYYY-MM-DD] [--dry-run] [--force]
+    [ -n "$_want" ] || wt_die "用法: wtool publish-offline-release <项目>...|all|each [选项]
 
   把 <项目>/__release/ 里的**离线自足包**（+ .sha256 / 分卷 check-hash.sh）
   传到 offline-<日期> 那个 release 页 —— 它和开发机那份（publish-release 的
   release.zip + dist.json）是**两个 tag、两个页面**（ADR-0045 / D56）。
   tag 名必须**明显带 offline**（默认 offline-<今天>），传别的名字会被拒。
-  先打包：wtool pack-offline-release <项目>"
+  先打包：wtool pack-offline-release <项目>
+
+  all   **整机迁移包**（D55）：把 \$WTOOL_ROOT/__release/ 里那一族
+        （wtool-all-ubuntu<版本>.tar.gz + .sha256 + 分卷 + check-hash*.sh）
+        传到**清单里 wtool-doc 那个仓**的 release 页（设计 §7.2 第 6 条：
+        整机包由 wtool-doc 承载）。选项：--os-version= / --out= /
+        --repo=owner/name（默认从清单算，不写死仓库名）/ --target=<sha>
+  each  逐项目各发一个（= 这个词以前给 all 的意思，一个都没少）"
 
     command -v gh >/dev/null 2>&1 || wt_die "publish-offline-release 需要 gh（GitHub CLI）；装好再试"
 
-    _want=$(wt_expand_targets "" $_want)
-    [ -n "$(printf '%s' "$_want" | tr -d ' ')" ] || wt_die "没有匹配的项目"
+    # tag：默认 `offline-<今天>`。用户给了就**必须带 offline** —— 这条是 D56 的
+    # 硬要求（"tag 名必须明显带 offline"），不是风格问题：两族混在一页上，
+    # 下错包的人分不清哪一版是给断网机的。
+    if [ -n "$_tag_override" ]; then
+        _tag=$_tag_override
+    else
+        _tag="offline-$(date +%Y-%m-%d)"
+    fi
+    case $_tag in
+        *offline*) ;;
+        *) wt_die "tag 名必须明显带 offline（ADR-0045 / D56）：[$_tag] 不行。
+  离线族的包只发到离线 tag 上，默认 offline-$(date +%Y-%m-%d)；
+  开发机那份走 wtool publish-release（另一个 tag / 另一个页面）。" ;;
+    esac
 
     _scratch=$(mktemp -d "${TMPDIR:-/tmp}/wtool-puboff.XXXXXX")
     trap 'rm -rf -- "$_scratch"' EXIT INT TERM
+    _osver=${_osver_override:-${WTOOL_OS_VERSION:-}}
+
+    # ---- 整机迁移包（all）→ 清单里 wtool-doc 那个仓 -------------------------
+    case " $_want " in
+        *" all "*)
+            if [ "$(printf '%s' "$_want" | tr -d ' ')" != "all" ]; then
+                wt_die "all（整机迁移包）不能和别的目标混在一起 —— 它是**一个**包。
+  逐项目请用：wtool publish-offline-release each"
+            fi
+            _pub=${_out_override:-$WTOOL_ROOT/__release}
+            _asset=$(python3 "$PY" bundle-asset --os-version "$_osver")
+            if [ -n "$_repo_override" ]; then
+                _repo=$_repo_override
+            else
+                # **不写死仓库名**：从工作区清单里查 wtool-doc 那个项目的 name=
+                # （仓已经改过一次名：wtool → wtool-doc，写死就会再次过期）。
+                _repo=$(python3 "$PY" manifest-repo --root "$WTOOL_ROOT" --path wtool-doc) \
+                    || wt_die "算不出整机包该发到哪个仓（清单里没有 path=wtool-doc 的项目）。
+  用 --repo=owner/name 显式指定。"
+            fi
+            wt_info "── 整机迁移包（$_asset）"
+            wt_info "  目标仓 : $_repo（清单里的 wtool-doc：整机包由它承载）"
+            wt_info "  tag    : $_tag"
+            _files=$(python3 "$PY" offline-assets --release-dir "$_pub" 2>/dev/null) || _files=""
+            _n=$(printf '%s\n' "$_files" | awk 'NF{n++} END{print n+0}')
+            if [ "$_n" = 0 ]; then
+                wt_die "$_pub 里没有整机迁移包 —— 先打包：
+  wtool pack-offline-release all --os-version=$_osver"
+            fi
+            _names=$(printf '%s\n' "$_files" | xargs -r -n1 basename | tr '\n' ' ')
+            if wt_dry; then
+                wt_step "[dry-run] 上传 $_n 个文件 → $_repo $_tag"
+                wt_step "[dry-run] 资产（$_n 个）: $_names"
+                return 0
+            fi
+            wt_publish_gh_release "$_repo" "$_tag" "wtool 整机迁移包 $(date +%Y-%m-%d)" \
+"**整机迁移包**（ADR-0045 / D55）：把一台开发机的 \`.wtool\` 搬到一个**没有网络的机器**上。
+
+· 形状：L1（\`wtool/<项目>\`）**实体化**、L2（\`usr/…\`）**保持为链**；\`__output\` 只带被
+  \`<export_*>\` 指定的那部分。发行版写在文件名里（包里那份 zsh 是按它编的，glibc 要求不同）。
+· 用法：把分卷拼回来 → \`tar xf\` → 得到 \`.wtool/\` → 把 rc 里 \`export WTOOL_HOME=\`
+  指到那个目录 → 完事（目标机上**不需要**先装 wtool）。
+  \`\`\`sh
+  cat wtool-all-*.tar.gz.part-* > wtool-all.tar.gz   # 只有分卷时才需要
+  tar xf wtool-all.tar.gz
+  export WTOOL_HOME=\$PWD/.wtool
+  \`\`\`
+· 校验：同一页上的 \`check-hash*.sh\`（分卷时，直接跑、不依赖 wtool）或 \`<包名>.sha256\`。
+· 单独装某个项目请用**逐项目**那一族的自足包（另一个 release 页）。" \
+                "$_target_override"
+            # shellcheck disable=SC2086
+            if ! wt_publish_gh_upload "$_repo" "$_tag" $_files; then
+                wt_warn "整机包没传完 —— 产物还在 $_pub/，修好网络直接补传"
+                return 1
+            fi
+            wt_info "整机迁移包已发布: https://github.com/$_repo/releases/tag/$_tag"
+            return 0
+            ;;
+    esac
+
+    _want=$(wt_expand_targets "" $_want)
+    [ -n "$(printf '%s' "$_want" | tr -d ' ')" ] || wt_die "没有匹配的项目"
 
     _done=0
     _failed=0
@@ -3934,21 +4100,6 @@ cmd_publish_offline_release() {
         _pid=$(printf '%s\n' "$_row" | cut -f2)
         _path=$(printf '%s\n' "$_row" | cut -f3)
         _rel="$_path/__release"
-
-        # tag：默认 `offline-<今天>`。用户给了就**必须带 offline** —— 这条是 D56 的
-        # 硬要求（"tag 名必须明显带 offline"），不是风格问题：两族混在一页上，
-        # 下错包的人分不清哪一版是给断网机的。
-        if [ -n "$_tag_override" ]; then
-            _tag=$_tag_override
-        else
-            _tag="offline-$(date +%Y-%m-%d)"
-        fi
-        case $_tag in
-            *offline*) ;;
-            *) wt_die "tag 名必须明显带 offline（ADR-0045 / D56）：[$_tag] 不行。
-  离线族的包只发到离线 tag 上，默认 offline-$(date +%Y-%m-%d)；
-  开发机那份走 wtool publish-release（另一个 tag / 另一个页面）。" ;;
-        esac
 
         wt_info "── $_pid"
         # 目标仓：--repo= 优先，否则 <publish to=>（publish-list 第 7 列），再否则项目 remote

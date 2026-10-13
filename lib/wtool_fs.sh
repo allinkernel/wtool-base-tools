@@ -1675,14 +1675,14 @@ wt_tar_create() {   # <out.tar.gz> <base-dir> <list-file> [--prefix=P] [--extra 
 
 # 分卷的校验脚本：**所有分片 hash 写全、直接跑就校验、不依赖 wtool**（D51 用户原话）。
 # 生成的是**独立脚本**：只用 sha256sum（coreutils），不 source 引擎的任何东西。
-wt_offline_check_hash() {   # <__release 目录> <资产名> <整包 sha256>
-    _ch_pub=$1; _ch_asset=$2; _ch_whole=$3
-    _ch_out="$_ch_pub/$WT_OFFLINE_CHECK"
+wt_offline_check_hash() {   # <__release 目录> <资产名> <整包 sha256> [<脚本名>]
+    _ch_pub=$1; _ch_asset=$2; _ch_whole=$3; _ch_name=${4:-$WT_OFFLINE_CHECK}
+    _ch_out="$_ch_pub/$_ch_name"
     {
         printf '#!/bin/sh\n'
         printf '# %s 的分卷校验 —— 由 wtool pack-offline-release 生成。\n' "$_ch_asset"
         printf '# **不依赖 wtool**：只用 sha256sum，直接跑就行：\n'
-        printf '#     sh %s\n' "$WT_OFFLINE_CHECK"
+        printf '#     sh %s\n' "$_ch_name"
         printf '# 拼回整包：cat %s.part-* > %s\n' "$_ch_asset" "$_ch_asset"
         printf '# 整包 sha256（拼回来之后可以核对）：%s\n' "$_ch_whole"
         printf 'set -u\n'
@@ -1841,7 +1841,190 @@ wt_pack_offline_release() {
     wt_info "  该提交的（文本，进 Git）：scripts/release.json（artifacts 对照表）"
 }
 
-# 发布副本标记：`wtool/.wtool-dist/<项目>.json` → 工作区根的 `.wtool-dist/`。
+# --------------------------------------------------------------------------
+# 整机迁移包：`wtool pack-offline-release all`（ADR-0045 §2.4 / §2.5 / D38 / D39 /
+# D44 / D45 / D55）
+#
+# 它**不是**"每个项目各打一个自足包"（那是 `each`）—— 它把**这台机器的
+# `$WTOOL_HOME`** 变成一份能直接搬到断网机的 `.wtool` 树：
+#
+#   L1（`wtool/<项目>`）  **实体化**：换成实体目录，里面只有闭包要的东西
+#   L2（`usr/…`）        **保持为链**：两端都在 `.wtool` 里，搬过去照样解析得到
+#   `__output`           只有被 `<export_*>` / `<generate>` 指定的那部分进包
+#
+# 然后无脑 tar（不挑文件、不需要忽略清单）+ 按大小分卷 + 一份不依赖 wtool 的
+# `check-hash*.sh`。解开来顶层是 **`.wtool/`**（§2.5：用户 `tar xf` 即得 `.wtool`
+# 目录 → 改 rc 里 `export WTOOL_HOME=` 那一行 → 完事）。
+#
+# ⚠️ 构造保证（D39）：包里**只出现账本算出来的闭包**，所以 `$WTOOL_HOME` 里的
+#    历史残留（旧模型的 links/、wtool-work-dir/、测试漏下来的链、别处写进来的
+#    配置）不会被顺手带进包 —— 真机上 `usr/var/dsh-remote/` 里就躺着手机远程的
+#    token，无脑 tar 会让它上公网 release 页。
+#
+#   wt_pack_offline_all <卷大小> <scratch> [<输出目录>] [<发行版>]
+# --------------------------------------------------------------------------
+wt_pack_offline_all() {
+    _oa_vol=$1; _oa_scratch=$2; _oa_out=${3:-}; _oa_osver=${4:-}
+    [ -n "$_oa_out" ] || _oa_out="$WTOOL_ROOT/__release"
+    # 发行版：从哪套 `__output/<target>` 里取被导出的产物。默认跟本机走
+    # （在容器里打包就自动是容器那个版本）。
+    [ -n "$_oa_osver" ] || _oa_osver=${WTOOL_OS_VERSION:-}
+    mkdir -p -- "$_oa_scratch"
+
+    python3 "$PY" offline-all-plan --home "$WTOOL_HOME" --root "$WTOOL_ROOT" \
+        --scratch "$_oa_scratch" --os-version "$_oa_osver" \
+        > "$_oa_scratch/plan.log" 2>&1 || {
+        cat -- "$_oa_scratch/plan.log" >&2
+        wt_die "算整机迁移包的清单失败（见上面：闭包不完整 / 有禁品 / 账本读不出来）"
+    }
+    # 成功时不重复倒一遍 planner 的输出：调用方在打包前已经跑过一次同样的检查
+    # （`wtool pack-offline-release all` 默认先查再打），同一屏里说两遍只会淹掉重点。
+
+    _oa_asset=$(awk -F'\t' '$1=="asset"{print $2}' "$_oa_scratch/all.tsv")
+    _oa_prefix=$(awk -F'\t' '$1=="prefix"{print $2}' "$_oa_scratch/all.tsv")
+    _oa_check=$(awk -F'\t' '$1=="check"{print $2}' "$_oa_scratch/all.tsv")
+    _oa_nproj=$(awk -F'\t' '$1=="projects"{print $2}' "$_oa_scratch/all.tsv")
+    _oa_nfile=$(awk -F'\t' '$1=="files"{print $2}' "$_oa_scratch/all.tsv")
+    _oa_nlink=$(awk -F'\t' '$1=="links"{print $2}' "$_oa_scratch/all.tsv")
+    [ -n "$_oa_asset" ] || wt_die "算不出整机包的名字（planner 没写出 all.tsv）"
+
+    if wt_dry; then
+        wt_step "[dry-run] 产 $_oa_out/$_oa_asset（$_oa_nproj 个项目 / $_oa_nfile 个文件 / $_oa_nlink 条 L2 链）"
+        wt_step "[dry-run] 形状：顶层是 .wtool/（L1 实体化 + L2 留链）；发行版 $([ -n "$_oa_osver" ] && printf '%s' "$_oa_osver" || printf '跟本机')"
+        wt_step "[dry-run] 拷 env 汇总 + 账本 var/ + manifest 三件套（default.xml 换成实体）"
+        wt_step "[dry-run] 按 $_oa_vol 分卷；旁边写 $_oa_asset.sha256；分卷时再给 $_oa_check（不依赖 wtool）"
+        wt_step "[dry-run] 打完之后跑 --check（四条判据），报告到终端"
+        return 0
+    fi
+
+    _oa_build="$_oa_scratch/tree"
+    rm -rf -- "$_oa_build"
+    mkdir -p -- "$_oa_build/.wtool/wtool" "$_oa_build/.wtool/usr" || wt_die "建不了临时树"
+
+    # ---- ① 原样搬：env 汇总 / 账本（var/）/ manifest 三件套 -----------------
+    # `cp -L`：`wtool/.repo/manifests/default.xml` 在开发机上是指向工作区的
+    # **绝对链**，包里必须是实体（判据；install.sh 那边是"只校验、不覆盖"）。
+    _oa_n=0
+    while IFS="$(printf '\t')" read -r _oa_d _oa_s; do
+        [ -n "$_oa_d" ] || continue
+        mkdir -p -- "$_oa_build/.wtool/$(dirname -- "$_oa_d")"
+        cp -Lp -- "$_oa_s" "$_oa_build/.wtool/$_oa_d" || wt_die "拷不进包: $_oa_s"
+        _oa_n=$((_oa_n + 1))
+    done < "$_oa_scratch/all.verbatim.tsv"
+    wt_step "env / 账本 / manifest 三件套：$_oa_n 个文件"
+
+    # ---- ①b 账本里指向"活的项目目录"的路径要改写成包内路径 ----------------
+    # `<generate>` 记的是**安装期产物写在哪**（第 3 列）—— 源机上那是
+    # `/…/self/wtool/<项目>/__output/fzf.zsh`（工作区路径）。目标机上没有工作区，
+    # 项目住在 `$WTOOL_HOME/wtool/<项目>` 下；不重写的话目标机 `check` 会说
+    # "…/self/wtool/… 不见了（<generate> 的安装期产物）"（实测撞到）。
+    # 只改 **dest 列**，不改 target 列：L1 那条 target 记的是"当初从哪儿链过来的"，
+    # 那是历史事实，也是目标机上唯一能看出源机路径的线索。
+    while IFS="$(printf '\t')" read -r _oa_pid _oa_kind _oa_live; do
+        [ -n "$_oa_live" ] && [ "$_oa_live" != "-" ] || continue
+        _oa_j="$_oa_build/.wtool/var/$_oa_pid/journal.tsv"
+        [ -f "$_oa_j" ] || continue
+        awk -F'\t' -v OFS='\t' -v live="$_oa_live/" -v new="$WTOOL_HOME/wtool/$_oa_pid/" '
+            $1 == "generate" && index($3, live) == 1 { $3 = new substr($3, length(live) + 1) }
+            { print }' "$_oa_j" > "$_oa_j.tmp" && mv -f -- "$_oa_j.tmp" "$_oa_j"
+    done < "$_oa_scratch/all.projects.tsv"
+
+    # ---- ② L1 实体化：每个项目一棵实体目录，只装闭包要的东西 ----------------
+    _oa_lastdir=""
+    _oa_n=0
+    while IFS="$(printf '\t')" read -r _oa_pid _oa_dest _oa_src _oa_kind; do
+        [ -n "$_oa_pid" ] || continue
+        _oa_d="$_oa_build/.wtool/wtool/$_oa_pid/$_oa_dest"
+        _oa_dir=$(dirname -- "$_oa_d")
+        if [ "$_oa_dir" != "$_oa_lastdir" ]; then
+            mkdir -p -- "$_oa_dir" || wt_die "建不了目录: $_oa_dir"
+            _oa_lastdir=$_oa_dir
+        fi
+        if [ "$_oa_kind" = "l" ]; then
+            # 链本身进包（tar 里保持为链）。目标字符串**原样**搬 —— 相对链
+            # 在包内照样解析；绝对链会在 --check 里被报出来。
+            ln -sfn -- "$(readlink -- "$_oa_src")" "$_oa_d" || wt_die "建不了链: $_oa_d"
+        else
+            cp -p -- "$_oa_src" "$_oa_d" || wt_die "拷不进包: $_oa_src"
+        fi
+        _oa_n=$((_oa_n + 1))
+    done < "$_oa_scratch/all.files.tsv"
+    wt_step "L1 实体化：$_oa_n 个文件（$_oa_nproj 个项目）"
+
+    # ---- ③ L2 **保持为链**（两端都在 .wtool 里）-----------------------------
+    _oa_n=0
+    while IFS="$(printf '\t')" read -r _oa_rel _oa_target _oa_type; do
+        [ -n "$_oa_rel" ] || continue
+        mkdir -p -- "$_oa_build/.wtool/$(dirname -- "$_oa_rel")"
+        ln -sfn -- "$_oa_target" "$_oa_build/.wtool/$_oa_rel" || wt_die "建不了 L2 链: $_oa_rel"
+        _oa_n=$((_oa_n + 1))
+    done < "$_oa_scratch/all.links.tsv"
+    wt_step "L2 留链：$_oa_n 条（相对链，包内可解析）"
+
+    # ---- ④ 入口链（install.sh → wtool/install.sh → 真脚本）-----------------
+    while IFS="$(printf '\t')" read -r _oa_rel _oa_target _oa_ts; do
+        [ -n "$_oa_rel" ] || continue
+        mkdir -p -- "$_oa_build/.wtool/$(dirname -- "$_oa_rel")"
+        ln -sfn -- "$_oa_target" "$_oa_build/.wtool/$_oa_rel"
+    done < "$_oa_scratch/all.installer.tsv"
+
+    # ---- ④b manifest 三件套里要**重算**的两件 ------------------------------
+    # 目标机 install.sh 对"包里来的"三件套是**只校验、不覆盖**，sha256 对不上就
+    # 报错停手 —— 所以包里这两个文件必须对应**包里那份** default.xml（内空由
+    # planner 算好）。live 那份陈旧与否，planner 已经在 all.warn.tsv 里说了。
+    while IFS="$(printf '\t')" read -r _oa_rel _oa_val; do
+        [ -n "$_oa_rel" ] || continue
+        printf '%s\n' "$_oa_val" > "$_oa_build/.wtool/wtool/.repo/manifests/$_oa_rel" \
+            || wt_die "写不了包里的 $_oa_rel"
+    done < "$_oa_scratch/all.trio.tsv"
+
+    # ---- ⑤ 来源记录：这一版每个项目是哪个 commit（多仓，没有单一 commit）---
+    {
+        printf '# 整机迁移包的来源（wtool pack-offline-release all）。\n'
+        printf '# 形状：<项目id>\t<commit>\t<kind>\t<packed-at>\t<osver>\n'
+        while IFS="$(printf '\t')" read -r _oa_pid _oa_kind _oa_live; do
+            [ -n "$_oa_pid" ] || continue
+            [ "$_oa_live" = "-" ] && _oa_live=""
+            printf '%s\t%s\t%s\t%s\t%s\n' "$_oa_pid" \
+                "$( [ -n "$_oa_live" ] && git -C "$_oa_live" rev-parse HEAD 2>/dev/null || printf '%s' - )" \
+                "$_oa_kind" "$(wt_now)" "${_oa_osver:--}"
+        done < "$_oa_scratch/all.projects.tsv"
+    } > "$_oa_build/.wtool/var/offline-all.tsv"
+
+    # ---- ⑥ 无脑 tar（不挑文件、不需要忽略清单）-----------------------------
+    mkdir -p -- "$_oa_out"
+    rm -f -- "$_oa_out/$_oa_asset" "$_oa_out/$_oa_asset.sha256" \
+             "$_oa_out/$_oa_check" "$_oa_out/$_oa_asset".part-* 2>/dev/null || true
+    ( cd -- "$_oa_build" && find . -mindepth 1 | sed 's|^\./||' ) > "$_oa_scratch/all.tar.list"
+    # ⚠️ **不加 --prefix**：清单里的路径本来就带 `.wtool/` 这一层（临时树是
+    #    `$_oa_build/.wtool/...`），再加一次前缀会打成 `.wtool/.wtool/...`
+    #    （实测踩过：包里顶层多一层，解开来 `$WTOOL_HOME` 指错地方）。
+    wt_tar_create "$_oa_out/$_oa_asset" "$_oa_build" "$_oa_scratch/all.tar.list"
+
+    # ---- ⑦ sha256 + 分卷 + 独立校验脚本 ------------------------------------
+    wt_hash_file "$_oa_out/$_oa_asset" > "$_oa_out/$_oa_asset.sha256"
+    _oa_bytes=$(wt_bytes "$_oa_out/$_oa_asset")
+    _oa_sha=$(wt_sha256 "$_oa_out/$_oa_asset")
+    if [ "$_oa_bytes" -gt "$(wt_size_bytes "$_oa_vol")" ]; then
+        wt_info "  $_oa_asset 有 $((_oa_bytes / 1048576))M，按 $_oa_vol 一卷切开（ASCII 后缀 .part-aa…）"
+        split -b "$_oa_vol" -a 2 "$_oa_out/$_oa_asset" "$_oa_out/$_oa_asset.part-" \
+            || wt_die "切分卷失败: $_oa_asset"
+        mv -f -- "$_oa_out/$_oa_asset" "$_oa_scratch/$_oa_asset"
+        wt_offline_check_hash "$_oa_out" "$_oa_asset" "$_oa_sha" "$_oa_check"
+    fi
+
+    # ---- ⑧ 来源标记（publish 拿它当 --target；整机包没有单一 commit → `-`）--
+    printf 'packed\t-\t%s\n' "$(wt_now)" > "$_oa_out/$WT_OFFLINE_MARK"
+
+    wt_info "整机迁移包已生成: $_oa_out/$_oa_asset（$_oa_nproj 个项目 / $((_oa_bytes / 1048576))M）"
+    wt_info "  L1 实体化 + L2 留链（判据见 --check）"
+    wt_info "  断网机：cat $_oa_asset.part-* > $_oa_asset（分卷时）→ tar xf $_oa_asset → 得到 .wtool/"
+    wt_info "          把 rc 里 \`export WTOOL_HOME=\` 指到解压出来的那个 .wtool 就行"
+    wt_info "  校验：$_oa_out/$_oa_asset.sha256$([ -f "$_oa_out/$_oa_check" ] && printf ' + %s' "$_oa_check")"
+    wt_info "  上传：wtool publish-offline-release all（传 wtool-doc 的 release 页）"
+}
+
+
 #
 # 它是**引擎自己的标记**（`install` 靠它认出"这是从发布包解出来的工作区"，
 # 没有 .git 也免 `--force`），**不是项目资产** —— 所以不进 release.json 的对照表，

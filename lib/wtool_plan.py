@@ -30,6 +30,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import urllib.parse
 import xml.etree.ElementTree as ET
 
@@ -195,6 +196,8 @@ def is_offline_asset(name):
     tag 上、`publish-offline-release` 别把 `release.zip` 传到离线 tag 上）。
     """
     if name == OFFLINE_CHECK_HASH:
+        return True
+    if is_bundle_asset(name):
         return True
     for asset in list(OFFLINE_ASSETS.values()) + [INSTALLER_ASSET]:
         if name == asset or name == asset + ".sha256" or name.startswith(asset + ".part-"):
@@ -4200,13 +4203,27 @@ def source_file_list(project_root):
 
 
 def release_file_list(project_root):
-    """__output/ 里的文件（相对项目目录）。文件从这儿来，装到别的机器上去。"""
+    """`__output/` 里的文件（相对项目目录）。文件从这儿来，装到别的机器上去。
+
+    ‼️ **目录软链也要收**（2026-10-14 修）：③ 类项目的 `__output/usr` 是一条
+    **指向某个发行版**的别名链（`__output/usr -> ubuntu_24.04/usr`），而
+    `wtool.xml` 里写的是 `<export_usr src="__output/usr"/>`。`os.walk` 默认
+    **不下钻**软链目录，于是老实现把这条链整个漏掉 —— 后果不是"少一个文件"，
+    而是**解出来的包里根本没有 export src**，`wtool install` 当场失败
+    （实测：`shell/zsh` 的 release 清单 3825 个文件里 `__output/usr` 一个都没有）。
+    链本身必须进包（`wtool_zip` 会把它当软链条目写进去，解包时还原成链）。
+    """
     root = os.path.abspath(project_root)
     rel_root = os.path.join(root, DIR_OUT)
     out = []
     if not os.path.isdir(rel_root):
         return out
-    for dirpath, _dirnames, filenames in os.walk(rel_root):
+    for dirpath, dirnames, filenames in os.walk(rel_root):
+        for name in list(dirnames):
+            p = os.path.join(dirpath, name)
+            if os.path.islink(p):                # 软链目录：收它、别下钻
+                out.append(os.path.relpath(p, root).replace(os.sep, "/"))
+                dirnames.remove(name)
         for name in filenames:
             p = os.path.join(dirpath, name)
             out.append(os.path.relpath(p, root).replace(os.sep, "/"))
@@ -4390,6 +4407,764 @@ def offline_assets(args):
     for name in found:
         print(name)
     return 0 if found else 1
+
+
+# ===========================================================================
+# 整机迁移包（`wtool pack-offline-release all`）—— ADR-0045 / DESIGN §2.4 / §2.5
+#
+# 它和"逐项目自足包"（`pack-offline-release each`）是**两件事**，别混：
+#
+#   all   整机迁移包：把**这台机器的 `$WTOOL_HOME`** 变成一份能搬到断网机的
+#         `.wtool` 树 —— **L1 实体化、L2 保持为链**（D45），打成 `wtool-all*.tar.gz`。
+#         目标是"人走了机器换了"，不是"装一个项目"。
+#   each  逐项目自足包：每个项目一个 `source-offline.zip` / `release-offline.zip`，
+#         合并进**已有的** `.wtool`。
+#
+# ‼️ 构造规矩（D39 / §1.11）：**不靠忽略清单，靠构造保证** ——
+#    包里只出现"从账本算出来的闭包"，所以 `$WTOOL_HOME` 里的历史残留
+#    （旧模型的 `links/` / `wtool-work-dir/`、测试漏下来的链、别处写进来的配置）
+#    **不会**被顺手带进包。这一点不是洁癖：实测真机上 `usr/var/dsh-remote/`
+#    里躺着手机远程的 token，无脑 tar 一下它就上了公网 release 页。
+# ===========================================================================
+
+DIR_WTOOL = "wtool"                                # L1 根
+DIR_USR = "usr"                                    # L2 根
+REPO_MANIFESTS = os.path.join(".repo", "manifests")
+MANIFEST_TRIO = ("default.xml", "default.xml.sha256", "default.xml.commitid")
+BUNDLE_ASSET_BASE = "wtool-all"                    # → wtool-all-ubuntu24.04.tar.gz
+FORBIDDEN_PARTS = (".git", DIR_LAYER)              # + 下面两条 .repo 内部路径
+FORBIDDEN_REPO = (os.path.join(".repo", "projects"),
+                  os.path.join(".repo", "project-objects"))
+
+
+def bundle_asset_for(osver=""):
+    """整机迁移包的资产名。带发行版：包里那份 `zsh` 是按发行版编的（glibc 不同）。"""
+    ver = (osver or "").strip()
+    if not ver:
+        return BUNDLE_ASSET_BASE + ".tar.gz"
+    return "%s-ubuntu%s.tar.gz" % (BUNDLE_ASSET_BASE, ver)
+
+
+def bundle_check_name(osver=""):
+    """分卷时那份校验脚本的名字。
+
+    `check-hash.sh` 这个名字被**逐项目**那条占着（`is_offline_asset` 认它），
+    整机包一页上可能同时有 22.04/24.04/26.04 三份，所以带上发行版避免互相覆盖。
+    """
+    ver = (osver or "").strip()
+    if not ver:
+        return OFFLINE_CHECK_HASH
+    return "check-hash-ubuntu%s.sh" % ver
+
+
+def is_bundle_asset(name):
+    """整机迁移包那一族（自足包 / 它的 hash / 分卷 / 它的 check-hash）—— 判据只有这里一处。"""
+    base = BUNDLE_ASSET_BASE
+    if name.startswith(base) and ".tar.gz" in name:
+        return True
+    if name.startswith("check-hash-ubuntu") and name.endswith(".sh"):
+        return True
+    return False
+
+
+def _kv(text):
+    """`key\\tvalue` 的行 → dict（meta.tsv 就读这个）。"""
+    out = {}
+    for line in (text or "").split("\n"):
+        if not line or "\t" not in line:
+            continue
+        k, v = line.split("\t", 1)
+        out[k] = v
+    return out
+
+
+def ledger_projects(home):
+    """从账本算出**这台机器装了哪些项目**（D38：闭包由账本定，不是"工作区里有什么"）。
+
+    判据是 `<home>/var/<项目路径>/meta.tsv` 在（`wtool install` 写的那份元数据），
+    所以：没装过的项目、工作区里有但没配到这台机器上的项目，都不进包。
+    """
+    var = os.path.join(home, "var")
+    out = []
+    if not os.path.isdir(var):
+        return out
+    for dirpath, dirnames, filenames in os.walk(var):
+        if "meta.tsv" not in filenames:
+            continue
+        pid = os.path.relpath(dirpath, var).replace(os.sep, "/")
+        meta = _kv(read_text(os.path.join(dirpath, "meta.tsv")))
+        live = meta.get("project_root") or ""
+        if live and not os.path.isdir(live):
+            live = ""
+        out.append({"pid": pid, "live": live,
+                    "var": dirpath})
+        dirnames[:] = []                      # 一个项目一个叶子目录，不再往下走
+    out.sort(key=lambda r: r["pid"])
+    return out
+
+
+def ledger_entries(home, pid):
+    """一个项目的账本条目：L1 链（dir）、L2 链（usr 下）、mkdir（父目录）。
+
+    判据是 `journal.tsv` —— 那是 `install` 当初**真的建了什么**的记录，比
+    重新推导一遍强：包里的链和账本必须**逐条对得上**，否则目标机上
+    `uninstall` 撤不掉、`check` 也认不出来。
+    """
+    rows = {"l1": [], "l2": [], "mkdir": []}
+    jf = os.path.join(home, "var", pid, "journal.tsv")
+    for row in _read_tsv(jf):
+        if len(row) < 4:
+            continue
+        if row[0] == "mkdir":
+            rows["mkdir"].append(row[2])
+            continue
+        if row[0] != "link":
+            continue
+        dest, target = row[2], row[3]
+        if dest == os.path.join(home, DIR_WTOOL, pid):
+            rows["l1"].append((dest, target, row[1]))
+        elif is_under(dest, os.path.join(home, DIR_USR)):
+            rows["l2"].append((dest, target, row[1]))
+    return rows
+
+
+def installer_links(home):
+    """`install.sh` 自己那两条入口链（`install.sh` → `wtool/install.sh` → 真脚本）。
+
+    它们不在任何项目的 journal 里，而在 `var/installer/links.tsv`（install.sh 的账）。
+    包里的形状必须**一模一样**（相对链）：`install.sh` 是靠解析自身真实路径
+    算项目目录的，绝对链搬过去就断了。
+    """
+    out = []
+    for row in _read_tsv(os.path.join(home, "var", "installer", "links.tsv")):
+        if len(row) >= 2:
+            out.append((row[0], row[1]))
+    return out
+
+
+def project_closure(live, osver=""):
+    """一个项目在**整机包**里要装什么（D38 + D45 + D46）。
+
+    返回 `(files, warns)`：`files` = `[(dest_rel, src_abs, kind)]`，
+    kind ∈ `f`（真文件）/ `l`（软链本身；tar 里保持为链）。
+
+    分两类（这是 D45 的原话，别改口径）：
+      · ① `source`   → **源码文件**（`.gitignore` 过滤过的那些）——
+        它们**就是**产物，目标机上要读得到；
+      · ②③ `muslbin`/`docker` → **只有被 `<export_bin>`/`<export_usr>` 指定的
+        那部分 `__output/`**，外加 `<generate>` 的生成物（有就带上）。
+        **不是整个 `__output/`** —— 否则三个发行版各 11M、`__layer` 上百 M
+        全都会被拖进来。
+    """
+    warns = []
+    files = []
+    if not live or not os.path.isdir(live):
+        return files, ["项目目录不在磁盘上（账本里的 project_root 指不到东西）"]
+    kind = _kind_of_project(live) or DEFAULT_PROJECT_KIND
+    seen = set()
+
+    def add(dest_rel, src_abs, k):
+        if dest_rel in seen:
+            return
+        seen.add(dest_rel)
+        files.append((dest_rel, src_abs, k))
+
+    # 声明面（wtool.xml + 两份 env）**永远进包**：引擎靠前者知道 kind、要建哪些链，
+    # 后者是命令与环境变量的来源（§1.7 闭包第 1、3 类）。
+    for name in DECLARE_FILES:
+        p = os.path.join(live, name)
+        if os.path.isfile(p) or os.path.islink(p):
+            add(name, p, "l" if os.path.islink(p) else "f")
+
+    if kind == "source":
+        for rel in source_file_list(live):
+            add(rel, os.path.join(live, rel), "l" if os.path.islink(os.path.join(live, rel)) else "f")
+    else:
+        exports, generates, _errs = _export_sources(live)
+        for rel in exports:
+            rows, real = _expand_export_path(live, rel, osver)
+            if real is None:
+                warns.append("export src 在磁盘上不存在: %s（这个包会缺产物）" % rel)
+                continue
+            for r in rows:
+                add(*r)
+        for rel in generates:
+            p = os.path.join(live, rel)
+            if os.path.lexists(p):
+                add(rel, p, "l" if os.path.islink(p) else "f")
+            else:
+                warns.append("<generate dest=%s> 的产物不在磁盘上（装的时候才生成，"
+                             "包里不带它 —— 目标机 install 会重新生成）" % rel)
+    return files, warns
+
+
+def _export_sources(live):
+    """`<export_bin>`/`<export_usr>` 的 src 和 `<generate>` 的 dest（都在 `__output/` 下）。"""
+    mf = os.path.join(live, "wtool.xml")
+    if not os.path.isfile(mf):
+        return [], [], []
+    errors = []
+    meta, entries = parse_manifest(mf, os.path.abspath(live), errors)
+    exports, generates = [], []
+    for e in entries or []:
+        if e.kind in ("export_bin", "export_usr"):
+            exports.append(e.src)
+        elif e.kind == "generate":
+            generates.append(getattr(e, "dest", e.src))
+    return exports, generates, errors
+
+
+def _expand_export_path(live, rel, osver=""):
+    """把一条 export src 展开成 `[(dest_rel, src_abs, kind)]`。
+
+    **按发行版优先**：`__output/usr` → `__output/ubuntu_<ver>/usr`（在就用它）。
+    理由：`__output/usr` 是条"选本机那套"的软链，它是**在哪台机器上编的就指哪套**；
+    整机包要按**被打包的那个容器**选（`--os-version`），否则在 ubuntu:22.04 里
+    打出来的包会装着 24.04 那份 zsh，目标机上直接 `GLIBC_2.38 not found`。
+
+    第二条规矩是 D45：**实体化到声明的那个路径上**（`__output/usr/…` 是真目录），
+    这样 `$WTOOL_HOME/usr/bin/zsh` 那条**相对** L2 链在包里照样解析得到。
+    """
+    cands = []
+    if osver:
+        head = DIR_OUT + "/"
+        if rel.startswith(head):
+            cands.append(os.path.join(DIR_OUT, "ubuntu_%s" % osver, rel[len(head):]))
+    cands.append(rel)
+    real = None
+    for c in cands:
+        p = os.path.join(live, c)
+        if os.path.lexists(p):
+            real = p
+            break
+    if real is None:
+        return [], None
+
+    rows = []
+    if os.path.isdir(real):                       # 目录（或指向目录的软链）→ 走进去
+        for dirpath, dirnames, filenames in os.walk(real):
+            rel_d = os.path.relpath(dirpath, real).replace(os.sep, "/")
+            base = rel if rel_d == "." else rel + "/" + rel_d
+            for d in list(dirnames):
+                p = os.path.join(dirpath, d)
+                if os.path.islink(p):
+                    rows.append((base + "/" + d, p, "l"))
+                    dirnames.remove(d)           # 链本身进包，不跟进去
+            for f in filenames:
+                p = os.path.join(dirpath, f)
+                rows.append((base + "/" + f, p, "l" if os.path.islink(p) else "f"))
+    else:
+        rows.append((rel, real, "l" if os.path.islink(real) else "f"))
+    return rows, real
+
+
+def offline_all_plan(args):
+    """整机迁移包的**清单**（ADR-0045 §2.4 / D38 / D39 / D44 / D45）。只算不写（除 scratch）。
+
+    写进 scratch 的（都是给 shell 读的一张表，shell 负责真的拷文件）：
+      all.tsv          资产名 / 形状 / 发行版 / 账本项目数
+      all.projects.tsv `项目id \\t kind \\t 活的项目目录`
+      all.files.tsv    `项目id \\t 包内相对路径 \\t 源绝对路径 \\t f|l`（L1 实体化的料）
+      all.links.tsv    `包内相对路径 \\t 链目标 \\t dir|file`（**L2 保持为链**）
+      all.verbatim.tsv `包内相对路径 \\t 源绝对路径`（env 汇总 / 账本 / manifest 三件套）
+      all.warn.tsv     异常与提醒（**报告，不静默**）
+      all.error.tsv    致命项（非空 → shell 不打包）
+    """
+    home = os.path.abspath(args.home)
+    root = os.path.abspath(args.root) if args.root else ""
+    scratch = args.scratch
+    os.makedirs(scratch, exist_ok=True)
+    osver = (args.os_version or "").strip()
+    warns = []
+    errors = []
+
+    if not os.path.isdir(home):
+        errors.append("$WTOOL_HOME 不存在: %s" % home)
+    projects = ledger_projects(home)
+    if not projects:
+        errors.append("账本里一个项目都没有（%s/var）—— 这不是【这台机器装好了】的样子" % home)
+
+    files_rows = []          # pid, dest_rel, src_abs, kind
+    links_rows = []          # dest_rel(under home), target, type
+    project_rows = []
+    for pr in projects:
+        pid, live = pr["pid"], pr["live"]
+        kind = _kind_of_project(live) if live else "-"
+        project_rows.append((pid, kind or DEFAULT_PROJECT_KIND, live or "-"))
+        if not live:
+            errors.append("%s：账本里的 project_root 指不到东西（%s）"
+                          % (pid, _kv(read_text(os.path.join(pr["var"], "meta.tsv"))).get("project_root", "-")))
+            continue
+        ent = ledger_entries(home, pid)
+        if not ent["l1"]:
+            warns.append("%s：账本里没有 L1 链的记录（journal.tsv）—— 包里它会只靠文件存在，"
+                         "目标机上 `uninstall` 可能撤不干净" % pid)
+        for _dest, target, _t in ent["l1"]:
+            if target and not is_under(target, home) and not os.path.isdir(target):
+                errors.append("%s：L1 链指向的项目目录不存在（%s）" % (pid, target))
+        closure, cw = project_closure(live, osver)
+        for w in cw:
+            warns.append("%s：%s" % (pid, w))
+        if not closure:
+            errors.append("%s：闭包里一个文件都没有（包里它是空的，目标机上装不出东西）" % pid)
+        for dest_rel, src_abs, k in closure:
+            files_rows.append((pid, dest_rel, src_abs, k))
+            _forbid_check(pid, dest_rel, errors)
+
+    # ---- L2：**保持为链**，但目标必须在包内解析得到（判据 2）-------------------
+    _bundle_paths = set()
+    for pid, dest_rel, _s, _k in files_rows:
+        _bundle_paths.add(os.path.join(DIR_WTOOL, pid, dest_rel))
+    for pr in projects:
+        pid = pr["pid"]
+        for dest, target, _t in ledger_entries(home, pid)["l2"]:
+            rel = os.path.relpath(dest, home)
+            links_rows.append((rel, target, "dir" if os.path.isdir(dest) else "file"))
+            if os.path.isabs(target):
+                warns.append("%s：L2 链 %s 是**绝对**链（%s）—— 搬过去就是断链。"
+                             "正常的 L2 一律是相对链（ADR-0045 / D7）" % (pid, rel, target))
+                continue
+            inside = os.path.normpath(os.path.join(os.path.dirname(rel), target))
+            if inside not in _bundle_paths and not _any_under(_bundle_paths, inside):
+                warns.append("%s：L2 链 %s 的目标 %s 不在这次算出的闭包里 —— "
+                             "包里它会**悬空**（报告出来，别静默："
+                             "多半是某个 <export_*> 指到了没进包的东西）" % (pid, rel, target))
+
+    # ---- L1 是**链**（开发机的正常形态）；包里的实体化由 shell 做 --------------
+    for pr in projects:
+        if not pr["live"]:
+            continue
+        link = os.path.join(home, DIR_WTOOL, pr["pid"])
+        if not os.path.islink(link):
+            warns.append("%s：%s 在**这台机器上**就不是链（开发机该是链，一切皆链 —— §1.7）；"
+                         "包按实体化处理，不影响结果" % (pr["pid"], link))
+        else:
+            tgt = os.readlink(link)
+            if not os.path.isabs(tgt):
+                warns.append("%s：L1 链是相对链（%s）—— 开发机上该是**绝对**链指向工作区"
+                             % (pr["pid"], tgt))
+
+    # ---- 原样搬：env 汇总 / 账本 / manifest 三件套 / 安装器入口链 -------------
+    verbatim = []
+    for name in ("env.zsh", "env.bash"):
+        p = os.path.join(home, name)
+        if os.path.isfile(p):
+            verbatim.append((name, p))
+        else:
+            errors.append("$WTOOL_HOME/%s 不在 —— 目标机上 source 不出 wtool 命令" % name)
+    var = os.path.join(home, "var")
+    if os.path.isdir(var):
+        for dirpath, _dn, filenames in os.walk(var):
+            for f in filenames:
+                p = os.path.join(dirpath, f)
+                verbatim.append((os.path.relpath(p, home), p))
+    man = os.path.join(home, DIR_WTOOL, REPO_MANIFESTS)
+    # 三件套里的 `default.xml` 原样搬**内容**（开发机上它是指向工作区的绝对链）；
+    # `.sha256` / `.commitid` **不照抄** —— 见下面那段（包里那份必须自洽）。
+    p_xml = os.path.join(man, "default.xml")
+    if os.path.isfile(p_xml):
+        verbatim.append((os.path.join(DIR_WTOOL, REPO_MANIFESTS, "default.xml"), p_xml))
+    else:
+        errors.append("manifest 三件套缺 default.xml（目标机上 `check` / `install.sh` 都要它）")
+
+    # ---- manifest 三件套：包里那份必须**自洽**（否则目标机 install.sh 当场停手）--
+    # DESIGN §1.8 ③：满血工作区是"绝对链 + 现场算"；bundle 是"随包而来，**只校验、
+    # 不覆盖**，sha256 对不上就报错停手"。所以包里这三个文件必须互相对得上 ——
+    # 实测 2026-10-14：真机上 live 的 `.sha256` / `.commitid` 是**上一次 install 时**
+    # 算的，之后清单仓又提交过一次（加 shell/zsh），于是 live 那份已经陈旧；
+    # 照抄进包 = 目标机 install.sh 直接 die。→ **按包里那份 default.xml 重算**，
+    # 并把"live 陈旧"这件事报出来（报告不静默）。
+    trio = []
+    if os.path.isfile(p_xml):
+        got = _sha256_file(p_xml)
+        _w = (read_text(os.path.join(man, "default.xml.sha256")) or "").split()
+        want = _w[0] if _w else ""
+        if want and want != got:
+            warns.append("**live 的 manifest 三件套是陈旧的**：default.xml.sha256 记的是 %s…，"
+                         "而 default.xml 实际是 %s… —— 包里按包里那份**重算**"
+                         "（不重算的话，目标机上 install.sh「只校验、不覆盖」会当场报错停手）"
+                         % (want[:12], got[:12]))
+        live_cid = (read_text(os.path.join(man, "default.xml.commitid")) or "").strip()
+        cid = ""
+        if root:
+            try:
+                cid = subprocess.check_output(
+                    ["git", "-C", os.path.join(root, ".repo", "manifests"),
+                     "rev-parse", "HEAD"],
+                    stderr=subprocess.DEVNULL).decode("utf-8", "replace").strip()
+            except Exception:                     # noqa: BLE001 —— 读不到就沿用旧值
+                cid = ""
+        if not cid:
+            cid = live_cid
+        if cid and live_cid and cid != live_cid:
+            warns.append("**live 的 .commitid 也陈旧**：记的是 %s…，清单仓 HEAD 是 %s… —— "
+                         "包里写 HEAD（那一版清单才真的对应这个 commit）"
+                         % (live_cid[:12], cid[:12]))
+        if cid:
+            trio.append(("default.xml.sha256", "%s  default.xml" % got))
+            trio.append(("default.xml.commitid", cid))
+        else:
+            errors.append("算不出 manifest 的 commitid（清单仓读不到 HEAD，"
+                          "包里的 .commitid 也没内容）")
+    if os.path.islink(p_xml):
+        warns.append("manifest 的 default.xml 在**这台机器上**是绝对链（指向工作区）—— "
+                     "包里必须换成实体（引擎会拷内容），否则目标机上直接悬空")
+
+    # ---- 报告：$WTOOL_HOME 里"不该进包"的东西（**列出来，让人看得见**）-------
+    # 判据是"在不在上面三张表里"（= 在不在闭包里），不看内容。
+    _keep = {d for d, _p in verbatim} | {d for d, _t, _k in links_rows} \
+        | {os.path.join(DIR_WTOOL, p) for p, _k, _l in project_rows} \
+        | {d for d, _t in installer_links(home)}
+    residue = _home_residue(home, _keep)
+    for r in residue:
+        warns.append("不进包（构造保证：只收闭包）: %s" % r)
+
+    asset = bundle_asset_for(osver)
+    with open(os.path.join(scratch, "all.tsv"), "w", encoding="utf-8") as fh:
+        for k, v in (("asset", asset), ("shape", "dotwtool"), ("prefix", ".wtool/"),
+                     ("osver", osver or "-"), ("home", home),
+                     ("check", bundle_check_name(osver)),
+                     ("projects", str(len(projects))),
+                     ("files", str(len(files_rows))),
+                     ("links", str(len(links_rows))),
+                     ("root", root or "-"),
+                     ("target_link", installer_links(home)[0][1] if installer_links(home) else "")):
+            fh.write("%s\t%s\n" % (k, v))
+    _write_tsv(os.path.join(scratch, "all.projects.tsv"), project_rows)
+    _write_tsv(os.path.join(scratch, "all.files.tsv"), files_rows)
+    _write_tsv(os.path.join(scratch, "all.links.tsv"), links_rows)
+    _write_tsv(os.path.join(scratch, "all.verbatim.tsv"), verbatim)
+    _write_tsv(os.path.join(scratch, "all.installer.tsv"), installer_links(home))
+    # 三件套里**要重算**的两件（内容由 planner 定，shell 只负责落盘）
+    _write_tsv(os.path.join(scratch, "all.trio.tsv"), trio)
+    _write_tsv(os.path.join(scratch, "all.warn.tsv"), [(w,) for w in warns])
+    _write_tsv(os.path.join(scratch, "all.error.tsv"), [(e,) for e in errors])
+    return {"asset": asset, "osver": osver, "home": home, "projects": project_rows,
+            "files": files_rows, "links": links_rows, "verbatim": verbatim,
+            "trio": trio, "warns": warns, "errors": errors}
+
+
+def _any_under(paths, target):
+    """target 是不是某个路径的**祖先**（目录链：`usr/lib/zsh` 指到一棵树）。"""
+    t = target.rstrip("/") + "/"
+    return any(p.startswith(t) for p in paths)
+
+
+def _forbid_check(pid, dest_rel, errors):
+    """禁品：`.git` / `.repo/projects` / `.repo/project-objects` / `__layer`（D44）。"""
+    parts = dest_rel.split("/")
+    if ".git" in parts:
+        errors.append("%s：闭包里出现 .git（%s）—— 这是禁品，包不能带 VCS 内部状态" % (pid, dest_rel))
+    if DIR_LAYER in parts:
+        errors.append("%s：闭包里出现 __layer（%s）—— docker 的构建输入，GB 级，运行时不需要"
+                      % (pid, dest_rel))
+    for bad in FORBIDDEN_REPO:
+        if bad.replace(os.sep, "/") in dest_rel:
+            errors.append("%s：闭包里出现 %s（%s）" % (pid, bad, dest_rel))
+
+
+def _home_residue(home, keep):
+    """`$WTOOL_HOME` 里**不会**进包的东西（报告用；构造保证的反面清单）。
+
+    不看内容、只看"在不在闭包里"：闭包 = 账本登记的项目文件 + L2 链 + env/账本/三件套。
+    真机上实测会列出来的：旧模型的 `links/`、`wtool-work-dir/`、跑测试漏下来的
+    `usr/bin/dry.conf`、别处写进来的 `usr/etc/dsh-remote/`。
+    """
+    out = []
+    top_keep = {p.split("/")[0] for p in keep}
+    for name in sorted(os.listdir(home)):
+        if name in (".", ".."):
+            continue
+        if name in top_keep:
+            continue
+        out.append(name)
+    return out
+
+
+def _write_tsv(path, rows):
+    with open(path, "w", encoding="utf-8", errors="surrogateescape") as fh:
+        for row in rows:
+            fh.write("\t".join(str(c) for c in row) + "\n")
+
+
+def _tree_size(root):
+    total = 0
+    for dirpath, _dn, filenames in os.walk(root):
+        for f in filenames:
+            p = os.path.join(dirpath, f)
+            try:
+                total += os.lstat(p).st_size
+            except OSError:
+                pass
+    return total
+
+
+def offline_all_check(args):
+    """**整机包的 `--check`**（DESIGN §2.4 那四条判据 + D39 / D44 / D45）。
+
+    查的是**打好的包**（`--tar`）或**已铺开的树**（`--tree`），不是"我觉得应该没问题"：
+
+      1 L1 已**实体化**：`wtool/<项目>` 是实体目录、不是链、不悬空；
+      2 L2 **仍是链**：`usr/…` 下是**相对**链，且**在包内**解析得到；
+      3 没有禁品实体化进来：`.git` / `.repo/projects` / `.repo/project-objects` /
+        `__layer`；`__output` 允许，但只允许被 `<export_*>` 指定的那部分；
+      4 异常**报告、不静默**：异常体积/路径、以及闭包之外仍指向包外的链。
+
+    退出码：0 全过；1 有致命项（判据 1–3）；2 只有提醒。
+    """
+    scratch = args.scratch
+    os.makedirs(scratch, exist_ok=True)
+    fatal = []
+    notes = []
+    osver = (args.os_version or "").strip()
+
+    tree = args.tree
+    if args.tar:
+        if not os.path.isfile(args.tar):
+            sys.stderr.write("error: 包不存在: %s\n" % args.tar)
+            return 1
+        tree = os.path.join(scratch, "unpack")
+        if os.path.isdir(tree):
+            shutil.rmtree(tree)
+        os.makedirs(tree, exist_ok=True)
+        try:
+            with tarfile.open(args.tar, "r:*") as tf:
+                _safe_extract_tar(tf, tree)
+        except Exception as exc:                    # noqa: BLE001 —— 任何解不开都是致命
+            sys.stderr.write("error: 解不开 %s: %s\n" % (args.tar, exc))
+            return 1
+    if not tree or not os.path.isdir(tree):
+        sys.stderr.write("error: 既没给 --tar 也没给能读的 --tree\n")
+        return 1
+
+    tops = sorted(os.listdir(tree))
+    if tops != [".wtool"]:
+        fatal.append("包顶层不是唯一的 .wtool/（实际: %s）—— 迁移包解开来必须是 `.wtool` 目录"
+                     % (", ".join(tops) or "空"))
+        return _check_report(args, tree, fatal, notes, {}, 1)
+
+    home = os.path.join(tree, ".wtool")
+    wtool_dir = os.path.join(home, DIR_WTOOL)
+    usr_dir = os.path.join(home, DIR_USR)
+
+    # ---- 0) 离线包不放 dist.json（D51；这条是"有没有串族"的哨兵）-----------
+    for dirpath, _dn, filenames in os.walk(home):
+        if "dist.json" in filenames:
+            fatal.append("包里出现 dist.json（%s）—— 离线族**不放** dist.json（D51）"
+                         % os.path.relpath(os.path.join(dirpath, "dist.json"), home))
+
+    # ---- 1) L1 已实体化 ----------------------------------------------------
+    projects = ledger_projects(home)
+    if not projects:
+        fatal.append("包里的账本（.wtool/var/）读不出项目 —— 目标机上 check/uninstall 都没有依据")
+    for pr in projects:
+        pid = pr["pid"]
+        p = os.path.join(wtool_dir, pid)
+        if os.path.islink(p):
+            fatal.append("L1 还是链（判据 1）: wtool/%s → %s" % (pid, os.readlink(p)))
+        elif not os.path.isdir(p):
+            fatal.append("L1 不是实体目录（判据 1）: wtool/%s" % pid)
+        elif not os.listdir(p):
+            fatal.append("L1 是空目录（判据 1）: wtool/%s" % pid)
+        else:
+            n = sum(len(f) for _d, _s, f in os.walk(p))
+            notes.append("L1 实体: wtool/%-34s %4d 个文件" % (pid, n))
+
+    # ---- 2) L2 仍是链 + 包内可解析 -----------------------------------------
+    n_l2 = 0
+    for dirpath, dirnames, filenames in os.walk(usr_dir):
+        for name in list(dirnames) + list(filenames):
+            p = os.path.join(dirpath, name)
+            if name in dirnames and not os.path.islink(p):
+                continue                      # usr/bin 这种共享实体目录（D7）
+            if not os.path.islink(p):
+                continue
+            n_l2 += 1
+            rel = os.path.relpath(p, home)
+            tgt = os.readlink(p)
+            if os.path.isabs(tgt):
+                fatal.append("L2 是绝对链（判据 2）: %s → %s" % (rel, tgt))
+            elif not os.path.exists(p):
+                fatal.append("L2 在**包内**解析不到（判据 2）: %s → %s" % (rel, tgt))
+            if name in dirnames:
+                dirnames.remove(name)         # 链本身不是目录，不跟进去
+    if n_l2 == 0:
+        notes.append("usr/ 下一条 L2 链都没有（这台机器没装 ②③ 类项目？）")
+
+    # ---- 3) 禁品 + `__output` 只带被导出的那部分 ---------------------------
+    for dirpath, dirnames, filenames in os.walk(home):
+        for name in list(dirnames):
+            p = os.path.join(dirpath, name)
+            rel = os.path.relpath(p, home)
+            if name == ".git":
+                fatal.append("禁品实体化进来了（判据 3）: %s" % rel)
+            if name == DIR_LAYER:
+                fatal.append("禁品实体化进来了（判据 3）: %s" % rel)
+            if name == "projects" and os.path.dirname(rel) == os.path.join(DIR_WTOOL, ".repo"):
+                fatal.append("禁品实体化进来了（判据 3）: %s" % rel)
+            if name == "project-objects":
+                fatal.append("禁品实体化进来了（判据 3）: %s" % rel)
+    # `__output` 下必须只有被 <export_*> / <generate> 指定的那部分
+    for pr in projects:
+        pid = pr["pid"]
+        pdir = os.path.join(wtool_dir, pid)
+        if not os.path.isdir(pdir):
+            continue
+        outdir = os.path.join(pdir, DIR_OUT)
+        if not os.path.isdir(outdir):
+            continue
+        allowed = set()
+        exports, generates, _e = _export_sources(pdir)
+        for rel in exports:
+            allowed.add(rel)
+        for rel in generates:
+            allowed.add(rel)
+        for dirpath, _dn, filenames in os.walk(outdir):
+            for f in filenames:
+                p = os.path.join(dirpath, f)
+                rel = os.path.relpath(p, pdir).replace(os.sep, "/")
+                if not any(rel == a or rel.startswith(a.rstrip("/") + "/") for a in allowed):
+                    notes.append("__output 里出现了没被 <export_*>/<generate> 指定"
+                                 "的东西（判据 3，报告不静默）: %s/%s" % (pid, rel))
+
+    # ---- 4) manifest 三件套 / 体积 / 包外的链 ------------------------------
+    man = os.path.join(wtool_dir, REPO_MANIFESTS)
+    dx = os.path.join(man, "default.xml")
+    if not os.path.isfile(dx) or os.path.islink(dx):
+        fatal.append("manifest 三件套不对: wtool/.repo/manifests/default.xml 必须是**实体文件**")
+    else:
+        want = read_text(os.path.join(man, "default.xml.sha256"))
+        got = _sha256_file(dx)
+        if want and want.split()[0] != got:
+            fatal.append("default.xml.sha256 对不上（判据：install.sh 只校验不覆盖）: "
+                         "文件里 %s，实际 %s" % (want.split()[0], got))
+        else:
+            notes.append("manifest 三件套: default.xml %s…（sha256 一致）" % got[:12])
+    for name in ("env.zsh", "env.bash"):
+        if not os.path.isfile(os.path.join(home, name)):
+            fatal.append("$WTOOL_HOME/%s 不在包里 —— 目标机上 source 不出 wtool" % name)
+
+    total = _tree_size(home)
+    biggest = []
+    for dirpath, _dn, filenames in os.walk(home):
+        for f in filenames:
+            p = os.path.join(dirpath, f)
+            try:
+                biggest.append((os.lstat(p).st_size, os.path.relpath(p, home)))
+            except OSError:
+                pass
+    biggest.sort(reverse=True)
+    notes.append("包内体积: %.1f MB（%d 个文件）" % (total / 1048576.0, len(biggest)))
+    for size, rel in biggest[:5]:
+        notes.append("  最大: %8.2f MB  %s" % (size / 1048576.0, rel))
+    if total > args.max_bytes:
+        notes.append("⚠️ 体积异常: %.1f MB > 阈值 %.0f MB —— 报告出来让人决定"
+                     % (total / 1048576.0, args.max_bytes / 1048576.0))
+    for size, rel in biggest:
+        if size > args.max_file:
+            notes.append("⚠️ 单个文件异常大: %.1f MB  %s" % (size / 1048576.0, rel))
+
+    out_of_pkg = []
+    for dirpath, dirnames, filenames in os.walk(home):
+        for name in list(dirnames) + list(filenames):
+            p = os.path.join(dirpath, name)
+            if not os.path.islink(p):
+                continue
+            tgt = os.readlink(p)
+            if os.path.isabs(tgt) and not os.path.exists(p):
+                out_of_pkg.append((os.path.relpath(p, home), tgt))
+                if name in dirnames:
+                    dirnames.remove(name)
+    if out_of_pkg:
+        for rel, tgt in out_of_pkg[:20]:
+            notes.append("⚠️ 仍指向包外的**悬空**链（不影响运行，报告出来）: %s → %s" % (rel, tgt))
+        if len(out_of_pkg) > 20:
+            notes.append("   …还有 %d 条" % (len(out_of_pkg) - 20))
+
+    stats = {"projects": len(projects), "l2": n_l2, "bytes": total,
+             "files": len(biggest)}
+    return _check_report(args, tree, fatal, notes, stats, 0 if not fatal else 1)
+
+
+def _check_report(args, tree, fatal, notes, stats, rc):
+    if getattr(args, "quiet", False) and not fatal:
+        return rc
+    for n in notes:
+        print("  %s" % n)
+    for f in fatal:
+        print("✗ %s" % f, file=sys.stderr)
+    if fatal:
+        print("整机包检查: **不通过**（%d 条致命）" % len(fatal), file=sys.stderr)
+    else:
+        print("整机包检查: 通过%s" % (
+            "" if not stats else "（%d 个项目 / %d 条 L2 链 / %.1f MB / %d 个文件）"
+            % (stats["projects"], stats["l2"], stats["bytes"] / 1048576.0, stats["files"])))
+    return rc
+
+
+def _safe_extract_tar(tf, dest):
+    """解 tar，拒绝绝对路径与 `..`（和 wtool_zip.py 同一条纪律）。"""
+    base = os.path.abspath(dest)
+    for m in tf.getmembers():
+        if m.name.startswith("/") or ".." in m.name.split("/"):
+            raise ValueError("归档里有越界路径: %s" % m.name)
+        target = os.path.join(base, m.name)
+        if not os.path.abspath(target).startswith(base + os.sep) and os.path.abspath(target) != base:
+            raise ValueError("归档里有越界路径: %s" % m.name)
+    tf.extractall(base)
+
+
+def _sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def manifest_repo(args):
+    """`manifest-repo --root R --path wtool-doc` → 打印 `owner/name`。
+
+    整机包上哪个 release 页？**设计说 wtool-doc**（DESIGN §7.2 第 6 条）。这里
+    **不写死仓库名**，而是从工作区清单（`.repo/manifests/default.xml`）里查那个路径
+    对应的项目 —— 仓改名（`wtool` → `wtool-doc` 已经改过一次）之后这条照样对。
+    """
+    root = os.path.abspath(args.root)
+    mf = os.path.join(root, ".repo", "manifests", "default.xml")
+    text = read_text(mf)
+    if not text:
+        sys.stderr.write("error: 读不到清单: %s\n" % mf)
+        return 1
+    try:
+        xml = ET.fromstring(text)
+    except ET.ParseError as exc:
+        sys.stderr.write("error: 清单不是合法 XML: %s\n" % exc)
+        return 1
+    remote_fetch = {}
+    for child in xml:
+        if child.tag == "remote":
+            remote_fetch[child.get("name")] = child.get("fetch") or ""
+    for child in xml:
+        if child.tag != "project" or (child.get("path") or "") != args.path:
+            continue
+        name = child.get("name") or ""
+        name = name[:-4] if name.endswith(".git") else name
+        if not name:
+            sys.stderr.write("error: 清单里 %s 没有 name=\n" % args.path)
+            return 1
+        if args.with_host:
+            fetch = remote_fetch.get(child.get("remote") or "", "")
+            host = ""
+            if "://" in fetch:
+                host = fetch.split("://", 1)[1].split("/")[0].split("@")[-1]
+            elif "@" in fetch and ":" in fetch:
+                host = fetch.split("@", 1)[1].split(":")[0]
+            print("%s\t%s" % (host or "github.com", name))
+            return 0
+        print(name)
+        return 0
+    sys.stderr.write("error: 清单里没有 path=%s 的项目\n" % args.path)
+    return 1
 
 
 def project_kind_cmd(args):
@@ -5272,6 +6047,18 @@ def do_check(args):
     root = os.path.abspath(args.root)
     problems = []
 
+    # ---- 这台机器是"开发机"还是"拷贝来的 .wtool"（§1.10 三种来源的第 2 种）----
+    # 判据（和 install.sh 职责③同一个）：`$WTOOL_HOME/wtool/.repo/manifests/default.xml`
+    # 是**实体文件**（开发机那份是**指向工作区的绝对链**）。
+    #
+    # ‼️ 为什么要分：整机迁移包（`pack-offline-release all`）里 **L1 按 D45 必须
+    #    **是**实体目录**（目标机上没有工作区，链必然断）。所以"L1 不是链 == 坏了"
+    #    这条在包/目标机上**是假警报** —— 实测（2026-10-14）在容器里解开包，
+    #    `wtool check` 对 7 个项目全报"已经被换成了实体"，rc=1。
+    #    开发机上这条判据照旧（那里"一切皆链"是真的规矩）。
+    _mf = os.path.join(home, WTOOL_SUBDIR, ".repo", "manifests", "default.xml")
+    bundle_mode = os.path.isfile(_mf) and not os.path.islink(_mf)
+
     def bad(pid, msg):
         problems.append((pid, msg))
 
@@ -5437,7 +6224,13 @@ def do_check(args):
             if act == "link":
                 if not os.path.islink(dest):
                     if os.path.exists(dest):
-                        bad(pid, "%s 已经不是软链了（被换成了实体）" % dest)
+                        if bundle_mode and os.path.isdir(dest) \
+                                and is_under(dest, os.path.join(home, WTOOL_SUBDIR)):
+                            # 拷贝来的 .wtool / 整机包：L1 **本来就该是实体目录**
+                            # （D45；目标机上没有工作区，链必然断）→ 不是问题。
+                            pass
+                        else:
+                            bad(pid, "%s 已经不是软链了（被换成了实体）" % dest)
                     else:
                         bad(pid, "%s 不见了（wtool repair 可以补）" % dest)
                 elif target != "-" and os.path.normpath(os.readlink(dest)) \
@@ -5883,6 +6676,35 @@ def build_parser():
     oa = sub.add_parser("offline-assets")
     oa.add_argument("--release-dir", required=True)
 
+    # offline-all-plan：**整机迁移包**的清单（ADR-0045 §2.4 / D38 / D44 / D45）。
+    # 只算不写（除 scratch）：账本 → 闭包 → 三张表，shell 照着拷文件、打 tar。
+    oap = sub.add_parser("offline-all-plan")
+    oap.add_argument("--home", required=True)
+    oap.add_argument("--root", default="")
+    oap.add_argument("--scratch", required=True)
+    # 按发行版挑 `__output/usr` 那套产物（空 = 跟软链走）。在容器里打包就传容器那个版本。
+    oap.add_argument("--os-version", default="")
+
+    # offline-all-check：**整机包的 --check**（DESIGN §2.4 的四条判据）
+    oac = sub.add_parser("offline-all-check")
+    oac.add_argument("--tar", default="")
+    oac.add_argument("--tree", default="")
+    oac.add_argument("--scratch", required=True)
+    oac.add_argument("--os-version", default="")
+    oac.add_argument("--max-bytes", type=int, default=1024 * 1024 * 1024)
+    oac.add_argument("--max-file", type=int, default=200 * 1024 * 1024)
+    oac.add_argument("--quiet", action="store_true")
+
+    # manifest-repo：清单里某个路径对应哪个 GitHub 仓（整机包发到 wtool-doc 那条）
+    mrp = sub.add_parser("manifest-repo")
+    mrp.add_argument("--root", required=True)
+    mrp.add_argument("--path", required=True)
+    mrp.add_argument("--with-host", action="store_true")
+
+    # bundle-asset：整机迁移包的资产名（带发行版；判据只有 python 里那一处）
+    bap = sub.add_parser("bundle-asset")
+    bap.add_argument("--os-version", default="")
+
     # dev-assets：publish-release 要传哪些文件（非离线族那些；和上面互补）
     da = sub.add_parser("dev-assets")
     da.add_argument("--release-dir", required=True)
@@ -6114,6 +6936,25 @@ def main(argv):
             return download_plan(args)
         elif args.cmd == "offline-assets":
             return offline_assets(args)
+        elif args.cmd == "offline-all-plan":
+            res = offline_all_plan(args)
+            for w in res["warns"]:
+                print("wtool: warning: %s" % w, file=sys.stderr)
+            for e in res["errors"]:
+                print("wtool: error: %s" % e, file=sys.stderr)
+            print("asset     : %s" % res["asset"])
+            print("projects  : %d 个" % len(res["projects"]))
+            print("files     : %d 个（L1 实体化的料）" % len(res["files"]))
+            print("links     : %d 条（L2 保持为链）" % len(res["links"]))
+            print("verbatim  : %d 个（env/账本/manifest 三件套）" % len(res["verbatim"]))
+            return 1 if res["errors"] else 0
+        elif args.cmd == "offline-all-check":
+            return offline_all_check(args)
+        elif args.cmd == "manifest-repo":
+            return manifest_repo(args)
+        elif args.cmd == "bundle-asset":
+            print(bundle_asset_for(args.os_version))
+            return 0
         elif args.cmd == "dev-assets":
             return dev_assets(args)
         elif args.cmd == "download-doc":

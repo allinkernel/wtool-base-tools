@@ -838,22 +838,166 @@ tar tzvf "$O4" | grep -E '^l' | grep -q ' \.wtool/install\.sh -> wtool/wtool-bas
     || bad ".wtool/install.sh 不是软链（install.sh 会因为找不到 wtool.sh 而失败）" \
            "$(tar tzvf "$O4" | grep 'install\.sh')"
 
-# ---- ③b `all`：工作区里每个项目各产一个自足包（资产名按各自的 kind）--------
+# ---- ③b `each`：工作区里每个项目各产一个自足包（资产名按各自的 kind）--------
+#   ‼️ 这个词 2026-10-14 从 `all` 改叫 `each`：`all` 按 D55 让给了**整机迁移包**
+#      （下一页 ③c），逐项目这条**能力一点没少**，只是名字更准确。
 _rc=0
-"$WT" pack-offline-release all > "$T/off1all.log" 2>&1 || _rc=$?
-chk "③b pack-offline-release all 退出码 0" "$_rc" "0"
+"$WT" pack-offline-release each > "$T/off1all.log" 2>&1 || _rc=$?
+chk "③b pack-offline-release each 退出码 0" "$_rc" "0"
 for _p in terminal/tmux tools/musl-bins shell/shell-rc; do
-    grep -q "── $_p" "$T/off1all.log" && ok "③b all 里点了 $_p" \
-        || bad "③b all 漏了 $_p" "$(grep -c '── ' "$T/off1all.log")"
+    grep -q "── $_p" "$T/off1all.log" && ok "③b each 里点了 $_p" \
+        || bad "③b each 漏了 $_p" "$(grep -c '── ' "$T/off1all.log")"
 done
 chk "③b ① 拿到 source-offline.zip" \
     "$(ls "$OS1/__release/source-offline.zip" 2>/dev/null | grep -c . || true)" "1"
-# ⚠️ `all` 用的是**默认**卷大小（32M），这个 fixture 不会被切开 —— 整包就在那儿；
+# ⚠️ `each` 用的是**默认**卷大小（32M），这个 fixture 不会被切开 —— 整包就在那儿；
 #    分卷那条路是 ② 上半段（`--volume-size=300`）专门测的。
 chk "③b ② 拿到 release-offline.zip（默认卷大小下不切）" \
     "$(ls "$OS2/__release/release-offline.zip" 2>/dev/null | grep -c . || true)" "1"
 chk "③b ③ 拿到 release-offline.zip" \
     "$(ls "$OS3/__release/release-offline.zip" 2>/dev/null | grep -c . || true)" "1"
+
+# ---- ③c `all` = **整机迁移包**（DESIGN §2.4 / §2.5 / D45 / D55）-------------
+#   和 ③b 是两件事：这条打的是**整台机器的 $WTOOL_HOME** —— L1 实体化、L2 留链、
+#   `__output` 只带被 `<export_*>` 指定的那部分，解开来顶层是 `.wtool/`。
+#   全部在临时 WTOOL_HOME 里做，判据逐条对着设计书那四条。
+printf '\n== 场景 10c：整机迁移包（pack-offline-release all）==\n'
+BW="$T/wsb"; BH="$T/homeb/.wtool"; BHW="$BH/wtool"
+mkdir -p "$BHW/.repo/manifests" "$BH/usr/bin" "$BW/.repo/manifests" \
+         "$BW/src1/scripts" "$BW/src3/__output/ubuntu_24.04/usr/bin" "$BW/src3/__output/别的东西"
+# ① 类：源码即产物（`tmux.conf` 这种"运行时读的源码"，D46）
+P1="$BW/src1"
+printf 'set -g mouse on\n' > "$P1/tmux.conf"
+printf 'export S1=1\n' > "$P1/env.zsh"; printf 'export S1=1\n' > "$P1/env.bash"
+printf '#!/bin/sh\ntrue\n' > "$P1/scripts/build.sh"
+cat > "$P1/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" priority="50">
+  <zshrc src="env.zsh"/><bashrc src="env.bash"/>
+</wtool>
+EOF
+git -C "$P1" init -q && git -C "$P1" add -A \
+    && git -C "$P1" -c user.name=t -c user.email=t@t commit -qm init
+# ③ 类：产物在 __output/ubuntu_24.04/usr 下，`__output/usr` 是**选择链**（和 shell/zsh 同形）；
+#       `__output/别的东西/` 是**没被导出**的东西 —— 它绝不该进包（D45）。
+P3="$BW/src3"
+printf '#!/bin/sh\necho demo\n' > "$P3/__output/ubuntu_24.04/usr/bin/demo"
+chmod +x "$P3/__output/ubuntu_24.04/usr/bin/demo"
+printf '没被导出的东西\n' > "$P3/__output/别的东西/junk.txt"
+ln -sfn ubuntu_24.04/usr "$P3/__output/usr"
+printf 'export S3=1\n' > "$P3/env.zsh"; printf 'export S3=1\n' > "$P3/env.bash"
+cat > "$P3/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" kind="docker" priority="70">
+  <zshrc src="env.zsh"/><bashrc src="env.bash"/>
+  <export_bin src="__output/usr/bin/demo"/>
+</wtool>
+EOF
+git -C "$P3" init -q && git -C "$P3" add -A \
+    && git -C "$P3" -c user.name=t -c user.email=t@t commit -qm init
+# 账本（**包里的闭包由它算**）：L1 在这里是**绝对链**（开发机形态），L2 是相对链
+ln -sfn "$P1" "$BHW/src1"; ln -sfn "$P3" "$BHW/src3"
+ln -sfn ../../wtool/src3/__output/usr/bin/demo "$BH/usr/bin/demo"
+for _b in src1 src3; do
+    mkdir -p "$BH/var/$_b"
+    printf 'project_id\t%s\nproject_root\t%s\npriority\t50\n' \
+        "$_b" "$BW/$_b" > "$BH/var/$_b/meta.tsv"
+done
+printf 'mkdir\tdir\t%s\t-\t-\nlink\tdir\t%s\t%s\t-\n' \
+    "$BH/usr/bin" "$BHW/src1" "$P1" > "$BH/var/src1/journal.tsv"
+printf 'link\tdir\t%s\t%s\t-\nlink\tfile\t%s/bin/demo\t../../wtool/src3/__output/usr/bin/demo\t-\n' \
+    "$BHW/src3" "$P3" "$BH/usr" > "$BH/var/src3/journal.tsv"
+mkdir -p "$BH/var/installer"
+printf 'install.sh\twtool/install.sh\t2026-01-01T00:00:00+0800\n' > "$BH/var/installer/links.tsv"
+printf '# 汇总 env（目标机 source 它就能用 wtool）\n' > "$BH/env.zsh"
+printf '# 汇总 env\n' > "$BH/env.bash"
+# manifest 三件套：开发机上 `default.xml` 是**指向 live 的绝对链**；
+# `.sha256` **故意写成错的**（真机实测就撞见这种陈旧态）—— 包里必须按包里那份重算，
+# 否则目标机 `install.sh`（只校验、不覆盖）会当场 die。
+cat > "$BW/.repo/manifests/default.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<manifest>
+  <remote name="github" fetch="ssh://git@github.com/"/>
+  <project path="wtool-doc" name="allinkernel/wtool-doc.git"/>
+</manifest>
+EOF
+ln -sfn "$BW/.repo/manifests/default.xml" "$BHW/.repo/manifests/default.xml"
+printf '0000000000000000000000000000000000000000000000000000000000000000  default.xml\n' \
+    > "$BHW/.repo/manifests/default.xml.sha256"
+printf '1111111111111111111111111111111111111111\n' > "$BHW/.repo/manifests/default.xml.commitid"
+( cd "$BW/.repo/manifests" && git init -q && git add -A \
+  && git -c user.name=t -c user.email=t@t commit -qm init )
+_save_root=$WTOOL_ROOT
+WTOOL_ROOT="$BW" WTOOL_HOME="$BH" WTOOL_STATE="$BH/var" \
+    "$WT" pack-offline-release all --out="$T/bundle" --os-version=24.04 \
+    > "$T/bundle.log" 2>&1 || bad "③c 整机包打包" "$(cat "$T/bundle.log")"
+BL="$T/bundle/wtool-all-ubuntu24.04.tar.gz"
+[ -f "$BL" ] && ok "③c 资产名带发行版：wtool-all-ubuntu24.04.tar.gz" \
+    || bad "③c 整机包的资产名不对" "$(LC_ALL=C ls "$T/bundle" 2>&1)"
+chk "③c 包顶层只有 .wtool/（§2.5：tar xf 即得 .wtool 目录）" \
+    "$(tar tzf "$BL" | awk -F/ '{print $1}' | sort -u | tr '\n' ' ')" ".wtool "
+tar tzvf "$BL" | grep -qE '^d.* \.wtool/wtool/src1/$' \
+    && ok "★③c L1 是**实体目录**（判据 1，不是链、不悬空）" \
+    || bad "③c L1 没实体化" "$(tar tzvf "$BL" | grep 'wtool/src1' | head -3)"
+tar tzf "$BL" | grep -qx '.wtool/wtool/src1/tmux.conf' \
+    && ok "③c ① 类：运行时读的源码进了 L1（D46）" || bad "③c ① 类的源码没进包"
+tar tzvf "$BL" | grep -qE '^l.* \.wtool/usr/bin/demo -> \.\./\.\./wtool/src3/__output/usr/bin/demo$' \
+    && ok "★③c L2 仍是**相对链**（判据 2：不是真文件）" \
+    || bad "③c L2 的形状不对" "$(tar tzvf "$BL" | grep 'usr/bin/demo')"
+tar tzf "$BL" | grep -qx '.wtool/wtool/src3/__output/usr/bin/demo' \
+    && ok "③c ③ 类：被 <export_bin> 指定的产物进包（按 --os-version 挑的那套）" \
+    || bad "③c 被导出的产物没进包"
+tar tzf "$BL" | grep -q 'junk.txt' \
+    && bad "③c 没被 <export_*> 指定的 __output 混进包了（D45 不允许）" \
+    || ok "★③c 未被 <export_*> 指定的 __output **不进包**（D45）"
+tar tzf "$BL" | grep -qE '(^|/)\.git/|/__layer/|/\.repo/projects/|/\.repo/project-objects/' \
+    && bad "③c 禁品混进包了（判据 3）" \
+    || ok "③c 无 .git / __layer / .repo/projects（判据 3）"
+tar tzf "$BL" | grep -q 'dist.json' \
+    && bad "③c 离线包不该有 dist.json（D51）" || ok "③c 无 dist.json（离线族，D51）"
+tar tzf "$BL" | grep -qx '.wtool/var/src1/journal.tsv' \
+    && ok "③c 账本 var/ 跟着走（目标机 check / uninstall 的依据）" || bad "③c 账本没进包"
+rm -rf "$T/bx"; mkdir -p "$T/bx"; tar xzf "$BL" -C "$T/bx"
+_got=$(sha256sum "$T/bx/.wtool/wtool/.repo/manifests/default.xml" | cut -d' ' -f1)
+_want=$(cut -d' ' -f1 < "$T/bx/.wtool/wtool/.repo/manifests/default.xml.sha256")
+chk "★③c 包内三件套**自洽**（陈旧 .sha256 被重算；否则目标机 install.sh 停手）" \
+    "$_got" "$_want"
+[ ! -L "$T/bx/.wtool/wtool/src1" ] && [ -d "$T/bx/.wtool/wtool/src1" ] \
+    && ok "③c 解开后 L1 是实体目录" || bad "③c 解开后 L1 还是链"
+[ -e "$T/bx/.wtool/usr/bin/demo" ] \
+    && ok "③c L2 链**在包内**解析得到" || bad "③c L2 链在包里是断的"
+[ -f "$T/bx/.wtool/wtool/.repo/manifests/default.xml.sha256" ] \
+    && ok "③c manifest 三件套齐（default.xml + .sha256 + .commitid）" || bad "③c 三件套不全"
+_rc=0
+WTOOL_ROOT="$BW" WTOOL_HOME="$BH" WTOOL_STATE="$BH/var" \
+    "$WT" pack-offline-release all --out="$T/bundle" --os-version=24.04 --check-only \
+    > "$T/bchk.log" 2>&1 || _rc=$?
+chk "③c --check-only 查已存在的包 rc=0" "$_rc" "0"
+# 负例：L1 **没实体化**（还是条悬空链）的包必须被 --check 拒 —— 判据不是装饰
+mkdir -p "$T/badout" "$T/bad/.wtool/wtool" "$T/bad/.wtool/usr/bin" "$T/bad/.wtool/var"
+ln -sfn /nonexistent "$T/bad/.wtool/wtool/src1"
+printf 'x\n' > "$T/bad/.wtool/env.zsh"; printf 'x\n' > "$T/bad/.wtool/env.bash"
+( cd "$T/bad" && tar czf "$T/badout/wtool-all-ubuntu24.04.tar.gz" .wtool )
+_rc=0
+WTOOL_ROOT="$BW" WTOOL_HOME="$BH" WTOOL_STATE="$BH/var" \
+    "$WT" pack-offline-release all --out="$T/badout" --os-version=24.04 --check-only \
+    > "$T/badchk.log" 2>&1 || _rc=$?
+[ "$_rc" != 0 ] && ok "★③c L1 没实体化的包 → --check 非 0（rc=$_rc，判据真在跑）" \
+    || bad "③c 坏包居然过了 --check" "$(cat "$T/badchk.log")"
+# 整机包发到哪：**从清单里查**（不写死仓库名），tag 必须带 offline（D56）
+if command -v gh >/dev/null 2>&1; then
+    _rc=0
+    WTOOL_ROOT="$BW" WTOOL_HOME="$BH" WTOOL_STATE="$BH/var" \
+        "$WT" publish-offline-release all --out="$T/bundle" --os-version=24.04 \
+        --tag=offline-2026-01-01 --dry-run > "$T/bpub.log" 2>&1 || _rc=$?
+    chk "③c publish-offline-release all --dry-run rc=0" "$_rc" "0"
+    grep -q 'allinkernel/wtool-doc' "$T/bpub.log" \
+        && ok "★③c 整机包发到**清单里的 wtool-doc**（DESIGN §7.2 第 6 条，仓库名不写死）" \
+        || bad "③c 发布目标仓不对" "$(cat "$T/bpub.log")"
+    grep -q 'wtool-all-ubuntu24.04.tar.gz' "$T/bpub.log" \
+        && ok "③c dry-run 把资产名打出来了（发布前唯一能核对的时机）" || bad "③c dry-run 没列资产名"
+fi
+WTOOL_ROOT=$_save_root
 
 # ---- ④ 门禁：① 敲非离线族那四条 → 非 0（KIND_GATE_DEFERRED 已清空）--------
 #   `KIND_GATE_DEFERRED` 那一轮"放行但出声"的过渡开关已经清掉（替代品 = 离线族，
