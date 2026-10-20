@@ -2202,6 +2202,45 @@ for dirpath, _dn, fns in os.walk(root):
 print("⑤b 生成物里的 staging 路径：%d 个文件改成 ${WTOOL_HOME}" % n)
 PYNORM
 
+    # ---- ⑤b' 账本里 `<generate>` 那一列 sha256 要跟着**包里那份**重算 ------
+    # `install` 记的是"生成那一刻"的 sha；⑤b 改写了生成物里的 staging 路径，
+    # 那份内容就变了（而且每次 staging 路径不同 → 记的 sha 每次都不同 → 不可复现）。
+    # 这里按**包里那份**重算，账本才和磁盘对得上、两次打包也才一样。
+    python3 - "$_oa_build/.wtool" <<'PYGEN'
+import hashlib, os, sys
+home = sys.argv[1]
+var = os.path.join(home, "var")
+n = 0
+for dirpath, _dn, fns in os.walk(var):
+    if "journal.tsv" not in fns:
+        continue
+    jp = os.path.join(dirpath, "journal.tsv")
+    rows = []
+    changed = False
+    with open(jp, "r", encoding="utf-8", errors="surrogateescape") as fh:
+        for line in fh.read().split("\n"):
+            if not line:
+                continue
+            c = line.split("\t")
+            if c and c[0] == "generate" and len(c) >= 5:
+                rel = c[2].replace("{{WTOOL_HOME}}/wtool/", "", 1)
+                fp = os.path.join(home, "wtool", rel)
+                if os.path.isfile(fp):
+                    h = hashlib.sha256()
+                    with open(fp, "rb") as g:
+                        for chunk in iter(lambda: g.read(1 << 20), b""):
+                            h.update(chunk)
+                    if c[4] != h.hexdigest():
+                        c[4] = h.hexdigest()
+                        changed = True
+            rows.append("\t".join(c))
+    if changed:
+        with open(jp, "w", encoding="utf-8", errors="surrogateescape") as fh:
+            fh.write("\n".join(rows) + "\n")
+        n += 1
+print("⑤b' <generate> 的 sha256 按包里那份重算：%d 个账本文件" % n)
+PYGEN
+
     # ---- ⑥ L2 **保持为链**（两端都在 .wtool 里）-----------------------------
     _oa_n=0
     while IFS="$(printf '\t')" read -r _oa_rel _oa_target _oa_type; do

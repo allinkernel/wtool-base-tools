@@ -61,7 +61,7 @@ step "2) $W/install.sh --no-rc"
 if ! ( cd "$W" && HOME="$THOME" WTOOL_HOME="$W" sh ./install.sh --no-rc ) \
         > "$THOME/install.log" 2>&1; then
     bad "install.sh 非 0 退出 —— 最后 30 行："
-    tail -30 -- "$THOME/install.log" >&2
+    tail -n 30 -- "$THOME/install.log" >&2
     exit 1
 fi
 say "✔ install.sh rc=0（日志 $THOME/install.log）"
@@ -80,10 +80,10 @@ for _uv in $(env | sed -n 's/^\(WTOOL[A-Za-z_]*\)=.*/-u \1/p'); do
 done
 # shellcheck disable=SC2086
 if ! env $_unset_args HOME="$THOME" PATH="$_clean_path" \
-        sh -c 'WTOOL_HOME=$1; export WTOOL_HOME; . "$WTOOL_HOME/env.bash"; wtool check' \
+        bash -c 'WTOOL_HOME=$1; export WTOOL_HOME; . "$WTOOL_HOME/env.bash"; wtool check' \
         _ "$W" > "$THOME/check.log" 2>&1; then
     bad "wtool check 非 0 —— 最后 30 行："
-    tail -30 -- "$THOME/check.log" >&2
+    tail -n 30 -- "$THOME/check.log" >&2
     exit 1
 fi
 say "✔ wtool check rc=0：$(tail -1 -- "$THOME/check.log")"
@@ -98,10 +98,10 @@ say "✔ \$HOME/usr 仍然不存在（判据：test -e / -L 都不成立）"
 step "3b) status 与 check 结论一致"
 # shellcheck disable=SC2086
 env $_unset_args HOME="$THOME" PATH="$_clean_path" \
-    sh -c 'WTOOL_HOME=$1; export WTOOL_HOME; . "$WTOOL_HOME/env.bash"; wtool status' \
+    bash -c 'WTOOL_HOME=$1; export WTOOL_HOME; . "$WTOOL_HOME/env.bash"; wtool status' \
     _ "$W" > "$THOME/status.log" 2>&1 || true
 # PATH 里不许有重复项（2026-10-21 VM 实测：env 汇总把每个项目 source 了两次）
-_dups=$(env -u WTOOL_HOME HOME="$THOME" PATH="$_clean_path" bash -c \
+_dups=$(env HOME="$THOME" PATH="$_clean_path" WTOOL_HOME="$W" bash -c \
         '. "$1"; printf "%s" "$PATH"' _ "$W/env.bash" \
         | tr ':' '\n' | sed '/^$/d' | sort | uniq -d)
 if [ -n "$_dups" ]; then
@@ -117,7 +117,7 @@ case $_status_line in
         say "✔ $_status_line" ;;
     *)
         bad "status 与 check 对不上（check rc=0 但 status 不是全绿）："
-        tail -20 -- "$THOME/status.log" >&2
+        tail -n 20 -- "$THOME/status.log" >&2
         exit 1 ;;
 esac
 
@@ -145,10 +145,11 @@ _before_mt=$(stat -c %Y "$THOME/.bashrc")
 mkdir -p -- "$THOME/borrowed"
 tar xf "$PKG" -C "$THOME/borrowed" || { bad "tar xf（portable）失败"; exit 1; }
 _BW=$THOME/borrowed/.wtool
-if ! ( cd "$_BW" && HOME="$THOME" sh ./install.sh --portable --no-rc ) \
+# ⚠️ 不能加 `--no-rc`：那是 `--rc-mode none`，portable 的"生成两份 rc 文件"也会被关掉。
+if ! ( cd "$_BW" && HOME="$THOME" sh ./install.sh --portable ) \
         > "$THOME/install-portable.log" 2>&1; then
     bad "portable 模式 install.sh 非 0 —— 最后 25 行："
-    tail -25 -- "$THOME/install-portable.log" >&2
+    tail -n 25 -- "$THOME/install-portable.log" >&2
     exit 1
 fi
 grep -q '落点模式：\*\*portable\*\*' "$THOME/install-portable.log" \
@@ -176,16 +177,16 @@ for _pf in bash zsh; do
     esac
 done
 # source 之后 wtool 能跑、check rc=0、没有 $HOME/usr
-_pw=$(env -u WTOOL_HOME HOME="$THOME" PATH="$_clean_path" bash -c \
+_pw=$(env HOME="$THOME" PATH="$_clean_path" bash -c \
       '. "$1"; command -v wtool' _ "$THOME/borrowed/wtool-bashrc" 2>/dev/null)
 case $_pw in
     "$THOME/borrowed/.wtool"/*) : ;;
     *) bad "portable source 之后 wtool 解析到「$_pw」（应在本机的 .wtool 里）"; exit 1 ;;
 esac
-if ! env -u WTOOL_HOME HOME="$THOME" PATH="$_clean_path" bash -c \
+if ! env HOME="$THOME" PATH="$_clean_path" bash -c \
         '. "$1"; wtool check' _ "$THOME/borrowed/wtool-bashrc" \
         > "$THOME/check-portable.log" 2>&1; then
-    bad "portable 模式下 wtool check 非 0："; tail -20 -- "$THOME/check-portable.log" >&2; exit 1
+    bad "portable 模式下 wtool check 非 0："; tail -n 20 -- "$THOME/check-portable.log" >&2; exit 1
 fi
 [ ! -e "$THOME/usr" ] && [ ! -L "$THOME/usr" ] \
     || { bad "portable 装完出现了 \$HOME/usr"; exit 1; }
