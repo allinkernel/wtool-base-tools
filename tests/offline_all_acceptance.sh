@@ -280,12 +280,18 @@ while IFS="$(printf '\t')" read -r _pid _commit _kind _at _osv; do
     if [ "$_rc" = 0 ]; then
         case $_kind in
             muslbin)
-                _dest=$(sed -n 's/.*<muslbin[^>]*dest="\([^"]*\)".*/\1/p' \
-                        "$W/wtool/$_pid/wtool.xml" 2>/dev/null | head -1)
+                # `<muslbin>` 标签**跨多行**（`dest=` 在下一行）→ 单行 sed 抓不到，
+                # 会得到 `?` 并把"命令不存在"的报错当成"有输出"（假绿，实测撞过）。
+                _dest=$(tr '\n' ' ' < "$W/wtool/$_pid/wtool.xml" 2>/dev/null \
+                        | sed -n 's/.*<muslbin[^>]*dest="\([^"]*\)".*/\1/p' | head -1)
                 _cmd=$(basename -- "${_dest:-?}")
-                _out=$("$W/usr/bin/$_cmd" --version 2>&1 | head -1)
-                if [ -z "$_out" ]; then _detail="$_cmd --version 没输出"; _rc=1
-                else _detail="$_cmd --version → $_out"; fi
+                [ -n "$_dest" ] && [ -x "$W/usr/bin/$_cmd" ] \
+                    || { _detail="<muslbin dest> 抓不到或命令不在: dest='$_dest' cmd='$_cmd'"; _rc=1; }
+                if [ "$_rc" = 0 ]; then
+                    _out=$("$W/usr/bin/$_cmd" --version 2>&1 | head -1)
+                    if [ -z "$_out" ]; then _detail="$_cmd --version 没输出"; _rc=1
+                    else _detail="$_cmd --version → $_out"; fi
+                fi
                 ;;
             docker)
                 _out=$("$W/usr/bin/zsh" --version 2>&1 | head -1)
