@@ -907,6 +907,24 @@ printf 'mkdir\tdir\t%s\t-\t-\nlink\tdir\t%s\t%s\t-\n' \
     "$BH/usr/bin" "$BHW/src1" "$P1" > "$BH/var/src1/journal.tsv"
 printf 'link\tdir\t%s\t%s\t-\nlink\tfile\t%s/bin/demo\t../../wtool/src3/__output/usr/bin/demo\t-\n' \
     "$BHW/src3" "$P3" "$BH/usr" > "$BH/var/src3/journal.tsv"
+# ④ 声明 `<publish kind="none"/>` 的项目：**不进整机包**（用户 2026-10-20：
+#    dsh-projects/ 下只有开发机上需要的东西不参与打包发布）。
+#    ⚠️ 连**账本**（var/srcN）一起排除 —— 包里留着它的安装记录、却没有
+#    `wtool/srcN` 的文件，目标机上 `check` 会报"声明与磁盘对不上"。
+P4="$BW/srcN"
+mkdir -p "$P4"
+printf 'private\n' > "$P4/file.txt"
+cat > "$P4/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" priority="80">
+  <publish kind="none"/>
+</wtool>
+EOF
+ln -sfn "$P4" "$BHW/srcN"
+mkdir -p "$BH/var/srcN"
+printf 'project_id\tsrcN\nproject_root\t%s\npriority\t80\n' "$P4" \
+    > "$BH/var/srcN/meta.tsv"
+printf 'link\tdir\t%s\t%s\t-\n' "$BHW/srcN" "$P4" > "$BH/var/srcN/journal.tsv"
 mkdir -p "$BH/var/installer"
 printf 'install.sh\twtool/install.sh\t2026-01-01T00:00:00+0800\n' > "$BH/var/installer/links.tsv"
 printf '# 汇总 env（目标机 source 它就能用 wtool）\n' > "$BH/env.zsh"
@@ -957,6 +975,16 @@ tar tzf "$BL" | grep -q 'dist.json' \
     && bad "③c 离线包不该有 dist.json（D51）" || ok "③c 无 dist.json（离线族，D51）"
 tar tzf "$BL" | grep -qx '.wtool/var/src1/journal.tsv' \
     && ok "③c 账本 var/ 跟着走（目标机 check / uninstall 的依据）" || bad "③c 账本没进包"
+# ★ 声明 `<publish kind="none"/>` 的项目：文件和账本**都不进包**
+tar tzf "$BL" | grep -q 'wtool/srcN' \
+    && bad "③c 声明不参与发布的项目混进整机包了" \
+    || ok "★③c <publish kind=\"none\"/> 的项目**不进整机包**（用户 2026-10-20）"
+tar tzf "$BL" | grep -q 'var/srcN' \
+    && bad "③c 不参与的项目**账本**也进了包（目标机会 check 报错）" \
+    || ok "★③c 它的账本那一条也一起排除（否则目标机 check 对不上）"
+grep -q 'srcN：声明了 <publish kind="none"/>' "$T/bundle.log" \
+    && ok "★③c 报告里**点名**跳过了谁（不静默）" \
+    || { bad "③c 没在报告里点名"; grep 'srcN' "$T/bundle.log" | sed 's/^/     /' | head -5; }
 rm -rf "$T/bx"; mkdir -p "$T/bx"; tar xzf "$BL" -C "$T/bx"
 _got=$(sha256sum "$T/bx/.wtool/wtool/.repo/manifests/default.xml" | cut -d' ' -f1)
 _want=$(cut -d' ' -f1 < "$T/bx/.wtool/wtool/.repo/manifests/default.xml.sha256")

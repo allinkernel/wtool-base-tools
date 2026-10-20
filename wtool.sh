@@ -2624,11 +2624,22 @@ cmd_pack_release() {
     trap 'rm -rf -- "$_scratch"' EXIT INT TERM
 
     _done=0
+    _skipped=0
     for _want in $_targets; do
         _row=$(wt_resolve_project "$_want") || exit $?
         _pid=$(printf '%s\n' "$_row" | cut -f2)
         _path=$(printf '%s\n' "$_row" | cut -f3)
+        _kind=$(printf '%s\n' "$_row" | cut -f4)
         _tpl=$(printf '%s\n' "$_row" | cut -f6)
+
+        # `<publish kind="none"/>` = 不参与发布：**连包都不打**（用户 2026-10-20 口径）。
+        # 判据来自 publish-list / publish-info 的第 4 列，和看板那一格同一个来源。
+        if [ "$_kind" = "none" ]; then
+            wt_info "── $_pid"
+            wt_info "  声明了 <publish kind=\"none\"/>（不参与发布）—— 跳过，不打包"
+            _skipped=$((_skipped + 1))
+            continue
+        fi
 
         if [ -n "$_tag_override" ]; then _tag=$_tag_override; else _tag=$(wt_publish_tag "$_tpl"); fi
         if [ -n "$_repo_override" ]; then
@@ -2644,6 +2655,7 @@ cmd_pack_release() {
         wt_pack_release "$_path" "$_tag" "$_repo" "$_vol_override" "$_scratch" "$_pid"
         _done=$((_done + 1))
     done
+    [ "$_skipped" -gt 0 ] && wt_info "跳过 $_skipped 个项目（声明为不参与发布）"
     wt_info "pack-release 完成（$_done 个项目）"
 }
 
@@ -2763,16 +2775,27 @@ cmd_pack_offline_release() {
     [ -n "$(printf '%s' "$_targets" | tr -d ' ')" ] || wt_die "没有匹配的项目"
 
     _done=0
+    _skipped=0
     for _want in $_targets; do
         _row=$(wt_resolve_project "$_want") || exit $?
         _pid=$(printf '%s\n' "$_row" | cut -f2)
         _path=$(printf '%s\n' "$_row" | cut -f3)
+        _kind=$(printf '%s\n' "$_row" | cut -f4)
+
+        # 不参与发布的项目：**连离线自足包也不打**（`each` / 显式点名都一样跳过）。
+        if [ "$_kind" = "none" ]; then
+            wt_info "── $_pid"
+            wt_info "  声明了 <publish kind=\"none\"/>（不参与发布）—— 跳过，不打离线包"
+            _skipped=$((_skipped + 1))
+            continue
+        fi
 
         wt_info "── $_pid"
         wt_info "  卷大小 : $_vol_override"
         wt_pack_offline_release "$_path" "$_vol_override" "$_scratch" "$_pid"
         _done=$((_done + 1))
     done
+    [ "$_skipped" -gt 0 ] && wt_info "跳过 $_skipped 个项目（声明为不参与发布）"
     wt_info "pack-offline-release 完成（$_done 个项目）"
 }
 
@@ -3786,7 +3809,7 @@ cmd_publish_release() {
 
         wt_info "── $_pid"
         if [ "$_kind" = "none" ]; then
-            wt_info "  声明为不发布，跳过"
+            wt_info "  声明了 <publish kind=\"none\"/>（不参与发布）—— 跳过"
             continue
         fi
 
@@ -4133,6 +4156,14 @@ cmd_publish_offline_release() {
         _pid=$(printf '%s\n' "$_row" | cut -f2)
         _path=$(printf '%s\n' "$_row" | cut -f3)
         _rel="$_path/__release"
+        _kind=$(printf '%s\n' "$_row" | cut -f4)
+
+        # 不参与发布的项目：离线族也**一个字节都不传**（`each` / 显式点名都一样）。
+        if [ "$_kind" = "none" ]; then
+            wt_info "── $_pid"
+            wt_info "  声明了 <publish kind=\"none\"/>（不参与发布）—— 跳过，不上传离线包"
+            continue
+        fi
 
         wt_info "── $_pid"
         # 目标仓：--repo= 优先，否则 <publish to=>（publish-list 第 7 列），再否则项目 remote

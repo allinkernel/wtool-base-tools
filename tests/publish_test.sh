@@ -632,7 +632,7 @@ wt "$T/bin" "$WS11" "$ST11" publish-release --tag=n-1 > "$T/log11" 2>&1 || _rc=$
 chk "整体退出码 0" "$_rc" "0"
 chk "kind=none 的项目被点到名" "$(grep -c '^wtool: ── aaa-none$' "$T/log11" || true)" "1"
 chk "★它后面的项目没有被吞掉" "$(grep -c '^wtool: ── zzz-after$' "$T/log11" || true)" "1"
-grep -q '声明为不发布，跳过' "$T/log11" && ok "kind=none 明确说了跳过" \
+grep -q '不参与发布' "$T/log11" && ok "kind=none 明确说了跳过" \
     || { bad "kind=none 没有被跳过"; sed 's/^/     /' "$T/log11"; }
 grep -q 'zzz-after' "$T/gh.log" && ok "后面的项目确实发布了（gh 收到了它的仓）" \
     || bad "后面的项目没发布"
@@ -1228,6 +1228,91 @@ done
 _ls=$(py "$here/../lib/wtool_plan.py" offline-assets --release-dir "$GD" | xargs -r -n1 basename | sort | tr '\n' ' ')
 chk "★带项目名的包**和它的 .sha256 / 分卷**都算离线族" "$_ls" \
     "bat-release-offline.zip bat-release-offline.zip.part-aa bat-release-offline.zip.sha256 check-hash-ubuntu24.04.sh check-hash.sh release-offline.zip release-offline.zip.sha256 wtool-base-tools.tar.gz.sha256 x-source-offline.zip x-source-offline.zip.sha256 "
+
+echo "== 22. ★<publish kind=\"none\"/> = 不参与发布：**pack 和 publish 两条线全跳过** =="
+# 用户 2026-10-20 口径：`dsh-projects/` 下那些只有开发机上需要的项目不参与打包发布，
+# 「wtool pack-release 的时候…（跳过它们）」。
+# 语义：**连包都不打**（以前只有 publish-release 会跳过；pack-release /
+# pack-offline-release / publish-offline-release 还会照打照传）。
+# 判据只有一处：publish-list / publish-info 的第 4 列（kind）—— 四个命令共用。
+WS22="$T/ws22"; ST22="$T/state22"
+mkdir -p "$WS22/private/tool/__output/ubuntu_24.04/bin" \
+         "$WS22/open/tool/__output/ubuntu_24.04/bin"
+cat > "$WS22/private/tool/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" kind="docker" priority="10">
+  <publish kind="none"/>
+</wtool>
+EOF
+printf '#!/bin/sh\ntrue\n' > "$WS22/private/tool/__output/ubuntu_24.04/bin/priv"
+printf 'export P=1\n' > "$WS22/private/tool/env.zsh"
+git_init "$WS22/private/tool"
+cat > "$WS22/open/tool/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" kind="docker" priority="20">
+  <publish to="fakeowner/open"/>
+</wtool>
+EOF
+printf '#!/bin/sh\ntrue\n' > "$WS22/open/tool/__output/ubuntu_24.04/bin/pub"
+printf 'export O=1\n' > "$WS22/open/tool/env.zsh"
+git_init "$WS22/open/tool"
+
+chk "validate 认这条声明（不报未知标签）" \
+    "$(wt "$T/bin" "$WS22" "$ST22" validate "$WS22/private/tool" > "$T/log22v" 2>&1 && echo 0 || echo 1)" "0"
+grep -q '^ok:' "$T/log22v" && ok "validate 回 ok" || bad "validate 没回 ok" "$(cat "$T/log22v")"
+chk "★publish-list 第 4 列就是 none（四个命令共用这一处判据）" \
+    "$(py "$here/../lib/wtool_plan.py" publish-list --root "$WS22" \
+        | awk -F'\t' '$2 == "private/tool" {print $4}')" "none"
+
+# ---- 1) pack-release（非离线族）----
+_rc=0
+wt "$T/bin" "$WS22" "$ST22" pack-release private/tool > "$T/log22a" 2>&1 || _rc=$?
+chk "★pack-release 退出码 0（跳过不是失败）" "$_rc" "0"
+[ "$_rc" = 0 ] || sed 's/^/     /' "$T/log22a"
+grep -q '不参与发布' "$T/log22a" && ok "pack-release 说清了：不参与发布" \
+    || { bad "pack-release 没说原因"; sed 's/^/     /' "$T/log22a"; }
+chk "★pack-release 一个字节都没产（__release/ 不存在）" \
+    "$([ -d "$WS22/private/tool/__release" ] && echo yes || echo no)" "no"
+
+# ---- 2) pack-offline-release <项目>（离线族）----
+_rc=0
+wt "$T/bin" "$WS22" "$ST22" pack-offline-release private/tool > "$T/log22b" 2>&1 || _rc=$?
+chk "★pack-offline-release <项目> 退出码 0" "$_rc" "0"
+grep -q '不参与发布' "$T/log22b" && ok "pack-offline-release 也说清了" \
+    || { bad "pack-offline-release 没说原因"; sed 's/^/     /' "$T/log22b"; }
+chk "★它也没产离线包" \
+    "$([ -d "$WS22/private/tool/__release" ] && echo yes || echo no)" "no"
+
+# ---- 3) publish-offline-release <项目>：一个 gh 调用都不该有 ----
+: > "$T/gh.log"
+_rc=0
+wt "$T/bin" "$WS22" "$ST22" publish-offline-release private/tool > "$T/log22c" 2>&1 || _rc=$?
+chk "★publish-offline-release <项目> 退出码 0" "$_rc" "0"
+grep -q '不参与发布' "$T/log22c" && ok "publish-offline-release 说清了" \
+    || { bad "publish-offline-release 没说原因"; sed 's/^/     /' "$T/log22c"; }
+chk "★publish-offline-release 一个 gh 调用都没有" \
+    "$(grep -c 'release ' "$T/gh.log" || true)" "0"
+
+# ---- 4) publish-release（非离线族）----
+: > "$T/gh.log"
+_rc=0
+wt "$T/bin" "$WS22" "$ST22" publish-release private/tool > "$T/log22d" 2>&1 || _rc=$?
+chk "★publish-release <项目> 退出码 0" "$_rc" "0"
+grep -q '不参与发布' "$T/log22d" && ok "publish-release 说清了" \
+    || { bad "publish-release 没说原因"; sed 's/^/     /' "$T/log22d"; }
+chk "★publish-release 一个 gh 调用都没有" \
+    "$(grep -c 'release ' "$T/gh.log" || true)" "0"
+
+# ---- 5) `each`：正常项目照打，声明的项目跳过 ----
+_rc=0
+wt "$T/bin" "$WS22" "$ST22" pack-offline-release each > "$T/log22e" 2>&1 || _rc=$?
+chk "★pack-offline-release each 退出码 0" "$_rc" "0"
+chk "each 里正常项目拿到了离线包" \
+    "$(ls "$WS22/open/tool/__release/release-offline.zip" 2>/dev/null | grep -c . || true)" "1"
+chk "★each 里不参与的项目**没有**离线包" \
+    "$([ -d "$WS22/private/tool/__release" ] && echo yes || echo no)" "no"
+chk "each 里点名跳过了它" \
+    "$(grep -c '声明了 <publish kind="none"/>' "$T/log22e" || true)" "1"
 
 echo
 printf 'publish_test: PASS %d  FAIL %d\n' "$pass" "$fail"

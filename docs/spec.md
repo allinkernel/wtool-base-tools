@@ -1134,10 +1134,14 @@ $ cat $WTOOL_HOME/wtool/.repo/manifests/default.xml.commitid
 | 写法 | 行为 |
 |---|---|
 | `<publish/>` 或 `kind="source"`（默认） | 推到项目自己的 remote |
-| `kind="none"` | 不发布（第三方上游仓等） |
+| `kind="none"` | **不参与发布**（第三方上游仓、只有开发机上需要的项目等）：`pack-release` / `publish-release` / `pack-offline-release` / `publish-offline-release`（含 `each`）**全部跳过**，`pack-offline-release all` 的**整机包闭包也不含它**（连账本那一条都不进包），看板那两格显示「不参与」 |
 | `to="owner/repo"` | 推到别的仓（默认取项目 remote） |
 | `<sub path= kind= to=/>` | 替"子树里没有 `wtool.xml` 的项目"表态（上游仓不能往里塞清单文件） |
 | `<target os= version= codename= image=/>` | 目标系统矩阵；引擎**只解析并透出**（`wtool_plan.py publish-info` 读得到），发布流程不消费 |
+
+> `kind="none"` 的判据只有一处：`publish-list` / `publish-info` 的第 4 列（`kind`）。
+> shell 侧那四条打包/发布命令都读它 —— 所以**一处声明，四条命令全跳过**，
+> 不会出现"发布跳过了、打包还在打"的半套行为。
 
 **`kind="script"` 和 `script=` 现在是清单错误**：`wtool validate` 直接拒绝 ——
 `kind="script"` 报"只能是 `source` / `none`"，`script=` 报
@@ -1554,8 +1558,8 @@ blob 按内容命名所以父链天然只存一份。五条命令分工：
 | `build` | `scripts/build.sh` 或 `build/layers.tsv` | `actions.tsv` 里有 `build` → `已完成` |
 | `install` | 有 `<export_bin>`/`<export_usr>`/`<generate>`/`<zshrc>`/`<bashrc>`，或 `scripts/install.sh` | `journal.tsv`/`registry.tsv` 记着 → `已完成`；有 `build` 能力而 `__output/` 空 → `待产出` |
 | `sudo` | 清单里有 `sysfile`/`source`/`task` | `provisioned/` mark 或 `system/` 或 `apt.tsv` → `已完成` |
-| `pack` | 永远可以（源码包谁都能打） | `__release/dist.json` 在 → `已完成`；有 `build` 能力而 `__output/` 空 → `待产出` |
-| `publish` | `<publish kind="none"/>` → `不支持` | `publish.tsv` 有记录 → `已完成` |
+| `pack` | 永远可以（源码包谁都能打）；`<publish kind="none"/>` → `不参与` | `__release/dist.json` 在 → `已完成`；有 `build` 能力而 `__output/` 空 → `待产出` |
+| `publish` | `<publish kind="none"/>` → `不参与`；非 ③ 类 → `不支持` | `publish.tsv` 有记录 → `已完成` |
 | `download` | 仓库里提交了 `scripts/release.json` | 产物来自下载（`artifacts.tsv`）→ `已完成`；没提交声明 → `未发布` |
 | `layer` | `build/layers.tsv` 在 | `__layer/<target>/index.json` 在 → `已完成` |
 

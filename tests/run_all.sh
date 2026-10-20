@@ -59,7 +59,18 @@
 #                             pty 答 y 才写 / 写了也只有两行"、--dry-run 零副作用
 #                             含 uninstall.sh 对称收尾那两场
 #                             （89 条 —— 2026-10-13，第 5b 块新加）
-#                             —— 十三组共 **1386** 条（2026-10-13 **第 ⑧ 块**实测；
+#                             —— 十三组共 **1447** 条（2026-10-20 实测；
+#                             数法同上（pairing 60 + provision 40 + publish 219 + table 111 +
+#                             release-copy 17 + release 180 + contract 313 + layer 50 +
+#                             docker-build 102 + install-env 67 + installer 89 + export 78 +
+#                             muslbin 121 = 1447，FAIL 全 0）：
+#                             2026-10-20 = publish 192→219（+27 条场景 22：<publish kind="none"/>
+#                             = 不参与发布，pack 和 publish 两条线全跳过）、table 106→111
+#                             （+5 条第 13 节：看板那两格显示「不参与」）、release 177→180
+#                             （+3 条场景 10c：声明 none 的项目不进整机包闭包）。
+#                             ⚠️ release 那一组在 2026-10-13 那版之后自己长过（158→177），
+#                             所以这里的 180 里有 19 条不是本轮加的 —— 以**跑出来的**为准。
+#                             —— 再往前：十三组共 **1386** 条（2026-10-13 **第 ⑧ 块**实测；
 #                             数法是**逐组汇总行的计数器相加**（pairing 60 + provision 40 +
 #                             publish 192 + table 106 + release-copy 17 + release 158 +
 #                             contract 313 + layer 50 + docker-build 102 + install-env 67 +

@@ -243,6 +243,33 @@ def _kind_of_project(project_root):
     return meta.get("project_kind") or DEFAULT_PROJECT_KIND
 
 
+def _publish_kind_of(project_root):
+    """**发布声明**（`<publish kind=>`）：`source` / `none`。
+
+    和 `_kind_of_project`（项目类型）不是一回事（schema 文档里专门警告过）。
+    读不到 wtool.xml / 解析失败时按默认 `source` 算 —— 和 `publish-info` 同一条判据，
+    绝不把"没写"当成"不发布"。
+    """
+    root = os.path.abspath(project_root)
+    path = os.path.join(root, "wtool.xml")
+    if not os.path.isfile(path):
+        return "source"
+    errors = []
+    meta, _entries = parse_manifest(path, root, errors)
+    if meta is None:
+        return "source"
+    return effective_publish(root, meta["publish"])["kind"]
+
+
+def is_no_release(project_root):
+    """这个项目声明了 `<publish kind="none"/>`（不参与打包/发布）吗。
+
+    **打包和发布两条线共用这一个判据**（shell 侧读 `publish-list` 的第 4 列，
+    那是 `publish-info` 里的同一个值）：一处声明，处处跳过。
+    """
+    return _publish_kind_of(project_root) == "none"
+
+
 def is_offline_asset(name):
     """这个名字属不属于离线族（自足包 / 它的 hash / check-hash.sh / 分卷）。
 
@@ -2384,6 +2411,13 @@ LBL_UNPUB = "未发布"
 # 用户 2026-10-04 要求：install 旁边跟一列 uninstall，装之前是未安装、
 # 装之后变可执行；sudo 那一对同理。
 LBL_NOTINST = "未安装"
+# 「不参与」：项目自己在 wtool.xml 里声明了 `<publish kind="none"/>` ——
+# 打包 / 发布这条线**主动跳过它**（pack-release / publish-release /
+# pack-offline-release / publish-offline-release / 整机包闭包，全都不碰）。
+# 它和「不支持」不是一回事：不支持是"这个类型没有这项能力"；不参与是
+# "有能力，但这次不发布"（用户 2026-10-20：dsh-projects/ 下那些只有开发机
+# 上需要的东西，不该出现在任何 release 里）。
+LBL_SKIP = "不参与"
 
 C_RED = "\033[31m"
 C_YELLOW = "\033[33m"
@@ -2394,7 +2428,8 @@ C_CYAN = "\033[36m"
 C_OFF = "\033[0m"
 
 _LBL_COLOR = {LBL_NONE: C_RED, LBL_TODO: C_BLUE, LBL_CAN: C_YELLOW,
-              LBL_DONE: C_GREEN, LBL_UNPUB: C_MAGENTA, LBL_NOTINST: C_CYAN}
+              LBL_DONE: C_GREEN, LBL_UNPUB: C_MAGENTA, LBL_NOTINST: C_CYAN,
+              LBL_SKIP: C_MAGENTA}
 
 
 def _state_cell(state, color_on):
@@ -2733,7 +2768,10 @@ def command_states(path, pub, st, state_dir):
 
     # pack-release（**非离线族，只 ③ 类** —— ADR-0045 / D54）：① 的离线包走
     # pack-offline-release（另一条命令，不在看板这一列里）；有 build 能力的要等 __output/
-    if not _can("pack-release"):
+    # `<publish kind="none"/>` = **不参与发布**，先判它（声明比类型更具体）。
+    if (pub or {}).get("kind") == "none":
+        out["pack"] = LBL_SKIP
+    elif not _can("pack-release"):
         out["pack"] = LBL_NONE
     elif os.path.isfile(os.path.join(path, DIR_REL, "dist.json")):
         out["pack"] = LBL_DONE
@@ -2743,9 +2781,9 @@ def command_states(path, pub, st, state_dir):
         out["pack"] = LBL_CAN
 
     # publish-release：<publish kind="none"/> 的项目不发布；非 ③ 类的类型不适用
-    if not _can("publish-release"):
-        out["publish"] = LBL_NONE
-    elif (pub or {}).get("kind") == "none":
+    if (pub or {}).get("kind") == "none":
+        out["publish"] = LBL_SKIP
+    elif not _can("publish-release"):
         out["publish"] = LBL_NONE
     elif st.get("published"):
         out["publish"] = LBL_DONE
@@ -2850,6 +2888,7 @@ def _status_evidence(path, st, pub, state_dir):
             if "OWNED.tsv" in _fs:
                 n_unpacked += 1
     rel_json = os.path.join(path, "scripts", "release.json")
+    _no_release = (pub or {}).get("kind") == "none"
     return {
         "build": "有 scripts/build.sh；%s" % (
             "%s 里有 %d 项" % (DIR_OUT + "/", n_out) if n_out else "%s/ 还没有" % DIR_OUT),
@@ -2860,8 +2899,13 @@ def _status_evidence(path, st, pub, state_dir):
                  % st.get("sysfiles", 0)) if st.get("markers") or st.get("sysfiles")
                 else "wtool.xml 里没有系统层声明（sysfile/source/task）",
         "sudo-uninstall": "已装系统文件 %d 个" % st.get("sysfiles", 0),
-        "pack": "%s 里有 %d 项" % (DIR_OUT + "/", n_out) if n_out else "%s/ 还没有" % DIR_OUT,
-        "publish": "发布记录 %d 条" % n_pub if n_pub else "发布记录 0 条（还没发过）",
+        "pack": ("wtool.xml 声明了 <publish kind=\"none\"/> —— 不参与打包/发布"
+                 if _no_release else
+                 ("%s 里有 %d 项" % (DIR_OUT + "/", n_out)) if n_out
+                 else "%s/ 还没有" % DIR_OUT),
+        "publish": ("wtool.xml 声明了 <publish kind=\"none\"/> —— 不参与发布"
+                    if _no_release else
+                    ("发布记录 %d 条" % n_pub if n_pub else "发布记录 0 条（还没发过）")),
         "download": ("仓库里有 scripts/release.json（发布信息）" if os.path.isfile(rel_json)
                      else "仓库里没有 scripts/release.json → 还没发布过，没东西可下"),
         "unpack-layer": ("build/layers.tsv 在；%s/ 有 %d 个 target；解出来 %d 份 OWNED.tsv"
@@ -2905,7 +2949,8 @@ def project_status(root, state_dir, ident):
                 aligns=["l", "c", "l", "l"])
     out += ["",
             "  · 想知道某条命令**到底会做什么**：wtool <命令> %s --dry-run（不动手，只出计划）" % pid,
-            "  · 状态只有六种：不支持 / 可执行 / 待产出 / 已完成 / 未发布 / 未安装（和看板同一套）",
+            "  · 状态只有七种：不支持 / 可执行 / 待产出 / 已完成 / 未发布 / 未安装 / 不参与"
+            "（和看板同一套；「不参与」= wtool.xml 声明了 <publish kind=\"none\"/>）",
             "  · push-layer / pull-layer 的「推过没、拉过没」本机**没有记录**（那两条命令不写 journal）——",
             "    本机只能告诉你「能不能推」；真状态去镜像仓库看。"]
     return out, 0
@@ -4832,6 +4877,22 @@ def offline_all_plan(args):
     if not projects:
         errors.append("账本里一个项目都没有（%s/var）—— 这不是【这台机器装好了】的样子" % home)
 
+    # `<publish kind="none"/>` 的项目**不进整机包**（用户 2026-10-20 口径：
+    # dsh-projects/ 下那些只有开发机上需要的项目不参与打包发布）。
+    # ‼️ 连**账本**（var/<项目>）一起排除：包里留着它的安装记录、却没有
+    #    `wtool/<项目>` 的文件，目标机上 `check` 会报"声明与磁盘对不上"。
+    kept = []
+    skipped = []
+    for pr in projects:
+        if pr["live"] and is_no_release(pr["live"]):
+            skipped.append(pr)
+            warns.append("%s：声明了 <publish kind=\"none\"/>（不参与发布）—— "
+                         "整机包里**不含**它（账本那一条也一起排除）" % pr["pid"])
+        else:
+            kept.append(pr)
+    projects = kept
+    _skipped_var = {os.path.join(home, "var", pr["pid"]) for pr in skipped}
+
     files_rows = []          # pid, dest_rel, src_abs, kind
     links_rows = []          # dest_rel(under home), target, type
     project_rows = []
@@ -4903,6 +4964,9 @@ def offline_all_plan(args):
     var = os.path.join(home, "var")
     if os.path.isdir(var):
         for dirpath, _dn, filenames in os.walk(var):
+            # 不参与发布的项目：**账本那一条也不进包**（见上面 skipped 那段）
+            if any(dirpath == s or dirpath.startswith(s + os.sep) for s in _skipped_var):
+                continue
             for f in filenames:
                 p = os.path.join(dirpath, f)
                 verbatim.append((os.path.relpath(p, home), p))

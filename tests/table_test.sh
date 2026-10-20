@@ -54,11 +54,13 @@ S="$WTOOL_STATE"
 mkdir -p "$WTOOL_HOME" "$S" "$WS" "$WTOOL_MANAGED_HOME"
 printf '# 用户自己的 zshrc\nsetopt auto_cd\n' > "$WTOOL_MANAGED_HOME/.zshrc"
 
-# 四种格子的标签（带颜色）。颜色错了也是错，所以逐个写死。
+# 格子的标签（带颜色）。颜色错了也是错，所以逐个写死。
 C_NONE=$(printf '\033[31m不支持\033[0m')
 C_CAN=$(printf '\033[33m可执行\033[0m')
 C_TODO=$(printf '\033[34m待产出\033[0m')
 C_DONE=$(printf '\033[32m已完成\033[0m')
+# 第六个标签（2026-10-20）：项目自己声明 <publish kind="none"/> = 不参与发布。
+C_SKIP=$(printf '\033[35m不参与\033[0m')
 
 # --------------------------------------------------------------------------
 # 项目夹具：覆盖四个格子的组合
@@ -554,6 +556,41 @@ chk "docker 的 拉容器层 那格 可执行（黄）" \
 _sum12=$(tbl12 --summary 2>&1)
 chk "★汇总的「待构建」只数 ③ 类（这里正好是 dock 一个）" "1" \
     "$(printf '%s\n' "$_sum12" | sed -n 's/.*待构建 \([0-9][0-9]*\).*/\1/p')"
+
+echo "== 13. ★<publish kind=\"none\"/> 在看板上是「不参与」（用户 2026-10-20）=="
+# 为什么单列一格而不是借用「不支持」：这是**项目自己的声明**（我这次不发），
+# 不是"这个类型没这项能力"。两件事混在一格里，看表的人会去查类型 —
+# 而这两个项目（dsh-conf / dsh-remote）恰恰是 kind=source，本来就"不支持"
+# 做 gz 包/发布包 —— 借「不支持」的话，加了声明和没加声明长得一模一样。
+WS13="$T/ws13"; S13="$T/state13"
+mkdir -p "$WS13/closed" "$WS13/opened/__output"
+cat > "$WS13/closed/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" kind="docker" priority="10">
+  <publish kind="none"/>
+</wtool>
+EOF
+# 对照组：同样的类型、没声明 none —— 那两格必须还是正常的"可执行"
+cat > "$WS13/opened/wtool.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<wtool schema="1" kind="docker" priority="20"/>
+EOF
+printf 'x\n' > "$WS13/opened/__output/x"
+tbl13() { WTOOL_SUDO=yes env -u WTOOL_ROOT python3 "$PY" table --root "$WS13" --state "$S13" "$@"; }
+cell13() { tbl13 --color=always | awk -v id="$1" -v c="$2" '$2 == id {print $(2 * c); exit}'; }
+chk "★声明了 none 的 做gz包 那格 = 不参与（品红）" \
+    "$(cell13 closed 8)" "$C_SKIP"
+chk "★声明了 none 的 发布包 那格 = 不参与（品红）" \
+    "$(cell13 closed 9)" "$C_SKIP"
+chk "对照组（没声明）的 做gz包 仍然是 可执行" \
+    "$(cell13 opened 8)" "$C_CAN"
+chk "对照组（没声明）的 发布包 仍然是 可执行" \
+    "$(cell13 opened 9)" "$C_CAN"
+# 依据那一列也要说清是**声明**，不是类型（wtool status <项目> 给的是同一句话）
+_st13=$(env -u WTOOL_ROOT python3 "$PY" status --root "$WS13" --state "$S13" closed 2>&1)
+printf '%s\n' "$_st13" | grep -q '做gz包.*<publish kind="none"/>\|声明了 <publish kind="none"/> —— 不参与打包/发布' \
+    && ok "status 的依据里带 <publish kind=\"none\"/>（知道是声明，不用去猜类型）" \
+    || { bad "status 没把依据说清楚"; printf '%s\n' "$_st13" | sed 's/^/     /' | head -12; }
 
 echo
 printf 'table_test: PASS %d  FAIL %d\n' "$pass" "$fail"

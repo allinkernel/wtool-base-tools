@@ -425,16 +425,44 @@ state），还原依据单独记在 `system.tsv`；apt 包按"跑前跑后的已
 ## `<publish>` —— 怎么发布
 
 **不写它 = `kind="source"`**：引擎打源码包 / 产物包，推到**本项目自己 remote** 的 release。
-它只表达"文件表达不了的两件事"：推到**别的仓**、或者**根本不发**。
+它只表达"文件表达不了的三件事"：推到**别的仓**、**根本不发**、以及
+**这个项目不参与发布**（只有开发机上需要的东西）。
 （**打几个包不由这里决定**：项目没有构建能力 —— 没有 `scripts/build.sh`、
 也没有 `build/layers.tsv` —— 时只发源码包，见 `docs/adr/0039`。）
 
 | 属性 | 必填 | 默认 | 说明 |
 |---|---|---|---|
-| `kind` | 否 | `source` | 只认 `source` / `none`（`none` = 不参与发布，第三方上游仓用这个） |
+| `kind` | 否 | `source` | 只认 `source` / `none`。`none` = **不参与发布**：不但不发布，**连包都不打**（见下） |
 | `to` | 否 | 本项目 remote | 推到别的仓，写 `owner/repo` |
 | `tag` | 否 | `snapshot-%Y-%m-%d` | release 的 tag（`%Y`/`%m`/`%d` 会替换成当天日期） |
 | `asset` | 否 | — | 引擎只解析并透出（`publish-info` 读得到），当前发布流程不消费 |
+
+### `kind="none"`：这个项目**不参与发布**
+
+用在两种项目上：**第三方上游仓**（如 `neovim/neovim`，我们不该往人家仓里发东西）、
+以及**只有开发机上才需要的项目**（如 `dsh-projects/` 下那两个 —— 用户 2026-10-20 口径）。
+声明之后**整条发布链都跳过它**，不是只跳发布那一步：
+
+| 命令 | `kind="none"` 时 |
+|---|---|
+| `wtool pack-release <项目>` | 跳过（不产 `__release/`），退出码 0 |
+| `wtool publish-release <项目>` | 跳过，不上传 |
+| `wtool pack-offline-release <项目>` / `each` | 跳过，不产离线自足包 |
+| `wtool publish-offline-release <项目>` / `each` | 跳过，不上传离线包 |
+| `wtool pack-offline-release all`（整机包） | **闭包不含它**（文件和账本 `var/<项目>` 都不进包） |
+| `wtool publish-offline-release all` | 整机包里就没有它，自然不发 |
+| 看板 `做gz包` / `发布包` 两格 | 显示「不参与」（不是「不支持」—— 那是类型判据） |
+
+判据只有一处：`wtool publish-list` / `publish-info` 的第 4 列（`kind`）。
+四条打包/发布命令读的是同一个值，所以**一处声明，四处动作一致** ——
+不会出现"发布跳过了、打包还在打"的半套行为。回归断言见
+`tests/publish_test.sh` 场景 22、`tests/table_test.sh` 第 13 节、
+`tests/release_test.sh` 场景 10c。
+
+```xml
+<!-- 我这个项目只在开发机上用，别进任何 release -->
+<publish kind="none"/>
+```
 
 子元素两个：
 
