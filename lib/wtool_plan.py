@@ -4962,11 +4962,29 @@ def offline_all_plan(args):
         else:
             errors.append("$WTOOL_HOME/%s 不在 —— 目标机上 source 不出 wtool 命令" % name)
     var = os.path.join(home, "var")
+    # 账本进包的判据 = **闭包**（D38），不是"整棵 var 原样搬"。
+    #   · `var/<pid>/**` 只有 <pid> 在闭包里才进包；
+    #   · var 顶层的散文件（`registry.tsv`）进包；
+    #   · `var/installer/**` 进包（安装器自己的账，`check` 要照它验入口链）。
+    # ‼️ 2026-10-20 实测：源机上那些「只发布过、从没 install 过」的项目
+    #    （`var/<pid>/publish.tsv`，dev 机上 40 多个 musl-bins 工具）原样跟着进包，
+    #    而目标机上没有对应的 `wtool/<pid>` → `wtool check` 当场报一屏
+    #    "state 里还留着 publish.tsv，但磁盘上没有这个项目了"，rc=1。
+    #    那不是目标机的问题，是**包里多带了不该带的账**。
+    _closure_ids = set(pr["pid"] for pr in projects)
     if os.path.isdir(var):
-        for dirpath, _dn, filenames in os.walk(var):
+        for dirpath, dirnames, filenames in os.walk(var):
+            rel = os.path.relpath(dirpath, var)
+            relp = "" if rel == "." else rel.replace(os.sep, "/")
             # 不参与发布的项目：**账本那一条也不进包**（见上面 skipped 那段）
             if any(dirpath == s or dirpath.startswith(s + os.sep) for s in _skipped_var):
                 continue
+            if relp:
+                _keep = (relp in _closure_ids or relp == "installer"
+                         or any(c.startswith(relp + "/") for c in _closure_ids))
+                if not _keep:
+                    dirnames[:] = []          # 不在闭包里：这一支整个不往下走
+                    continue
             for f in filenames:
                 p = os.path.join(dirpath, f)
                 verbatim.append((os.path.relpath(p, home), p))

@@ -1992,6 +1992,45 @@ wt_pack_offline_all() {
             { print }' "$_oa_j" > "$_oa_j.tmp" && mv -f -- "$_oa_j.tmp" "$_oa_j"
     done < "$_oa_scratch/all.projects.tsv"
 
+    # ---- ①c 账本里的**源机绝对路径** → 占位符（目标机 install.sh 展开）-------
+    # `var/**`（journal.tsv 的 dest 列、registry.tsv、各项目的 env 块）记的全是
+    # **这台机器**的绝对路径：`$WTOOL_HOME/usr/bin/zsh`、`$HOME/usr`、`$HOME/.wtool/...`。
+    # 整机包搬到别人机器上，那些路径一个都不存在 —— 于是 `wtool check` 对**每个
+    # 项目**报"不见了"、`install.sh` 第⑤步自检当场 rc=1（2026-10-20 实测：
+    # 9 个项目 20 条 + 44 条陈旧账）。用户第一眼看到的就是"包坏了"。
+    #
+    # 做法：打包时把这两个前缀换成 `{{WTOOL_HOME}}` / `{{HOME}}`，目标机
+    # `install.sh` 的「⓪b」一条 python 就地展开（开发机上没有占位符 = no-op）。
+    # ⚠️ 前提：打包机（容器）里的 `$HOME` / `$WTOOL_HOME` 必须和源机**逐字相同**
+    #    —— 整机包本来就是按这个前提算绝对路径的（工作区与 `~/.wtool` 挂宿主
+    #    同名绝对路径，见 BL-68 ③-3）。不同名的话这里换不到，会原样留着。
+    # ⚠️ 顺序：先换 `$WTOOL_HOME`（它是 `$HOME` 的子路径），否则会被 `$HOME` 先吃掉。
+    if python3 - "$_oa_build/.wtool/var" "$WTOOL_HOME" "$HOME" <<'PY'
+import os, sys
+root, whome, uhome = sys.argv[1], sys.argv[2].rstrip(os.sep), sys.argv[3].rstrip(os.sep)
+# 空值必须挡掉：uhome == "" 时 "".join 会把每个 "/" 都换成占位符（灾难性）
+pairs = [(w, p) for w, p in ((whome, "{{WTOOL_HOME}}"), (uhome, "{{HOME}}")) if w]
+n = 0
+for dirpath, _dn, fns in os.walk(root):
+    for f in fns:
+        p = os.path.join(dirpath, f)
+        try:
+            t = open(p, "r", encoding="utf-8").read()
+        except (UnicodeDecodeError, OSError):
+            continue
+        nt = t
+        for src, ph in pairs:                  # WTOOL_HOME 是 HOME 的子路径 → 先换它
+            for sep in (os.sep, "\t", "\n"):
+                nt = nt.replace(src + sep, ph + sep)
+            if nt.endswith(src):
+                nt = nt[:-len(src)] + ph
+        if nt != t:
+            open(p, "w", encoding="utf-8").write(nt)
+            n += 1
+print("账本占位符：%d 个文件" % n)
+PY
+    then :; else wt_die "账本占位符改写失败（$WTOOL_HOME / $HOME 与源机不一致？）"; fi
+
     # ---- ② L1 实体化：每个项目一棵实体目录，只装闭包要的东西 ----------------
     _oa_lastdir=""
     _oa_n=0

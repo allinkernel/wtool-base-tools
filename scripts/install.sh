@@ -203,6 +203,49 @@ link_rel() {   # <落点> <相对目标>
 }
 
 # ==========================================================================
+# 职责 ⓪b：**整机包**里的账本占位符展开（`{{WTOOL_HOME}}` / `{{HOME}}`）
+#
+# 整机包是"另一台机器"的 `.wtool` 拷贝，账本（`var/**`：`journal.tsv` /
+# `registry.tsv` / env 块）里记着**源机的绝对路径**（`/home/某人/.wtool/usr/bin/rg`、
+# `/home/某人/usr`）。打包时 `pack-offline-release all` 把它们写成占位符，
+# 这里展开成**本机**的 —— 必须抢在 ① 之前：① 里的 `wtool install` 会按账本
+# 重算 env 汇总与环境块。
+#
+# 开发机上没有占位符 → 整段是 no-op（一个字节都不碰）。
+# ⚠️ 不做这一步的后果（2026-10-20 实测）：目标机 `$HOME` 只要不叫源机那个名字，
+#    `wtool check` 就对**每个项目**报"不见了"（9 个项目 20 条）、
+#    install.sh 第⑤步自检当场 rc=1 —— 用户第一眼看到的就是"包坏了"。
+# ==========================================================================
+if [ "$DRY_RUN" = 1 ]; then
+    say "⓪b [dry-run] 展开账本里的 {{WTOOL_HOME}} / {{HOME}} 占位符（开发机上没有 → no-op）"
+elif grep -rqsF -e '{{WTOOL_HOME}}' -e '{{HOME}}' -- "$WTOOL_HOME_DIR/var" 2>/dev/null; then
+    say "⓪b 展开账本占位符（这是从整机包解出来的 .wtool）"
+    python3 - "$WTOOL_HOME_DIR/var" "$WTOOL_HOME_DIR" "$HOME_DIR" <<'PY' || die "⓪b 失败：账本占位符展开不了"
+import os, sys
+root, whome, uhome = sys.argv[1], sys.argv[2].rstrip(os.sep), sys.argv[3].rstrip(os.sep)
+# 空值必须挡掉：uhome == "" 时替换会把每个 "/" 都写坏（灾难性）
+pairs = [(w, p) for w, p in ((whome, "{{WTOOL_HOME}}"), (uhome, "{{HOME}}")) if w]
+n = 0
+for dirpath, _dn, fns in os.walk(root):
+    for f in fns:
+        p = os.path.join(dirpath, f)
+        try:
+            t = open(p, "r", encoding="utf-8").read()
+        except (UnicodeDecodeError, OSError):
+            continue
+        nt = t
+        for src, ph in pairs:                  # WTOOL_HOME 是 HOME 的子路径 → 先换它
+            nt = nt.replace(ph, src)
+        if nt != t:
+            open(p, "w", encoding="utf-8").write(nt)
+            n += 1
+print("   ✔ 展开 %d 个账本文件" % n)
+PY
+else
+    say "⓪b 账本里没有占位符（开发机 / 直接从 git 装的）—— 跳过"
+fi
+
+# ==========================================================================
 # 职责①：装安装器项目本体 + 两条入口链
 #
 # `wtool install <安装器项目>` 会建 L1（`$WTOOL_HOME/wtool/<项目>` → 本目录，
