@@ -149,11 +149,10 @@ check "export_usr 逐条目建了 usr/share/man" \
 check "usr/bin 下两条并存（多项目共享这张表）" "fzf rg" \
     "$(ls "$WTOOL_HOME/usr/bin" 2>/dev/null | tr '\n' ' ' | sed 's/ $//')"
 
-# ~/usr 这条全局软链：`~/usr` 在**被管理的家目录**里，实体是 `$WTOOL_HOME/usr`
-# （新口径下这两个不是同一个目录 —— 老代码从 --home 推 `~/usr`，会指错）
-[ -L "$WTOOL_MANAGED_HOME/usr" ] && ok "~/usr 建出来了" || bad "~/usr 没建出来"
-check "~/usr 指向 \$WTOOL_HOME/usr" "$WTOOL_HOME/usr" \
-    "$(readlink "$WTOOL_MANAGED_HOME/usr" 2>/dev/null)"
+# `~/usr` 这条全局软链 **2026-10-21 起不再创建**（用户："装完只多 .wtool/ 与 rc 两行"；
+# ADR-0046）。判据反过来：装完之后 $HOME 里**不许**出现 usr。
+[ -e "$WTOOL_MANAGED_HOME/usr" ] || [ -L "$WTOOL_MANAGED_HOME/usr" ] \
+    && bad "~/usr 又被建出来了（2026-10-21 起不再建）" || ok "~/usr 没建（新口径）"
 
 # 新标签的路径也要幂等（L1+L2 + env.bash，重复 install 不该有任何变化）
 _snap1=$(find "$WTOOL_HOME" -mindepth 1 -printf '%y %p -> %l\n' | LC_ALL=C sort)
@@ -372,21 +371,21 @@ for spec in "c/one Cone" "d/two Dtwo"; do
     mkexport "$T/ws/$1" "$2" docker
     git -C "$T/ws/$1" add -A && git -C "$T/ws/$1" -c user.name=t -c user.email=t@t commit -qm init
 done
-# 先放一个"编译产物"在影子 HOME 里：~/usr 收走时**只该删软链**
+# 2026-10-21 起 `~/usr` 的"生命周期"整个不存在了：**任何时候都不建**。
+# 这一场改成断言三件事：装了两个项目也不建；卸掉也不建（本来就没有）；
+# 影子 HOME 里的实体 `$WTOOL_HOME/usr` 一直在（那是 L2 的落点，不许被顺手删）。
 mkdir -p "$WTOOL_HOME/usr/bin"; printf 'bin\n' > "$WTOOL_HOME/usr/bin/x"
 "$WT" install "$C" > /dev/null 2>&1
 "$WT" install "$D" > /dev/null 2>&1
-# `~/usr` 在**被管理的家目录**里（`$WTOOL_MANAGED_HOME`），实体是 `$WTOOL_HOME/usr`。
-# 新口径下这两个不是同一个目录，所以断言两处都点名。
-[ -L "$WTOOL_MANAGED_HOME/usr" ] && ok "两个项目时 ~/usr 在" || bad "~/usr 不在"
-check "~/usr 指向 \$WTOOL_HOME/usr" "$WTOOL_HOME/usr" \
-    "$(readlink "$WTOOL_MANAGED_HOME/usr" 2>/dev/null)"
+[ -e "$WTOOL_MANAGED_HOME/usr" ] || [ -L "$WTOOL_MANAGED_HOME/usr" ] \
+    && bad "两个项目时 ~/usr 又被建出来了（新口径：不建）" || ok "两个项目时 ~/usr 仍然不建"
 "$WT" uninstall "$C" > /dev/null 2>&1
-[ -L "$WTOOL_MANAGED_HOME/usr" ] && ok "还剩一个项目时 ~/usr 留着" || bad "提前把 ~/usr 收走了"
+[ -e "$WTOOL_MANAGED_HOME/usr" ] || [ -L "$WTOOL_MANAGED_HOME/usr" ] \
+    && bad "卸一个之后 ~/usr 冒出来了" || ok "卸一个之后 ~/usr 还是没有"
 "$WT" uninstall "$D" > /dev/null 2>&1
-[ -e "$WTOOL_MANAGED_HOME/usr" ] && bad "一个项目都不剩了 ~/usr 还在" \
-    || ok "最后一个项目走了 ~/usr 也收走"
-[ -d "$WTOOL_HOME/usr" ] && ok "只删软链，影子 HOME 里的实体不动" \
+[ -e "$WTOOL_MANAGED_HOME/usr" ] || [ -L "$WTOOL_MANAGED_HOME/usr" ] \
+    && bad "一个项目都不剩了 ~/usr 反而出现了" || ok "一个项目都不剩了 ~/usr 也没有"
+[ -d "$WTOOL_HOME/usr" ] && ok "影子 HOME 里的实体 \$WTOOL_HOME/usr 一直不动" \
     || bad "把 $WTOOL_HOME/usr 实体也删了"
 
 # --------------------------------------------------------------------------
@@ -407,7 +406,8 @@ mv "$Hh" "$Hh.gone"
     || ok "uninstall all 卸掉了 g/one"
 [ -e "$WTOOL_HOME/usr/bin/Htwo" ] && bad "all 没卸掉 h/two（项目目录已不在）" \
     || ok "项目目录不在也能卸（靠 state 的账）"
-[ -e "$WTOOL_MANAGED_HOME/usr" ] && bad "all 之后 ~/usr 还在" || ok "all 之后 ~/usr 收走了"
+[ -e "$WTOOL_MANAGED_HOME/usr" ] || [ -L "$WTOOL_MANAGED_HOME/usr" ] \
+    && bad "all 之后 ~/usr 出现了（新口径：本来就不该建）" || ok "all 之后 ~/usr 也不存在（新口径）"
 
 # --------------------------------------------------------------------------
 printf '\n== 场景 6：kill-self-forever（要逐字确认；删 wtool 的、不删别人的）==\n'
