@@ -958,10 +958,12 @@ case " $_cmds " in
     *" docs "*) bad "补全里出现了 docs —— 和 --help 的口径不一致" ;;
     *) ok "docs 不进补全（--help 故意不列它，它只是 refresh-downloads 的别名）" ;;
 esac
-# `wtool status` 两种形态（用户 2026-10-04 定：就这样共存）
+# `wtool status` 两种形态（用户 2026-10-04 定：就这样共存）。
+# 无参那一形态 2026-10-21 改了（ADR-0046）：不再"先报缺失再打一张没有状态的登记表"，
+# 而是**每行一个状态 + 表下一行汇总** —— 判据和 `wtool check` 同一个（project_health）。
 case "$("$WT" status 2>&1)" in
-    *"登记的软链"*|*"没有登记的软链"*) ok "status 无参 = 老的登记表 + 软链检查" ;;
-    *) bad "status 无参不是老的登记表检查" ;;
+    *"个项目：正常"*|*"账本里一个项目都没有"*) ok "status 无参 = 每行一个状态 + 汇总行" ;;
+    *) bad "status 无参不是新的状态表" ;;
 esac
 case "$("$WT" status boot 2>&1)" in
     *"依据"*|*"找不到项目"*) ok "status <项目> = 新的逐列状态 + 依据" ;;
