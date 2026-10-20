@@ -2,7 +2,10 @@
 # wtool 环境探测 —— 引擎和项目 env 共用（POSIX，sh/bash/zsh 都能 source）
 #
 # 产出（调用 wt_os_detect 之后）：
-#   WTOOL_PREFIX        编译安装前缀，默认 $HOME/.wtool/usr
+#   WTOOL_PREFIX        编译安装前缀，默认 $WTOOL_HOME/usr（没有 WTOOL_HOME 才退到
+#                       $HOME/.wtool/usr）—— portable 模式（装到 ~/某人/.wtool）靠它，
+#                       见 2026-10-21 的 P1：写死 $HOME/.wtool/usr 会让借用机器上的
+#                       PATH 指向根本不存在的目录，install.sh ⑤ 自检必挂。
 #   WTOOL_OS_ID         ubuntu / debian / rocky / centos / rhel / fedora / ...
 #   WTOOL_OS_VERSION    24.04 / 9.4 / ...
 #   WTOOL_OS_CODENAME   noble / bookworm / ...（可能为空）
@@ -13,7 +16,7 @@
 # 约定：只计算、不打印、不写文件；可重复调用（幂等）。
 
 wt_os_detect() {
-    : "${WTOOL_PREFIX:=$HOME/.wtool/usr}"
+    : "${WTOOL_PREFIX:=${WTOOL_HOME:-$HOME/.wtool}/usr}"
     WTOOL_OS_ID=""
     WTOOL_OS_VERSION=""
     WTOOL_OS_CODENAME=""
