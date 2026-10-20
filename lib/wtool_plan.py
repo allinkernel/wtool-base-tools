@@ -96,6 +96,19 @@ KIND_LABELS = {"source": "纯源码项目",
 # 看板照目标语义显示"不支持"（用户 2026-10-13：看板不许留白、不许骗人）。
 KIND_GATE_DEFERRED = ()
 
+# `<publish kind="none"/>` 的项目**放行**的发布族命令（2026-10-21，VM 实测后补）。
+#
+# 为什么门禁要放行：这四条命令**自己**都有"声明了 none → 跳过"那一行
+# （pack-release / publish-release 在 shell 循环里读 `publish-list` 第 4 列；
+#  离线那两条在 wtool.sh 里读同一个值）。门禁跑在**分发点**、早于命令自己的
+# 参数解析，如果它先拦下，source 类型的 none 项目就变成
+#   `wtool: '...' 是 kind=source，不支持 pack-release` + rc=3，
+# 命令里那句"声明了 <publish kind="none"/> —— 跳过"永远打不出来。
+# VM 2026-10-21 实测：四条里 `pack-release` / `publish-release` 回 rc=3，
+# 另外两条 rc=0 —— 用户口径是**四条都跳过**，所以这里放行。
+_NONE_DECL_SKIP_CMDS = ("pack-release", "publish-release",
+                        "pack-offline-release", "publish-offline-release")
+
 
 def kind_supports(kind, command):
     """这个项目类型支持这条命令吗。**唯一的判据**（看板与门禁都走它）。"""
@@ -7244,6 +7257,10 @@ def kind_caps(args):
             _k = (_meta or {}).get("project_kind") or DEFAULT_PROJECT_KIND
             if kind_supports(_k, cmd) or cmd in KIND_GATE_DEFERRED:
                 print(_path)
+                continue
+            # `<publish kind="none"/>` 的放行理由见下面逐个项目那段（同一判据）
+            if cmd in _NONE_DECL_SKIP_CMDS and is_no_release(_path):
+                print(_path)
         return 0
     rc = 0
     for _d in args.project:
@@ -7260,6 +7277,10 @@ def kind_caps(args):
         if kind_supports(kind, cmd):
             continue
         pid = project_id_of(d, args.root or None)
+        # `<publish kind="none"/>` = 不参与发布：**四条发布族命令都放行**，
+        # 让命令自己打"声明了 none —— 跳过"并 rc=0（理由见常量注释）。
+        if cmd in _NONE_DECL_SKIP_CMDS and is_no_release(d):
+            continue
         if cmd in KIND_GATE_DEFERRED:
             # 目标语义上不适用，但替代品还没落地 → **放行但出声**，
             # 绝不静默成功（见 KIND_GATE_DEFERRED 的注释）。
