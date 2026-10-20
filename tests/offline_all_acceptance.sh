@@ -164,7 +164,10 @@ done
 # 两份 rc 都幂等：source 两次 PATH 长度不变
 for _pf in bash zsh; do
     _rcf="$THOME/borrowed/wtool-${_pf}rc"
-    _sh=$_pf; command -v "$_sh" >/dev/null 2>&1 || _sh=bash
+    # zsh 用**包里那份**（干净 PATH 上没有系统 zsh；用 bash 去 source 一份 zsh rc
+    # 测出来的"不幂等"是假的 —— 2026-10-21 实测撞过）
+    if [ "$_pf" = zsh ]; then _sh="$W/usr/bin/zsh"; else _sh=bash; fi
+    command -v "$_sh" >/dev/null 2>&1 || _sh=bash
     _p1=$(env -u WTOOL_HOME HOME="$THOME" PATH="$_clean_path" "$_sh" -c \
           '. "$1"; . "$1"; printf "%s" "$PATH"' _ "$_rcf" 2>/dev/null)
     _p2=$(env -u WTOOL_HOME HOME="$THOME" PATH="$_clean_path" "$_sh" -c \
