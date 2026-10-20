@@ -1,0 +1,14 @@
+# 验收用的**干净容器**：发行版本体 + python3 + git + curl（= 一个"刚开始用 wtool"
+# 的普通用户机器该有的样子），**没有** .wtool / 没有 wtool / 没有 zsh。
+#
+# 为什么从 `wtool/pack-ubuntu<版本>` 出发：那些镜像已经有 python3 + git（打包用），
+# 只差一个 curl —— 有 curl 之后 `install.sh` 第 0 步走"运行环境已经在，不需要 root"
+# 那条路，验收就不用每次等 apt 装几十 MB 的 ansible（那是另一组测试管的事）。
+#
+# 用法：
+#   docker build -f Dockerfile.acceptance --build-arg BASE=ubuntu:24.04 -t wtool/accept-ubuntu24.04 .
+ARG BASE=ubuntu:24.04
+FROM ${BASE}
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends curl ca-certificates \
+ && rm -rf /var/lib/apt/lists/*

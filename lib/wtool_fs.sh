@@ -1389,7 +1389,7 @@ wt_generated_add() {   # <绝对路径>
     wt_dry && return 0
     mkdir -p -- "$WTOOL_STATE" 2>/dev/null || return 0
     printf '%s\t%s\t%s\n' "$1" "${WTOOL_PROJECT_ID:--}" \
-        "$(date +%Y-%m-%dT%H:%M:%S%z)" >> "$WTOOL_STATE/generated.tsv" 2>/dev/null || true
+        "$(wt_now)" >> "$WTOOL_STATE/generated.tsv" 2>/dev/null || true
 }
 
 # 这个文件是 wtool 自己写的吗
@@ -1930,19 +1930,149 @@ wt_pack_offline_release() {
 wt_pack_offline_all() {
     _oa_vol=$1; _oa_scratch=$2; _oa_out=${3:-}; _oa_osver=${4:-}
     [ -n "$_oa_out" ] || _oa_out="$WTOOL_ROOT/__release"
-    # 发行版：从哪套 `__output/<target>` 里取被导出的产物。默认跟本机走
-    # （在容器里打包就自动是容器那个版本）。
     [ -n "$_oa_osver" ] || _oa_osver=${WTOOL_OS_VERSION:-}
-    mkdir -p -- "$_oa_scratch"
+    mkdir -p -- "$_oa_scratch" || wt_die "建不了 scratch: $_oa_scratch"
 
-    python3 "$PY" offline-all-plan --home "$WTOOL_HOME" --root "$WTOOL_ROOT" \
+    # ======================================================================
+    # ⓪ 项目集合：工作区里**所有可发布的项目**（用户 2026-10-21 口径）
+    #
+    # 判据只有 `offline-all-set` 一处：`publish-list` 的全部项目 −
+    # `<publish kind="none"/>` − 类型不支持离线打包的。
+    # **不读本机账本** —— 那是机器状态，而这句口径是"内容不取决于机器状态"。
+    # ======================================================================
+    wt_step "① 算项目集合（工作区里所有可发布的项目；和本机装没装无关）"
+    python3 "$PY" offline-all-set --root "$WTOOL_ROOT" --scratch "$_oa_scratch" \
+        > "$_oa_scratch/set.log" 2>&1 || {
+        cat -- "$_oa_scratch/set.log" >&2
+        wt_die "算不出可发布项目的集合（见上面）"
+    }
+    sed 's/^/   /' "$_oa_scratch/set.log"
+    _oa_nset=$(awk 'END{print NR}' "$_oa_scratch/set.tsv" 2>/dev/null || echo 0)
+    [ "$_oa_nset" -gt 0 ] || wt_die "可发布项目一个都没有 —— 这不是一个能打整机包的工作区"
+
+    # ======================================================================
+    # ① ② muslbin：**真实二进制**必须进包 → 缺的先 download + unpack
+    #
+    # 用户点名："不许因为本机没装而漏掉"。已下过就跳过（判据是项目自己的声明：
+    # `<muslbin dest=…>` 在不在 `__output/` 里），缺的现在下（要网络）。
+    # ======================================================================
+    if [ -s "$_oa_scratch/set.missing.tsv" ]; then
+        wt_step "② 补齐 ② 类项目的产物（download-release + unpack-release，要网络）"
+        awk -F'\t' 'NF{print $1}' "$_oa_scratch/set.missing.tsv" \
+            | LC_ALL=C sort -u > "$_oa_scratch/set.dl.tsv"
+        _oa_ndl=0
+        while IFS= read -r _oa_pid; do
+            [ -n "$_oa_pid" ] || continue
+            wt_info "   下 $_oa_pid"
+            cmd_download_release "$_oa_pid" \
+                || wt_die "download-release 失败: $_oa_pid（② 类必须有真实二进制才进包）"
+            cmd_unpack_release "$_oa_pid" \
+                || wt_die "unpack-release 失败: $_oa_pid"
+            _oa_ndl=$((_oa_ndl + 1))
+        done < "$_oa_scratch/set.dl.tsv"
+        # 补完再算一遍集合：还有缺的就**不打包**（宁可停，也不发一个缺二进制的包）
+        python3 "$PY" offline-all-set --root "$WTOOL_ROOT" --scratch "$_oa_scratch" \
+            > "$_oa_scratch/set.log" 2>&1 || {
+            cat -- "$_oa_scratch/set.log" >&2
+            wt_die "补完产物之后重算集合失败"
+        }
+        if [ -s "$_oa_scratch/set.missing.tsv" ]; then
+            sed 's/^/   /' "$_oa_scratch/set.missing.tsv" >&2
+            wt_die "还有项目的产物没补齐（上面这些）—— 缺二进制的整机包没有意义，不打包"
+        fi
+        wt_step "   补了 $_oa_ndl 个项目，现在 ② 类一个不缺"
+    else
+        wt_step "② ② 类项目的产物都在 __output/ 里（本机装没装都不影响它们在不在包里）"
+    fi
+
+    # ======================================================================
+    # ② 干净临时家：把**全部**可发布项目 install 一遍，用那份账本当包里的 var/
+    #
+    # 用户原话：本机账本是"机器状态"，照抄进去 = 包里只有装过的那几个。
+    # 做法：临时 `$HOME` + 临时 `$WTOOL_HOME`（**同名层级**：`$HOME/.wtool`），
+    # 把集合里每个项目 `wtool install` 一遍 → 那份 `var/` 只由"全部可发布项目"
+    # 决定，与真机的 var/ 一个字节关系都没有。
+    #
+    # ⚠️ 时间戳钉死（`WTOOL_NOW`）：`meta.tsv` 的 installed_at / journal 的 ts /
+    #    `var/offline-all.tsv` 都是它 → 两次打包才能**逐字节一致**。
+    # ⚠️ `--no-script`：这一步要的是**账本**，不是"再装一遍"。项目脚本是验收
+    #    性质的（shell/zsh 的 install.sh 会拿打包机的发行版挑 `__output/usr`，
+    #    在 22.04 容器里跑 24.04 的产物会误报）。
+    # ======================================================================
+    _oa_tmp="$_oa_scratch/home"
+    rm -rf -- "$_oa_tmp"
+    _oa_tmph="$_oa_tmp/home"                  # 冒充的 $HOME（rc 写这儿，不进包）
+    _oa_wh="$_oa_tmph/.wtool"                 # 冒充的 $WTOOL_HOME（= 包里的 .wtool）
+    mkdir -p -- "$_oa_wh/var" "$_oa_wh/wtool/.repo/manifests" \
+        || wt_die "建不了临时家: $_oa_wh"
+    # manifest 三件套里的 default.xml：先从工作区搬一份进来（planner 要读它）
+    _oa_xml="$WTOOL_ROOT/.repo/manifests/default.xml"
+    [ -f "$_oa_xml" ] || wt_die "工作区里没有 .repo/manifests/default.xml —— 整机包必须有 manifest"
+    cp -Lp -- "$_oa_xml" "$_oa_wh/wtool/.repo/manifests/default.xml" \
+        || wt_die "拷不进临时家: default.xml"
+
+    wt_step "③ 在临时 \$WTOOL_HOME 里 install $_oa_nset 个项目（$_oa_wh）"
+    _oa_nin=0
+    while IFS="$(printf '\t')" read -r _oa_pid _oa_kind _oa_live; do
+        [ -n "$_oa_pid" ] || continue
+        # ③ docker 类项目的 install.sh 是**验收脚本**（它拿打包机的发行版去挑
+        # `__output/usr`，在 22.04 容器里跑 24.04 的产物会误报）→ 只装账本，不跑脚本。
+        # 其余项目的脚本要跑：它们会往 `$WTOOL_HOME/usr/bin` 里装命令
+        # （`tools/android_repack` 的 `wpack` 就是），少了它目标机上敲不出来。
+        _oa_noscript=""
+        [ "$_oa_kind" = "docker" ] && _oa_noscript="--no-script"
+        env -u WTOOL_LOG_DIR -u WTOOL_PROJECT_ID -u WTOOL_PROJECT_DIR \
+            HOME="$_oa_tmph" WTOOL_MANAGED_HOME="$_oa_tmph" \
+            WTOOL_HOME="$_oa_wh" WTOOL_STATE="$_oa_wh/var" \
+            WTOOL_PREFIX="$_oa_wh/usr" WTOOL_ROOT="$WTOOL_ROOT" \
+            WTOOL_NOW="1970-01-01T00:00:00+0000" \
+            WTOOL_LOG_ROOT="$_oa_tmp/logs" \
+            GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0='*' \
+            sh "$WTOOL_BOOTSTRAP/wtool.sh" install "$_oa_live" --force \
+                $_oa_noscript \
+            > "$_oa_tmp/install.log" 2>&1 || {
+            cat -- "$_oa_tmp/install.log" >&2
+            wt_die "临时家里装不上 $_oa_pid（见上面）"
+        }
+        _oa_nin=$((_oa_nin + 1))
+    done < "$_oa_scratch/set.tsv"
+    wt_step "   装好 $_oa_nin 个项目（账本只有它们，没有本机的历史残留）"
+
+    # ---- 安装器自己的两笔账（真实机器上是 `install.sh` 写的，这里伪造一份）--
+    # 判据只有一处：`installer_links()` 读 `var/installer/links.tsv`。
+    # `actions.tsv` **故意不写**：那是时间线，写进包里每次都不一样。
+    _oa_inst=$(cd -- "$WTOOL_BOOTSTRAP" && pwd -P)
+    case $_oa_inst in
+        "$WTOOL_ROOT"/*) _oa_inst_rel=${_oa_inst#"$WTOOL_ROOT"/} ;;
+        *)               _oa_inst_rel=$(basename -- "$_oa_inst") ;;
+    esac
+    [ -f "$_oa_inst/scripts/install.sh" ] \
+        || wt_die "引擎项目里没有 scripts/install.sh（$_oa_inst）—— 目标是装出来的 .wtool 要有安装器入口"
+    mkdir -p -- "$_oa_wh/var/installer"
+    {
+        printf 'install.sh\twtool/install.sh\t1970-01-01T00:00:00+0000\n'
+        printf 'wtool/install.sh\t%s/scripts/install.sh\t1970-01-01T00:00:00+0000\n' "$_oa_inst_rel"
+    } > "$_oa_wh/var/installer/links.tsv" || wt_die "写不了临时家的 var/installer/links.tsv"
+    ln -sfn -- "wtool/install.sh" "$_oa_wh/install.sh"
+    ln -sfn -- "$_oa_inst_rel/scripts/install.sh" "$_oa_wh/wtool/install.sh"
+
+    # ======================================================================
+    # ③ 清单：从**临时家的账本**算闭包（`--set` 是那条口径的断言）
+    # ======================================================================
+    python3 "$PY" offline-all-plan --home "$_oa_wh" --root "$WTOOL_ROOT" \
         --scratch "$_oa_scratch" --os-version "$_oa_osver" \
+        --set "$_oa_scratch/set.tsv" \
         > "$_oa_scratch/plan.log" 2>&1 || {
         cat -- "$_oa_scratch/plan.log" >&2
-        wt_die "算整机迁移包的清单失败（见上面：闭包不完整 / 有禁品 / 账本读不出来）"
+        wt_die "算整机包的清单失败（闭包不完整 / 有禁品 / 集合对不上）"
     }
-    # 成功时不重复倒一遍 planner 的输出：调用方在打包前已经跑过一次同样的检查
-    # （`wtool pack-offline-release all` 默认先查再打），同一屏里说两遍只会淹掉重点。
+    [ -s "$_oa_scratch/all.error.tsv" ] && {
+        sed 's/^/   ✗ /' "$_oa_scratch/all.error.tsv" >&2
+        wt_die "整机包的清单有致命项（上面这些）—— 不打包"
+    }
+    if [ -s "$_oa_scratch/all.warn.tsv" ]; then
+        while IFS= read -r _oa_w; do wt_warn "   $_oa_w"; done < "$_oa_scratch/all.warn.tsv"
+    fi
 
     _oa_asset=$(awk -F'\t' '$1=="asset"{print $2}' "$_oa_scratch/all.tsv")
     _oa_check=$(awk -F'\t' '$1=="check"{print $2}' "$_oa_scratch/all.tsv")
@@ -1953,10 +2083,10 @@ wt_pack_offline_all() {
 
     if wt_dry; then
         wt_step "[dry-run] 产 $_oa_out/$_oa_asset（$_oa_nproj 个项目 / $_oa_nfile 个文件 / $_oa_nlink 条 L2 链）"
-        wt_step "[dry-run] 形状：顶层是 .wtool/（L1 实体化 + L2 留链）；发行版 $([ -n "$_oa_osver" ] && printf '%s' "$_oa_osver" || printf '跟本机')"
-        wt_step "[dry-run] 拷 env 汇总 + 账本 var/ + manifest 三件套（default.xml 换成实体）"
+        wt_step "[dry-run] 形状：顶层是 .wtool/（L1 实体化 + L2 留链）；② 带真实二进制；③ 带**所有** target"
+        wt_step "[dry-run] 拷 env 汇总 + 账本 var/（临时家里 install 出来的那份）+ manifest 三件套"
         wt_step "[dry-run] 按 $_oa_vol 分卷；旁边写 $_oa_asset.sha256；分卷时再给 $_oa_check（不依赖 wtool）"
-        wt_step "[dry-run] 打完之后跑 --check（四条判据），报告到终端"
+        wt_step "[dry-run] 打完之后跑 --check（四条判据）+ 算确定性指纹"
         return 0
     fi
 
@@ -1964,7 +2094,7 @@ wt_pack_offline_all() {
     rm -rf -- "$_oa_build"
     mkdir -p -- "$_oa_build/.wtool/wtool" "$_oa_build/.wtool/usr" || wt_die "建不了临时树"
 
-    # ---- ① 原样搬：env 汇总 / 账本（var/）/ manifest 三件套 -----------------
+    # ---- ④ 原样搬：env 汇总 / 账本（var/）/ manifest 三件套 -----------------
     # `cp -L`：`wtool/.repo/manifests/default.xml` 在开发机上是指向工作区的
     # **绝对链**，包里必须是实体（判据；install.sh 那边是"只校验、不覆盖"）。
     _oa_n=0
@@ -1974,41 +2104,28 @@ wt_pack_offline_all() {
         cp -Lp -- "$_oa_s" "$_oa_build/.wtool/$_oa_d" || wt_die "拷不进包: $_oa_s"
         _oa_n=$((_oa_n + 1))
     done < "$_oa_scratch/all.verbatim.tsv"
-    wt_step "env / 账本 / manifest 三件套：$_oa_n 个文件"
+    wt_step "④ env / 账本 / manifest 三件套：$_oa_n 个文件"
 
-    # ---- ①b 账本里指向"活的项目目录"的路径要改写成包内路径 ----------------
-    # `<generate>` 记的是**安装期产物写在哪**（第 3 列）—— 源机上那是
-    # `/…/self/wtool/<项目>/__output/fzf.zsh`（工作区路径）。目标机上没有工作区，
-    # 项目住在 `$WTOOL_HOME/wtool/<项目>` 下；不重写的话目标机 `check` 会说
-    # "…/self/wtool/… 不见了（<generate> 的安装期产物）"（实测撞到）。
-    # 只改 **dest 列**，不改 target 列：L1 那条 target 记的是"当初从哪儿链过来的"，
-    # 那是历史事实，也是目标机上唯一能看出源机路径的线索。
+    # ---- ④b 账本里指向"活的项目目录"的路径要改写成包内路径 ----------------
+    # `<generate>` 记的是**安装期产物写在哪**（第 3 列）—— 源机上那是工作区路径。
+    # 目标机上没有工作区，项目住在 `$WTOOL_HOME/wtool/<项目>` 下。
+    # 只改 **dest 列**，不改 target 列（那是历史事实）。
     while IFS="$(printf '\t')" read -r _oa_pid _oa_kind _oa_live; do
         [ -n "$_oa_live" ] && [ "$_oa_live" != "-" ] || continue
         _oa_j="$_oa_build/.wtool/var/$_oa_pid/journal.tsv"
         [ -f "$_oa_j" ] || continue
-        awk -F'\t' -v OFS='\t' -v live="$_oa_live/" -v new="$WTOOL_HOME/wtool/$_oa_pid/" '
+        awk -F'\t' -v OFS='\t' -v live="$_oa_live/" -v new="{{WTOOL_HOME}}/wtool/$_oa_pid/" '
             $1 == "generate" && index($3, live) == 1 { $3 = new substr($3, length(live) + 1) }
             { print }' "$_oa_j" > "$_oa_j.tmp" && mv -f -- "$_oa_j.tmp" "$_oa_j"
     done < "$_oa_scratch/all.projects.tsv"
 
-    # ---- ①c 账本里的**源机绝对路径** → 占位符（目标机 install.sh 展开）-------
-    # `var/**`（journal.tsv 的 dest 列、registry.tsv、各项目的 env 块）记的全是
-    # **这台机器**的绝对路径：`$WTOOL_HOME/usr/bin/zsh`、`$HOME/usr`、`$HOME/.wtool/...`。
-    # 整机包搬到别人机器上，那些路径一个都不存在 —— 于是 `wtool check` 对**每个
-    # 项目**报"不见了"、`install.sh` 第⑤步自检当场 rc=1（2026-10-20 实测：
-    # 9 个项目 20 条 + 44 条陈旧账）。用户第一眼看到的就是"包坏了"。
-    #
-    # 做法：打包时把这两个前缀换成 `{{WTOOL_HOME}}` / `{{HOME}}`，目标机
-    # `install.sh` 的「⓪b」一条 python 就地展开（开发机上没有占位符 = no-op）。
-    # ⚠️ 前提：打包机（容器）里的 `$HOME` / `$WTOOL_HOME` 必须和源机**逐字相同**
-    #    —— 整机包本来就是按这个前提算绝对路径的（工作区与 `~/.wtool` 挂宿主
-    #    同名绝对路径，见 BL-68 ③-3）。不同名的话这里换不到，会原样留着。
+    # ---- ④c 账本里的**源机绝对路径** → 占位符（目标机 install.sh 展开）-------
+    # 换的是**临时家**那两条前缀（不是真机的）：包里根本不该出现真机的路径。
     # ⚠️ 顺序：先换 `$WTOOL_HOME`（它是 `$HOME` 的子路径），否则会被 `$HOME` 先吃掉。
-    if python3 - "$_oa_build/.wtool/var" "$WTOOL_HOME" "$HOME" <<'PY'
+    if python3 - "$_oa_build/.wtool/var" "$_oa_wh" "$_oa_tmph" <<'PY'
 import os, sys
 root, whome, uhome = sys.argv[1], sys.argv[2].rstrip(os.sep), sys.argv[3].rstrip(os.sep)
-# 空值必须挡掉：uhome == "" 时 "".join 会把每个 "/" 都换成占位符（灾难性）
+# 空值必须挡掉：uhome == "" 时替换会把每个 "/" 都写坏（灾难性）
 pairs = [(w, p) for w, p in ((whome, "{{WTOOL_HOME}}"), (uhome, "{{HOME}}")) if w]
 n = 0
 for dirpath, _dn, fns in os.walk(root):
@@ -2029,11 +2146,14 @@ for dirpath, _dn, fns in os.walk(root):
             n += 1
 print("账本占位符：%d 个文件" % n)
 PY
-    then :; else wt_die "账本占位符改写失败（$WTOOL_HOME / $HOME 与源机不一致？）"; fi
+    then :; else wt_die "账本占位符改写失败"; fi
 
-    # ---- ② L1 实体化：每个项目一棵实体目录，只装闭包要的东西 ----------------
+    # ---- ⑤ L1 实体化：每个项目一棵实体目录，只装闭包要的东西 ----------------
+    # kind：`f` 真文件 / `l` 软链（原样搬链目标）/ `s` **合成链**（第 3 列就是
+    # 链目标，planner 定的 —— 只有 ③ docker 那条"选本机那套"的别名链用它）。
     _oa_lastdir=""
     _oa_n=0
+    _oa_ns=0
     while IFS="$(printf '\t')" read -r _oa_pid _oa_dest _oa_src _oa_kind; do
         [ -n "$_oa_pid" ] || continue
         _oa_d="$_oa_build/.wtool/wtool/$_oa_pid/$_oa_dest"
@@ -2042,18 +2162,47 @@ PY
             mkdir -p -- "$_oa_dir" || wt_die "建不了目录: $_oa_dir"
             _oa_lastdir=$_oa_dir
         fi
-        if [ "$_oa_kind" = "l" ]; then
-            # 链本身进包（tar 里保持为链）。目标字符串**原样**搬 —— 相对链
-            # 在包内照样解析；绝对链会在 --check 里被报出来。
-            ln -sfn -- "$(readlink -- "$_oa_src")" "$_oa_d" || wt_die "建不了链: $_oa_d"
-        else
-            cp -p -- "$_oa_src" "$_oa_d" || wt_die "拷不进包: $_oa_src"
-        fi
+        case $_oa_kind in
+            l) ln -sfn -- "$(readlink -- "$_oa_src")" "$_oa_d" || wt_die "建不了链: $_oa_d" ;;
+            s) ln -sfn -- "$_oa_src" "$_oa_d" || wt_die "建不了链: $_oa_d"
+               _oa_ns=$((_oa_ns + 1)) ;;
+            *) cp -p -- "$_oa_src" "$_oa_d" || wt_die "拷不进包: $_oa_src" ;;
+        esac
         _oa_n=$((_oa_n + 1))
     done < "$_oa_scratch/all.files.tsv"
-    wt_step "L1 实体化：$_oa_n 个文件（$_oa_nproj 个项目）"
+    wt_step "⑤ L1 实体化：$_oa_n 个条目（$_oa_nproj 个项目；其中 $_oa_ns 条“选发行版”的别名链）"
 
-    # ---- ③ L2 **保持为链**（两端都在 .wtool 里）-----------------------------
+    # ---- ⑤b `<generate>` 生成物里的**打包机绝对路径** → `${WTOOL_HOME}` -----
+    # `starship init bash` 会把"以后要调用哪个 starship"**编进生成物**：
+    #     eval -- "$(/tmp/wtool-offline.XXXX/pack/home/home/.wtool/usr/bin/starship init bash)"
+    # 那个路径是**临时 staging 家**的绝对路径 —— 搬走就废（VM 实测：每次开 shell 报
+    # `starship: No such file or directory`，zsh 的 PROMPT 直接坏）。
+    # 只改**文本**（`.bash`/`.zsh`/`.sh`…），不碰二进制；把 `/tmp/wtool-offline.*`
+    # 前缀统一换成 `${WTOOL_HOME}`（两处都展开得对），顺带让它们**可复现**。
+    python3 - "$_oa_build/.wtool/wtool" <<'PYNORM'
+import os, re, sys
+root = sys.argv[1]
+pat = re.compile(r"/tmp/wtool-offline\.[A-Za-z0-9]+[^\"'\s]*?/home/home/\.wtool")
+n = 0
+for dirpath, _dn, fns in os.walk(root):
+    if "__output" not in dirpath.split(os.sep):
+        continue
+    for f in fns:
+        if not f.endswith((".bash", ".zsh", ".sh", ".fish", ".txt", ".tsv")):
+            continue
+        p = os.path.join(dirpath, f)
+        try:
+            txt = open(p, "r", encoding="utf-8").read()
+        except (UnicodeDecodeError, OSError):
+            continue
+        ntx = pat.sub("${WTOOL_HOME}", txt)
+        if ntx != txt:
+            open(p, "w", encoding="utf-8").write(ntx)
+            n += 1
+print("⑤b 生成物里的 staging 路径：%d 个文件改成 ${WTOOL_HOME}" % n)
+PYNORM
+
+    # ---- ⑥ L2 **保持为链**（两端都在 .wtool 里）-----------------------------
     _oa_n=0
     while IFS="$(printf '\t')" read -r _oa_rel _oa_target _oa_type; do
         [ -n "$_oa_rel" ] || continue
@@ -2061,52 +2210,76 @@ PY
         ln -sfn -- "$_oa_target" "$_oa_build/.wtool/$_oa_rel" || wt_die "建不了 L2 链: $_oa_rel"
         _oa_n=$((_oa_n + 1))
     done < "$_oa_scratch/all.links.tsv"
-    wt_step "L2 留链：$_oa_n 条（相对链，包内可解析）"
+    wt_step "⑥ L2 留链：$_oa_n 条（相对链，包内可解析）"
 
-    # ---- ④ 入口链（install.sh → wtool/install.sh → 真脚本）-----------------
+    # ---- ⑦ 入口链（install.sh → wtool/install.sh → 真脚本）-----------------
     while IFS="$(printf '\t')" read -r _oa_rel _oa_target _oa_ts; do
         [ -n "$_oa_rel" ] || continue
         mkdir -p -- "$_oa_build/.wtool/$(dirname -- "$_oa_rel")"
         ln -sfn -- "$_oa_target" "$_oa_build/.wtool/$_oa_rel"
     done < "$_oa_scratch/all.installer.tsv"
 
-    # ---- ④b manifest 三件套里要**重算**的两件 ------------------------------
-    # 目标机 install.sh 对"包里来的"三件套是**只校验、不覆盖**，sha256 对不上就
-    # 报错停手 —— 所以包里这两个文件必须对应**包里那份** default.xml（内空由
-    # planner 算好）。live 那份陈旧与否，planner 已经在 all.warn.tsv 里说了。
+    # ---- ⑦b manifest 三件套里要**重算**的两件 ------------------------------
     while IFS="$(printf '\t')" read -r _oa_rel _oa_val; do
         [ -n "$_oa_rel" ] || continue
         printf '%s\n' "$_oa_val" > "$_oa_build/.wtool/wtool/.repo/manifests/$_oa_rel" \
             || wt_die "写不了包里的 $_oa_rel"
     done < "$_oa_scratch/all.trio.tsv"
 
-    # ---- ⑤ 来源记录：这一版每个项目是哪个 commit（多仓，没有单一 commit）---
+    # ---- ⑧ 来源记录：这一版每个项目是哪个 commit（多仓，没有单一 commit）---
+    # `osver` 这一列写 `any`：包里带**所有** target，装机时按目标机自己的
+    # /etc/os-release 选 —— 所以它不再等于"打包机是谁"（这也是三份包内容一致的原因）。
     {
         printf '# 整机迁移包的来源（wtool pack-offline-release all）。\n'
         printf '# 形状：<项目id>\t<commit>\t<kind>\t<packed-at>\t<osver>\n'
+        printf '# osver=any：包里带所有发行版的产物，装机时按目标机自己那套选。\n'
+        printf '# packed-at=1970-01-01T00:00:00+0000：**钉死**的（可复现打包 —— 两次打包\n'
+        printf '#   要逐字节相同；要看这一版什么时候发的，看 release 页的时间，包内不记）。\n'
         while IFS="$(printf '\t')" read -r _oa_pid _oa_kind _oa_live; do
             [ -n "$_oa_pid" ] || continue
             [ "$_oa_live" = "-" ] && _oa_live=""
             printf '%s\t%s\t%s\t%s\t%s\n' "$_oa_pid" \
                 "$( [ -n "$_oa_live" ] && git -C "$_oa_live" rev-parse HEAD 2>/dev/null || printf '%s' - )" \
-                "$_oa_kind" "$(wt_now)" "${_oa_osver:--}"
+                "$_oa_kind" "1970-01-01T00:00:00+0000" "any"
         done < "$_oa_scratch/all.projects.tsv"
     } > "$_oa_build/.wtool/var/offline-all.tsv"
 
-    # ---- ⑥ 无脑 tar（不挑文件、不需要忽略清单）-----------------------------
+    # ---- ⑨ 无脑 tar（不挑文件、不需要忽略清单）-----------------------------
     mkdir -p -- "$_oa_out"
     rm -f -- "$_oa_out/$_oa_asset" "$_oa_out/$_oa_asset.sha256" \
              "$_oa_out/$_oa_check" "$_oa_out/$_oa_asset".part-* 2>/dev/null || true
-    ( cd -- "$_oa_build" && find . -mindepth 1 | sed 's|^\./||' ) > "$_oa_scratch/all.tar.list"
-    # ⚠️ **不加 --prefix**：清单里的路径本来就带 `.wtool/` 这一层（临时树是
-    #    `$_oa_build/.wtool/...`），再加一次前缀会打成 `.wtool/.wtool/...`
-    #    （实测踩过：包里顶层多一层，解开来 `$WTOOL_HOME` 指错地方）。
+    ( cd -- "$_oa_build" && find . -mindepth 1 | sed 's|^\./||' ) \
+        | LC_ALL=C sort > "$_oa_scratch/all.tar.list"
+    # ⚠️ **不加 --prefix**：清单里的路径本来就带 `.wtool/` 这一层。
     wt_tar_create "$_oa_out/$_oa_asset" "$_oa_build" "$_oa_scratch/all.tar.list"
 
-    # ---- ⑦ sha256 + 分卷 + 独立校验脚本 ------------------------------------
+    # ---- ⑩ 确定性指纹（文件清单 + 每个文件内容的 sha256）-------------------
+    # 给断言用：`WTOOL_ALL_DIGEST_EXPECT=<上次那份>` → 不一致就**不发布**。
+    python3 "$PY" offline-all-digest --tar "$_oa_out/$_oa_asset" \
+        --out "$_oa_scratch/all.digest.txt" > /dev/null \
+        || wt_die "算不出整机包的确定性指纹"
+    _oa_ndig=$(awk 'END{print NR}' "$_oa_scratch/all.digest.txt")
+    if [ -n "${WTOOL_ALL_DIGEST_EXPECT:-}" ] && [ -f "$WTOOL_ALL_DIGEST_EXPECT" ]; then
+        if ! diff -u "$WTOOL_ALL_DIGEST_EXPECT" "$_oa_scratch/all.digest.txt" \
+                > "$_oa_scratch/all.digest.diff" 2>&1; then
+            head -40 -- "$_oa_scratch/all.digest.diff" >&2
+            wt_die "确定性断言失败：这次的指纹与 $WTOOL_ALL_DIGEST_EXPECT 不一致（见上面 diff）"
+        fi
+        wt_step "⑩ 确定性断言通过：$_oa_ndig 条指纹与上次**逐字节相同**"
+    else
+        wt_step "⑩ 确定性指纹：$_oa_ndig 条（文件清单 + 内容 sha256，见 $_oa_scratch/all.digest.txt）"
+    fi
+    if [ -n "${WTOOL_ALL_DIGEST_OUT:-}" ]; then
+        cp -f -- "$_oa_scratch/all.digest.txt" "$WTOOL_ALL_DIGEST_OUT" 2>/dev/null \
+            || wt_warn "写不了 $WTOOL_ALL_DIGEST_OUT（指纹留在 $_oa_scratch/all.digest.txt）"
+    fi
+
+    # ---- ⑪ sha256 + 分卷 + 独立校验脚本 ------------------------------------
     wt_hash_file "$_oa_out/$_oa_asset" > "$_oa_out/$_oa_asset.sha256"
     _oa_bytes=$(wt_bytes "$_oa_out/$_oa_asset")
     _oa_sha=$(wt_sha256 "$_oa_out/$_oa_asset")
+    # 旧分卷先清掉：不然重打一版之后还留着上一版的 part-*，publish 会把两版混着传
+    rm -f -- "$_oa_out/$_oa_asset".part-* 2>/dev/null || true
     if [ "$_oa_bytes" -gt "$(wt_size_bytes "$_oa_vol")" ]; then
         wt_info "  $_oa_asset 有 $((_oa_bytes / 1048576))M，按 $_oa_vol 一卷切开（ASCII 后缀 .part-aa…）"
         split -b "$_oa_vol" -a 2 "$_oa_out/$_oa_asset" "$_oa_out/$_oa_asset.part-" \
@@ -2115,8 +2288,12 @@ PY
         wt_offline_check_hash "$_oa_out" "$_oa_asset" "$_oa_sha" "$_oa_check"
     fi
 
-    # ---- ⑧ 来源标记（publish 拿它当 --target；整机包没有单一 commit → `-`）--
-    printf 'packed\t-\t%s\n' "$(wt_now)" > "$_oa_out/$WT_OFFLINE_MARK"
+    # ---- ⑫ 来源标记（publish 拿它当 --target；整机包没有单一 commit → `-`）--
+    # `rm` 再写：上一版可能是别的用户（例如上一轮在 root 容器里打的）留下的，
+    # 直接 `>` 截断会因为文件属主不是你而 EACCES —— 整包已经打好了，不该死在这一行。
+    rm -f -- "$_oa_out/$WT_OFFLINE_MARK" 2>/dev/null || true
+    printf 'packed\t-\t%s\n' "$(wt_now)" > "$_oa_out/$WT_OFFLINE_MARK" \
+        || wt_warn "写不了 $_oa_out/$WT_OFFLINE_MARK（不影响包本身；发布时 --target 用不到它）"
 
     wt_info "整机迁移包已生成: $_oa_out/$_oa_asset（$_oa_nproj 个项目 / $((_oa_bytes / 1048576))M）"
     wt_info "  L1 实体化 + L2 留链（判据见 --check）"
@@ -2124,6 +2301,7 @@ PY
     wt_info "          把 rc 里 \`export WTOOL_HOME=\` 指到解压出来的那个 .wtool 就行"
     wt_info "  校验：$_oa_out/$_oa_asset.sha256$([ -f "$_oa_out/$_oa_check" ] && printf ' + %s' "$_oa_check")"
     wt_info "  上传：wtool publish-offline-release all（传 wtool-doc 的 release 页）"
+    wt_info "  指纹：$_oa_scratch/all.digest.txt（两次打包要逐字节相同）"
 }
 
 

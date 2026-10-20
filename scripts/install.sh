@@ -81,7 +81,15 @@ fi
 
 HOME_DIR=${HOME:-/root}
 DRY_RUN=0
-RC_MODE=ask                                          # ask（有终端才问）/ write / print
+# rc 落点模式（2026-10-21 用户口径）：
+#   auto  默认。**先判断这是不是一台"借用的机器"**，再决定改不改 `~/.bashrc`：
+#          自己的机器（home 模式）→ 问一次要不要写 rc；
+#          借用机器（portable 模式）→ **一个字节都不碰** `~/.bashrc`/`~/.zshrc`，
+#          改成在用户目录下生成 `wtool-bashrc` / `wtool-zshrc`，让用户手动 source。
+#   home / file / none 强制那一种。write / print / ask 是旧名（兼容，别再用）。
+RC_MODE=auto
+PORTABLE=auto                                        # auto | 1（强制 portable）| 0（强制 home）
+PREFIX_DIR=""
 WTOOL_HOME_ARG=""
 while [ $# -gt 0 ]; do
     case $1 in
@@ -90,8 +98,17 @@ while [ $# -gt 0 ]; do
                     [ -n "$WTOOL_HOME_ARG" ] || die "--home 要跟一个目录"
                     shift ;;
         --home=*)   WTOOL_HOME_ARG=${1#--home=} ;;
+        --prefix)   PREFIX_DIR=${2:-}
+                    [ -n "$PREFIX_DIR" ] || die "--prefix 要跟一个目录"
+                    shift ;;
+        --prefix=*) PREFIX_DIR=${1#--prefix=} ;;
+        --portable) PORTABLE=1 ;;
+        --rc-mode)  RC_MODE=${2:-auto}
+                    [ -n "$RC_MODE" ] || die "--rc-mode 要跟 auto|home|file|none"
+                    shift ;;
+        --rc-mode=*) RC_MODE=${1#--rc-mode=} ;;
         --write-rc) RC_MODE=write ;;
-        --no-rc)    RC_MODE=print ;;
+        --no-rc)    RC_MODE=none ;;
         -h|--help)
             # 打印文件头那段注释（不写死行号，改一行注释不会错位）
             awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$self"
@@ -103,11 +120,30 @@ done
 
 # `$WTOOL_HOME` = **`.wtool` 根目录**（ADR-0045 §1.1 / D47 / D48）——
 # 不再有"被管理的家目录"那一层。取值优先级：
-#     --home <目录>  >  环境里的 $WTOOL_HOME（rc 里 export 的那个）  >  $HOME/.wtool
+#     --prefix <目录>  >  --home <目录>  >  环境里的 $WTOOL_HOME
+#       >  **自己所在的那个 `.wtool`**（整机包解到 `~/某人/.wtool` 时自动认出来）
+#       >  $HOME/.wtool
 # ⚠️ 实测踩过：这里原来只看 `$HOME`，于是跑一遍测试就把**真** `~/.wtool/bootstrap`
 #    （那时安装器项目还叫这个名字）指向了已删除的 /tmp 目录（悬空软链）。
 #    所以：环境里给了就用它。
-WTOOL_HOME_DIR=${WTOOL_HOME_ARG:-${WTOOL_HOME:-$HOME_DIR/.wtool}}
+#
+# ‼️ "自己所在的那个 `.wtool`" 是 2026-10-21 加的：借用机器上用户会把整机包解到
+#    `~/wangshaowei/.wtool` 再跑 `~/wangshaowei/.wtool/install.sh`。那时若还默认
+#    `$HOME/.wtool`，就会**装到别人的家目录根上** —— 正是要避免的事。
+_self_wh=""
+_self_up=$(dirname -- "$(dirname -- "$proj")")       # <X>/.wtool/wtool/<项目> → <X>/.wtool
+if [ "$(basename -- "$_self_up")" = ".wtool" ] && [ -d "$_self_up" ]; then
+    _self_wh=$_self_up
+fi
+if [ -n "$PREFIX_DIR" ]; then
+    case $PREFIX_DIR in
+        /*) ;;
+        *)  die "--prefix 要绝对路径（例：--prefix $HOME/wangshaowei）: $PREFIX_DIR" ;;
+    esac
+    WTOOL_HOME_ARG=${PREFIX_DIR%/}/.wtool
+    [ "$PORTABLE" = auto ] && PORTABLE=1
+fi
+WTOOL_HOME_DIR=${WTOOL_HOME_ARG:-${WTOOL_HOME:-${_self_wh:-$HOME_DIR/.wtool}}}
 case $WTOOL_HOME_DIR in
     /*) ;;
     *)  die "WTOOL_HOME 得是绝对路径（rc 里那行 `export WTOOL_HOME=…` 写的就是它）: $WTOOL_HOME_DIR" ;;
@@ -121,6 +157,71 @@ ws=${WTOOL_ROOT:-$(dirname -- "$proj")}
 case $proj in
     "$ws"/*) proj_rel=${proj#"$ws"/} ;;     # = 项目身份（相对工作区根的路径）
     *)       proj_rel=$(basename -- "$proj") ;;
+esac
+
+# ==========================================================================
+# 落点模式：**home**（自己的机器）还是 **portable**（借用的机器）
+#
+# 用户 2026-10-21 原话（大意）：这台机器可能是借的，`~/.bashrc` 动不得，
+# 东西只能放 `~/wangshaowei` 下、配置也只能写 `~/wangshaowei/wtool-bashrc`，
+# 用户每次手动 `source` 一下就拿到 wtool 命令和新 PATH。
+# 所以安装器**不该一上来就问"要不要改 .bashrc"**，先判断这是不是一台别人的机器。
+#
+# 判据（任一成立 → portable；判据**打印出来**，绝不静默切换）：
+#   ① 用户显式 `--portable` / `--prefix`
+#   ② `$WTOOL_HOME` 不在 `$HOME/.wtool`（回退到 `~/某人/.wtool` 那种）
+#   ③ `$HOME` 的属主不是当前用户（借来的账号/共享家目录）
+#   ④ `~/.bashrc` 或 `~/.zshrc` 存在但**不可写**
+#   ⑤ `$HOME` 落在网络/共享挂载上（nfs/cifs/fuse/9p/vboxsf/virtiofs）
+# 都拿不到证据时按 home 处理，并且 rc 那一步**非交互照样只打印、绝不代写**。
+# ==========================================================================
+_mode=home
+_mode_reason=""
+if [ "$PORTABLE" = 1 ]; then
+    _mode=portable
+    if [ -n "$PREFIX_DIR" ]; then _mode_reason="--prefix $PREFIX_DIR（= 借用机器）"
+    else _mode_reason="--portable（用户明说）"; fi
+elif [ "$PORTABLE" != 0 ]; then
+    if [ "$WTOOL_HOME_DIR" != "$HOME_DIR/.wtool" ]; then
+        _mode=portable
+        _mode_reason="\$WTOOL_HOME 不在 \$HOME/.wtool（是 $WTOOL_HOME_DIR）"
+    else
+        _home_owner=$(stat -c %u -- "$HOME_DIR" 2>/dev/null || echo "")
+        if [ -n "$_home_owner" ] && [ "$(id -u)" != "0" ] && [ "$_home_owner" != "$(id -u)" ]; then
+            _mode=portable
+            _mode_reason="\$HOME 的属主（uid $_home_owner）不是当前用户（uid $(id -u)）"
+        fi
+    fi
+    if [ "$_mode" = home ]; then
+        for _rcf in "$HOME_DIR/.bashrc" "$HOME_DIR/.zshrc"; do
+            if [ -e "$_rcf" ] && [ ! -w "$_rcf" ]; then
+                _mode=portable
+                _mode_reason="$_rcf 不可写（不是你的文件）"
+                break
+            fi
+        done
+    fi
+    if [ "$_mode" = home ]; then
+        _fstype=$(findmnt -n -o FSTYPE -T "$HOME_DIR" 2>/dev/null | head -1 || true)
+        case $_fstype in
+            nfs*|cifs|smb*|fuse*|9p|vboxsf|virtiofs)
+                _mode=portable
+                _mode_reason="\$HOME 落在共享/网络挂载上（$_fstype）" ;;
+        esac
+    fi
+fi
+if [ "$_mode" = portable ]; then
+    say "落点模式：**portable**（检测到：${_mode_reason:-用户指定}）"
+    say "  → 不碰 \$HOME/.bashrc / .zshrc；生成 $WTOOL_HOME_DIR/../wtool-bashrc 与 wtool-zshrc"
+else
+    say "落点模式：home（自己的机器）"
+fi
+case $RC_MODE in
+    auto)  if [ "$_mode" = portable ]; then RC_MODE=file; else RC_MODE=ask; fi ;;
+    print|ask_old) RC_MODE=ask ;;
+    write|print) : ;;                        # 旧名，原样保留语义
+    home|file|none) : ;;
+    *) die "--rc-mode 只能是 auto|home|file|none（给的是 $RC_MODE）" ;;
 esac
 
 # ==========================================================================
@@ -273,6 +374,87 @@ else
     [ "$_real" = "$here/install.sh" ] \
         || die "① 失败：$WTOOL_HOME_DIR/install.sh 解析到「$_real」，期望「$here/install.sh」"
     say "  ✔ 入口链通了：$WTOOL_HOME_DIR/install.sh → $here/install.sh"
+fi
+
+# ==========================================================================
+# 职责①c：**本发行版那一套产物**（整机包带所有 target，这里选自己这套）
+#
+# 2026-10-21 口径：整机包的内容**不许取决于"在哪个容器里打的"** —— 所以 ③ 类
+# （docker）项目的 `__output/ubuntu_22.04|24.04|26.04/usr` **三份都进包**，
+# 而 `__output/usr` 只是"选哪套"的别名链（包里指向打包时钉死的那一套）。
+# 挑哪一套是**目标机**的事：这里按 /etc/os-release 的 `ID` + `VERSION_ID` 把
+# `__output/usr` 重新指过去（精确命中优先；没有就退到"不高于本机版本的最高那套"）。
+#
+# 开发机 / 单项目自足包那边 `__output/` 下没有 `ubuntu_*` 目录 → 整段是 no-op。
+# 判据是**目录在不在**，不是"我猜你是什么系统"。
+# ==========================================================================
+say "①c 选本发行版的那套产物（整机包里 ③ 类带全部 target）"
+if [ "$DRY_RUN" = 1 ]; then
+    say "  [dry-run] 按 /etc/os-release（${_id:-?} ${_ver:-?}）把 */__output/usr 指到 ubuntu_<版本>/usr"
+else
+    if python3 - "$WTOOL_HOME_DIR" "${_id:-}" "${_ver:-}" <<'PY'
+import os, sys
+home, osid, osver = sys.argv[1], sys.argv[2], sys.argv[3]
+if not osid or not osver:
+    print("  · 读不出发行版（ID/VERSION_ID 空）—— 一个都不动")
+    raise SystemExit(0)
+root = os.path.join(home, "wtool")
+if not os.path.isdir(root):
+    print("  · 没有 wtool/ 目录 —— 跳过")
+    raise SystemExit(0)
+outs = []
+for dirpath, dirnames, _fns in os.walk(root):        # 不跟软链，__output 都是实体目录
+    if os.path.basename(dirpath) == "__output":
+        outs.append(dirpath)
+        dirnames[:] = []
+if not outs:
+    print("  · 一个 __output/ 都没有 —— 跳过")
+    raise SystemExit(0)
+
+
+def vkey(name):
+    try:
+        return tuple(int(x) for x in name.split("."))
+    except ValueError:
+        return None
+
+
+n_ok = 0
+for out in outs:
+    cands = [d for d in os.listdir(out)
+             if d.startswith("ubuntu_") and os.path.isdir(os.path.join(out, d))]
+    if not cands:
+        continue                                  # ①② 类 / 单套产物：不动
+    want = "ubuntu_" + osver
+    pick = want if want in cands else None
+    if pick is None:                              # 退：不高于本机版本的最高那套
+        have = [(vkey(c[len("ubuntu_"):]), c) for c in cands]
+        have = [(k, c) for k, c in have if k]
+        mine = vkey(osver) or ()
+        le = [(k, c) for k, c in have if k <= mine]
+        pick = max(le)[1] if le else None
+        if pick is None:
+            print("  ! %s：三套里没有不高于 %s 的（有 %s）—— 保持原样"
+                  % (os.path.relpath(out, home), osver, ", ".join(sorted(cands))))
+            continue
+        print("  · %s：没有精确的 %s，退到 %s"
+              % (os.path.relpath(out, home), want, pick))
+    alias = os.path.join(out, "usr")
+    target = pick + "/usr"                         # 相对链：整棵 .wtool 搬走也有效
+    if os.path.islink(alias) and os.readlink(alias) == target:
+        n_ok += 1
+        continue
+    if os.path.lexists(alias) and not os.path.islink(alias):
+        print("  ! %s 是实体目录而不是链 —— 不覆盖，跳过" % os.path.relpath(alias, home))
+        continue
+    if os.path.islink(alias):
+        os.remove(alias)
+    os.symlink(target, alias)
+    print("  ✔ %s → %s" % (os.path.relpath(alias, home), target))
+    n_ok += 1
+print("  ✔ %d 个项目选了本发行版（%s %s）的那套" % (n_ok, osid, osver))
+PY
+    then :; else warn "①c 没跑成（不影响已装的东西；③ 类可能会用打包机那套产物）"; fi
 fi
 
 # ==========================================================================
@@ -608,7 +790,61 @@ rc_write() {   # <rc 文件> <shell>
     say "  ✔ 已写进 $_rw_f（最后两行）"
 }
 
+# portable 模式：**生成两份 rc 文件**（用户手动 source），一个字节都不碰 \$HOME 里的 rc。
+# 内容按用户 2026-10-21 给的样子：WTOOL_HOME + PATH（含引擎 bin）+ 库路径 + source env。
+# 幂等：重复 source 不叠加 PATH / LD_LIBRARY_PATH（下面两个 case 守卫）。
+_write_portable_rc() {   # <shell:bash|zsh>
+    _pr_shell=$1
+    _pr_dir=$(dirname -- "$WTOOL_HOME_DIR")
+    _pr_out="$_pr_dir/wtool-${_pr_shell}rc"
+    [ "$DRY_RUN" = 1 ] && { say "  [dry-run] 会生成 $_pr_out"; return 0; }
+    {
+        printf '# 由 wtool 的 install.sh 生成（2026-10-21，portable 模式：借用机器用）。\n'
+        printf '# 用法： source %s\n' "$_pr_out"
+        printf '# 这台机器的 %s/.bashrc 可能不是你的，所以 wtool **不碰它**。\n' "$HOME_DIR"
+        printf 'export WTOOL_HOME=%s\n' "$WTOOL_HOME_DIR"
+        printf 'case ":$PATH:" in\n'
+        printf '    *":$WTOOL_HOME/usr/bin:"*) ;;\n'
+        printf '    *) export PATH="$WTOOL_HOME/usr/bin:$WTOOL_HOME/wtool/%s/bin:$PATH" ;;\n' "$proj_rel"
+        printf 'esac\n'
+        printf 'case ":${LD_LIBRARY_PATH:-}:" in\n'
+        printf '    *":$WTOOL_HOME/usr/lib:"*) ;;\n'
+        printf '    *) export LD_LIBRARY_PATH="$WTOOL_HOME/usr/lib:$WTOOL_HOME/usr/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ;;\n'
+        printf 'esac\n'
+        printf '[ -f "$WTOOL_HOME/env.%s" ] && . "$WTOOL_HOME/env.%s"\n' "$_pr_shell" "$_pr_shell"
+        # 幂等（用户要求：重复 source 不叠加）—— env.* 里各项目的块是**无条件**
+        # prepend 的，source 两次就多两份。这里按"第一次出现"去重：
+        #   [A,B] 再 prepend 一次 A,B → [A,B,A,B] → 去重 → [A,B]（稳定）
+        printf '# 去重：重复 source 也不叠加 PATH / LD_LIBRARY_PATH\n'
+        printf 'PATH=$(printf %%s "$PATH" | tr ":" "\\n" | awk "!seen[\\$0]++" | paste -sd: -)\n'
+        printf 'export PATH\n'
+        printf 'if [ -n "${LD_LIBRARY_PATH:-}" ]; then\n'
+        printf '    LD_LIBRARY_PATH=$(printf %%s "$LD_LIBRARY_PATH" | tr ":" "\\n" | awk "!seen2[\\$0]++" | paste -sd: -)\n'
+        printf '    export LD_LIBRARY_PATH\n'
+        printf 'fi\n'
+    } > "$_pr_out" || die "⑥ 失败：写不了 $_pr_out"
+    say "  ✔ 生成 $_pr_out"
+}
+
+if [ "$RC_MODE" = file ]; then
+    say "⑥ portable 模式：生成 wtool-bashrc / wtool-zshrc（**不改** ~/.bashrc / ~/.zshrc）"
+    _write_portable_rc bash
+    _write_portable_rc zsh
+    _pr_dir=$(dirname -- "$WTOOL_HOME_DIR")
+    cat <<TIP
+
+  下一步（在这台机器上**手动**执行一次，或者写进你自己的启动脚本）：
+
+      source $_pr_dir/wtool-bashrc        # zsh 用户：source $_pr_dir/wtool-zshrc
+
+  之后 `wtool` 命令、`$WTOOL_HOME/usr/bin` 都在 PATH 上了；想验证：`wtool check`
+
+TIP
+fi
+
+if [ "$RC_MODE" != "file" ] && [ "$RC_MODE" != "none" ]; then
 say "⑥ rc 两行（默认只打印，问过你才代写）"
+
 
 # 这个 shell 的 rc 文件（只认存在的；没建过的 rc 绝不代建）
 rc_file_of() {   # <shell> → 打印 rc 路径
@@ -675,6 +911,7 @@ TIP
     else
         say "  （wtool **不会**替你改 rc —— 上面那两行自己贴一下就行）"
     fi
+fi
 fi
 
 # --------------------------------------------------------------------------

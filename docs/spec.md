@@ -890,23 +890,32 @@ $WTOOL_HOME/install.sh
 |---|---|---|
 | 第 0 步 | 准备运行环境（探测发行版 → `install-<os><ver>.sh`） | 见 §12 与 §10.5 |
 | ① | 装安装器项目本体（`wtool install <自己> --force`）+ **两条入口链** | `[ -x "$WTOOL_HOME/wtool/<项目>/wtool.sh" ]`；`readlink -f "$WTOOL_HOME/install.sh"` = 项目里那个 `scripts/install.sh`。两条链都是**相对**链（两端都在 `.wtool` 里 → 整棵搬走照样有效） |
+| ①c | **选本发行版那套产物**（2026-10-21 加，ADR-0046） | 整机包里 ③ docker 类带**所有** target（`__output/ubuntu_22.04|24.04|26.04/usr`）；这里按 `/etc/os-release` 的 `ID`+`VERSION_ID` 把 `__output/usr` 重指到本机那套（精确命中优先；否则退到"不高于本机版本的最高那套"）。开发机 / 单项目自足包里没有 `ubuntu_*` 目录 → 整段 no-op；判据是**目录在不在**，不猜系统 |
 | ①b | 工作区根入口（`install.sh` / `uninstall.sh` / `README.md` / `guide.md`） | 没有 repo 客户端的工作区（发布包解开的）靠它补齐；目标不存在就**跳过并说明**（不静默） |
 | ② | 建 `var/` 账本，并记下**这次动作** | 引擎的账在 `$WTOOL_HOME/var/{registry.tsv,<项目>/}`；安装器自己的两笔在 `var/installer/`：`actions.tsv`（时间线，追加）、`links.tsv`（两条入口链，截断重写 → 幂等）。**删掉 `var/` 之后 `wtool check` 必须非 0**（D42 的判据）—— 见 §16 |
 | ③ | 建 **manifest 三件套** | 见下面「manifest 三件套」 |
 | ④ | 建 `env.{zsh,bash}`，**先**加载安装器项目自己 | 两个文件都得在；按 `(priority, 项目路径)` 排序，安装器项目 `priority=5`（最早）→ `wtool` 命令与 `$WTOOL_HOME/usr/bin` 先就位 |
 | ⑤ | **自检**：起一个新的 zsh/bash 子进程，`source env.<shell>` + `wtool check` | 子进程退出码 0。**只摘 `WTOOL_*` 变量 + 摘掉 PATH 里的 wtool 目录**（不是 `env -i` 清空一切：实测容器里宿主挂进来的 python3 靠 `LD_LIBRARY_PATH` 找 libexpat，一清就死在引擎之前）。判据是"**这个** `WTOOL_HOME` 里的 `wtool`"，不只是"PATH 上有 wtool"（装过两份时会假绿）。失败退出码：3=`source` 失败 / 4=找不到（或不是这个 home 里的）`wtool` / 5=`$WTOOL_HOME/usr/bin` 不在 PATH / 6=`wtool check` 报问题 |
-| ⑥ | **问过用户才**改 rc | rc 最后两行 = `export WTOOL_HOME=…` + `source ${WTOOL_HOME}/env.{zsh,bash}`。默认**只打印**；只有**交互确认**（有终端才问，回答 `y`）或 `--write-rc`（命令行上已明确同意）才代写；**非交互（`< /dev/null` / 管道 / CI）不问、不写、也不挂住**。写之前先看是不是已经有了（幂等：跑十遍也只有两行） |
+| ⑥ | **问过用户才**改 rc；**借用机器上改成"生成两份 rc 文件"** | 自己的机器（home 模式）：rc 最后两行 = `export WTOOL_HOME=…` + `source ${WTOOL_HOME}/env.{zsh,bash}`。默认**只打印**；只有**交互确认**（有终端才问，回答 `y`）或 `--write-rc` 才代写；**非交互不问、不写、也不挂住**（幂等）。<br>**portable 模式**（2026-10-21，ADR-0046）：**一个字节都不碰** `~/.bashrc`/`.zshrc`，生成 `<上级目录>/wtool-bashrc` 与 `wtool-zshrc`（`WTOOL_HOME` + PATH + 库路径 + `source env.<shell>`，末尾按"第一次出现"去重 → 重复 source 不叠加），打印"手动 `source` 这一份" |
 
 用法：
 
 ```sh
-./install.sh                   # 装到 $WTOOL_HOME；没给就 $HOME/.wtool
+./install.sh                   # 装到 $WTOOL_HOME；没给就 $HOME/.wtool（或"自己所在的那个 .wtool"）
 ./install.sh --dry-run         # 只说要做什么，一个字节都不写
 ./install.sh --home <目录>     # 装到别处（= rc 里那行 `export WTOOL_HOME=<目录>`）
+./install.sh --prefix <目录>   # = <目录>/.wtool，**自动 portable**
+./install.sh --portable        # 强制 portable（借用机器：不改 ~/.bashrc，生成 wtool-bashrc）
+./install.sh --rc-mode auto|home|file|none   # 强制 rc 策略（默认 auto：按落点模式判）
 ./install.sh --write-rc        # 你已经在命令行上明确同意写 rc 那两行（不再问）
 ./install.sh --no-rc           # 连问都不问，只打印
 WTOOL_MIRROR=… ./install.sh    # 顺带换 apt 源（§10.5）
 ```
+
+**portable 的判据**（任一成立；**判据会打印出来**，不静默切换）：`--portable`/`--prefix`、
+`$WTOOL_HOME` 不在 `$HOME/.wtool`（例如解到 `~/wangshaowei/.wtool`）、
+`$HOME` 属主不是当前用户、`~/.bashrc`/`.zshrc` 存在但不可写、
+`$HOME` 在 nfs/cifs/fuse/9p/vboxsf/virtiofs 挂载上（`findmnt -T "$HOME"`）。
 
 ⚠️ **被引擎调用时立刻退出 0**：`wtool install/uninstall <安装器项目>` 会跑到
 `scripts/install.sh`（卸载那条路带的是 `--uninstall`）。这条早退必须抢在
@@ -1349,6 +1358,36 @@ wtool download-release all                    # 上面两种都算
 - **两个 `pack-*` 都会刷新** `scripts/release.json` 的 `artifacts` 对照表；
   **两个 `publish-*` 各写自己那族的 tag**（`tag` / `offlineTag`）——
   合并写在 py 里（`release-json --existing`），谁也不许抹掉别人的账。
+
+> #### 2026-10-21 改口径（ADR-0046）：`all` 的项目集合 = **工作区里所有可发布的项目**
+>
+> 用户原话："**不是我本地安装了什么，才打包发布什么。而是一切可以发布的，在本次发布时
+> 就要发布出去。任何时候，打包发布这个动作发布的内容是一致的，不取决于我机器的状态。**"
+>
+> 所以 `pack-offline-release all` 现在：
+>
+> 1. **项目集合** = `publish-list` 的全部项目 − `<publish kind="none"/>` − 类型不支持
+>    （`wtool_plan.py: offline_all_set`；**不读 `$WTOOL_HOME/var`**）。所以 `os/ubuntu`
+>    （系统层、没有 `__output/`）也在包里 —— "能不能发"只看 `wtool.xml` 有没有显式禁止。
+> 2. **② muslbin** 缺二进制的现场 `download-release` + `unpack-release`（要网络）；
+>    补完还缺就**不打包**（不发缺二进制的包）。
+> 3. **③ docker** 带**所有 target**（`__output/ubuntu_22.04|24.04|26.04/…`），
+>    `__output/usr` 留成一条合成链；目标机 `install.sh` ①c 选自己那套 → **三份包内容完全一致**。
+> 4. 包内 `var/` 账本 = 在**临时 `$HOME` + 临时 `$WTOOL_HOME`** 里把全部项目
+>    `install` 一遍算出来的（不是照抄本机）；③ 类用 `--no-script`（它的 install.sh 是
+>    发行版验收脚本），其余项目脚本要跑（`tools/android_repack` 的 `wpack` 靠它）。
+> 5. **可复现**：`WTOOL_NOW` 钉死所有时间戳、清单 `LC_ALL=C sort`、tar 的 mtime/uid/gid
+>    归零、`gzip` 头不带文件名 → **连续两次打包逐字节相同**；`offline-all-digest` 出指纹，
+>    `WTOOL_ALL_DIGEST_EXPECT=<上次那份>` 可直接断言（不一致就 die）。
+>    ⚠️ **并行打两份不行**：两个容器会同时写同一个 `__output/x.wtool-new.<pid>`（pid 会撞）
+>    → 生成物的 sha 每次不同。要可复现就串行（`tests/pack_all_docker.sh` 的 `SEQ=1`）。
+> 6. 包内**野文件**判据（致命）：文件名带 `t_publish_repo_of` / `.orig` / `.rej` / `.swp` /
+>    结尾 `~` / `musl.tar*`；源文件（不在 `var/`、不在 `*/__output/`）**> 20 MB**；
+>    生成物（`__output/**/*.{bash,zsh,sh}`）里**烧死打包机路径**（`/tmp/wtool-offline…`）。
+> 7. 信封/验收：`tests/pack_all_docker.sh`（三发行版各打一份，`SEQ=1` 串行）、
+>    `tests/offline_all_acceptance.sh`（容器里：解包 → install.sh → check → status 一致 →
+>    野文件/PATH 去重 → portable 模式 → 逐项目探针）、
+>    `tests/offline_all_matrix.sh`（宿主上把三份矩阵拼成一张表）。
 
 #### `all` vs `each`：**整机迁移包**和**逐项目自足包**是两件事（D55，2026-10-14 落地）
 

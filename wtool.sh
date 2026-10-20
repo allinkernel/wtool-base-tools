@@ -53,11 +53,12 @@
 #                       （wtool.xml + env.* + 源码或产物），**不放 dist.json**；
 #                       旁边写 <包名>.sha256，分卷时再给 check-hash.sh（不依赖 wtool）
 #   wtool pack-offline-release all [--check|--no-check|--check-only] [--os-version=]
-#                       **整机迁移包**（另一件事，D55）：把**这台机器的
-#                       $WTOOL_HOME** 变成一份能搬走的 .wtool 树（L1 实体化 /
-#                       L2 留链 / 只带被 <export_*> 指定的 __output）→
+#                       **整机迁移包**（另一件事，D55）：把**工作区里所有可发布的
+#                       项目**（不是"这台机器装过的那些"）做成一份能搬走的 .wtool 树
+#                       （L1 实体化 / L2 留链 / 只带被 <export_*> 指定的 __output；
+#                       ② 类现场补真实二进制；③ 类带所有 target）→
 #                       $WTOOL_ROOT/__release/wtool-all-ubuntu<版本>.tar.gz（可分卷）。
-#                       默认**先查再打**：不通过就不打包；打完再查一遍包
+#                       先算集合/补产物/在临时家里装一遍，有致命项就不打包；打完再查一遍包
 #   wtool publish-offline-release <项目>...|each [--tag=offline-YYYY-MM-DD] [--dry-run]
 #                       把自足包 + 校验文件传到 **offline-<日期>** 那个 release 页
 #                       （和开发机那族的 tag/release 页**分开**，ADR-0045 / D56）
@@ -201,7 +202,12 @@ fi
 # --------------------------------------------------------------------------
 # 小工具
 # --------------------------------------------------------------------------
-wt_now() { date +%Y-%m-%dT%H:%M:%S%z; }
+# 现在。`WTOOL_NOW` 可钉死（整机包要"两次打包内容一致"——时间戳是唯一的不确定来源：
+# `meta.tsv` 的 installed_at / journal 的 ts / `var/offline-all.tsv` 都走这里）。
+wt_now() {
+    if [ -n "${WTOOL_NOW:-}" ]; then printf '%s\n' "$WTOOL_NOW"; return 0; fi
+    date +%Y-%m-%dT%H:%M:%S%z
+}
 
 wt_meta_get() {
     _file=$1; _key=$2
@@ -2682,6 +2688,11 @@ cmd_pack_release() {
 # --------------------------------------------------------------------------
 # `all` = **整机迁移包**（DESIGN §2.4 / §7.2 / D55：L1 实体化 + L2 留链 + `--check` +
 #   分卷 `wtool-all*.tar.gz`）—— 给"换台机器、那台没网"的人。
+#   ‼️ 2026-10-21 改口径（用户原话）："不是我本地安装了什么，才打包发布什么。而是一切
+#   可以发布的，在本次发布时就要发布出去。" 所以包里的**项目集合** = 工作区里所有
+#   可发布的项目（`publish-list` − `kind="none"` − 类型不支持），**与本机账本无关**；
+#   ② 类缺二进制的现场 `download-release`+`unpack-release`；③ 类带**所有** target；
+#   包里那份 `var/` 账本由"临时 `$WTOOL_HOME` 里全部 install 一遍"算出来。
 # `each` = **逐项目自足包**：工作区里每个项目各产一个（① `source-offline.zip` /
 #   ②③ `release-offline.zip` / 安装器 `wtool-base-tools.tar.gz`）—— 给"已经有
 #   `.wtool`、只缺某个项目"的断网机。
@@ -2718,12 +2729,14 @@ cmd_pack_offline_release() {
   **不放 dist.json**；旁边写 <包名>.sha256，分卷时再给 check-hash.sh（不依赖 wtool）。
   断网机：unzip → cp -a wtool/. \"\$WTOOL_HOME/wtool/\" → wtool install <项目>
 
-  all   **整机迁移包**（另一件事，D55）：把**这台机器的 \$WTOOL_HOME** 变成一份能搬走
-        的 .wtool 树（L1 实体化 / L2 留链 / 只带被 <export_*> 指定的 __output），
+  all   **整机迁移包**（另一件事，D55）：把**工作区里所有可发布的项目**（不是
+        \"这台机器装过的那些\"）做成一份能搬走的 .wtool 树（L1 实体化 / L2 留链 /
+        只带 <export_*> 指定的 __output；② 类现场补真实二进制；③ 类带**所有** target），
         打成 wtool-all-ubuntu<版本>.tar.gz（可分卷）→ 解开来顶层是 .wtool/，
         改 rc 里 export WTOOL_HOME= 指过去就能用。产物落 \$WTOOL_ROOT/__release/（--out= 可改）。
-        选项：--check / --no-check（默认**先查再打**）、--check-only（只查不打）、
-              --os-version=<22.04|24.04|26.04>（按发行版挑 __output 里那套产物）
+        选项：--check / --no-check（默认打完再查一遍包）、--check-only（只查已有包）、
+              --os-version=<22.04|24.04|26.04>（只影响资产名与别名链的起始值；
+              包里三套都在，目标机装机时按自己那套选）
   each  逐项目各产一个自足包（= 这个词以前给 all 的意思，一个都没少）"
     [ -n "$_vol_override" ] || _vol_override=${WTOOL_VOLUME_SIZE:-32M}
 
@@ -2746,24 +2759,30 @@ cmd_pack_offline_release() {
                     python3 "$PY" offline-all-check --tar "$_pub/$_asset" \
                         --scratch "$_scratch/chk" --os-version "$_osver" || return $?
                 else
-                    wt_info "── 只查**活的工作区**（$_pub/$_asset 还不存在，没打包过）"
-                    python3 "$PY" offline-all-plan --home "$WTOOL_HOME" --root "$WTOOL_ROOT" \
-                        --scratch "$_scratch/plan" --os-version "$_osver" || return $?
+                    # 还没打过包 → 只报**项目集合**（工作区里所有可发布的项目）。
+                    # 不再拿本机账本算闭包：那是机器状态，不是这一版的内容
+                    # （用户 2026-10-21 口径）。
+                    wt_info "── 还没打过包（$_pub/$_asset 不在）—— 只算项目集合"
+                    python3 "$PY" offline-all-set --root "$WTOOL_ROOT" \
+                        --scratch "$_scratch/set" || return $?
                 fi
                 return 0
             fi
-            if [ "$_check" = 1 ]; then
-                wt_info "── 整机迁移包：**先查再打**（闭包不完整就不打包）"
-                python3 "$PY" offline-all-plan --home "$WTOOL_HOME" --root "$WTOOL_ROOT" \
-                    --scratch "$_scratch/pre" --os-version "$_osver" >&2 \
-                    || wt_die "整机包的闭包检查不通过（见上面的 error）—— 不打包"
-            fi
+            # ⚠️ 这里原来有一条"先查再打"：拿**本机账本**算一遍闭包。
+            # 2026-10-21 起闭环检查搬进了 `wt_pack_offline_all`（它先算集合、
+            # 补齐 ② 的产物、在临时家里装一遍、再算清单 —— 有致命项就不打包）。
+            # 再在本机账本上算一遍只会算出**另一份**东西（本机装过的项目），
+            # 那正是这轮要废掉的口径。
             wt_pack_offline_all "$_vol_override" "$_scratch/pack" \
                 "$_out_override" "$_osver"
             if [ "$_check" = 1 ]; then
                 _asset=$(awk -F'\t' '$1=="asset"{print $2}' "$_scratch/pack/all.tsv")
+                # 分卷时整包被挪进 scratch（`__release` 里只剩 part-*）—— 查 scratch 那份，
+                # 否则会报"包不存在"（2026-10-21 实测：一上分卷这条检查就废了）。
+                _tar="$_pub/$_asset"
+                [ -f "$_tar" ] || _tar="$_scratch/pack/$_asset"
                 wt_info "── 打完再查一遍**包**（判据 1–4：L1 实体 / L2 留链 / 无禁品 / 异常报告）"
-                python3 "$PY" offline-all-check --tar "$_pub/$_asset" \
+                python3 "$PY" offline-all-check --tar "$_tar" \
                     --scratch "$_scratch/chk" --os-version "$_osver" \
                     || { wt_warn "整机包**检查不通过** —— 包留在 $_pub/ 让人看，别急着发"; return 1; }
             fi
@@ -3134,34 +3153,36 @@ cmd_kill_self_forever() {
 }
 
 cmd_status_registry() {
+    # 裸 `wtool status`：**一张表，每行都带状态**，表下一行汇总。
+    #
+    # 判据只有一处：`wtool_plan.py project_health`（`wtool check` 也调它）。
+    # ‼️ 旧版这里是"先按登记表逐条报缺失（wt_warn），再打一张没有状态列的
+    #    登记表"—— 于是同一份状态，status 说一串缺失、check 说一切对得上
+    #    （check 按工作区扫，项目目录被删掉的项目它看不见）。用户 2026-10-21
+    #    实测后原话："很怪异，两个看上去对不上。我看不懂了。"
     if [ $# -gt 0 ]; then
         _id=$(python3 "$PY" validate "$1" --home "$WTOOL_HOME" --state "$WTOOL_STATE" \
               >/dev/null 2>&1 && echo ok || echo fail)
         [ "$_id" = ok ] || { wt_warn "清单校验失败: $1"; return 1; }
     fi
-    # ① 软链检查
-    _bad=0
-    _n=0
-    if [ -f "$WTOOL_REGISTRY" ]; then
-        while IFS='	' read -r _dest _id _kind; do
-            [ -z "${_dest:-}" ] && continue
-            _n=$((_n + 1))
-            if [ ! -L "$_dest" ]; then
-                wt_warn "缺失: $_dest（项目 $_id）"
-                _bad=$((_bad + 1))
-            fi
-        done < "$WTOOL_REGISTRY"
-    fi
-    [ "$_bad" -eq 0 ] && wt_info "所有登记的软链都在（$_n 条）"
-
-    # ② 登记表（原来 `wtool list` 的那张，2026-09 并进 status）
-    printf '\n'
-    if [ "$_n" -eq 0 ]; then
-        wt_info "（registry 为空 —— 还没装过任何项目）"
-        return 0
-    fi
-    printf '%-12s %-8s %s\n' PROJECT KIND DEST
-    awk -F'\t' '{printf "%-12s %-8s %s\n", $2, $3, $1}' "$WTOOL_REGISTRY"
+    python3 "$PY" health --home "$WTOOL_HOME" --state "$WTOOL_STATE" \
+        | awk -F'\t' '
+        BEGIN {
+            printf "%-34s %-10s %-8s %s\n", "PROJECT", "KIND", "状态", "说明"
+            printf "%s\n", "----------------------------------------------------------------------------------------"
+            n=ok=d=mi=ni=0
+        }
+        {
+            n++
+            if ($2 == "正常") ok++; else if ($2 == "悬空") d++;
+            else if ($2 == "缺失") mi++; else if ($2 == "未安装") ni++
+            printf "%-34s %-10s %-8s %s\n", $1, $3, $2, ($4 == "" ? "-" : $4)
+        }
+        END {
+            if (n == 0) { print "（账本里一个项目都没有 —— 还没装过任何项目）"; exit 0 }
+            printf "\n%d 个项目：正常 %d / 悬空 %d / 缺失 %d / 未安装 %d\n", n, ok, d, mi, ni
+            if (ok != n) printf "有问题的那些用 `wtool check` 看详细修法；`wtool help` 里讲了 usr/ 与 wtool/ 是什么。\n"
+        }' | sed 's/^/  /'
     return 0
 }
 
@@ -5115,6 +5136,51 @@ wt_kind_gate() {
 }
 
 # --------------------------------------------------------------------------
+# `wtool help` 里的**目录说明**（用户 2026-10-21 点名要的）
+#
+# 每个目录都回答三件事：**是什么 / 什么时候出现 / 能不能删**。
+# 写在函数里而不是文件头注释里：文件头那份是"命令清单"，这里这份是"目录地图"，
+# 两者读者不同（一个人想知道敲哪条命令，一个想知道磁盘上那一坨是什么）。
+# --------------------------------------------------------------------------
+wt_help_dirs() {
+    cat <<'HELPDIRS'
+
+── 磁盘上那些目录是什么（能不能删，看最后一列） ────────────────────────
+
+  $WTOOL_HOME/                 整个 wtool 的家（默认 ~/.wtool）。**搬机器就是搬它**
+                               （`wtool pack-offline-release all` 打的就是它的一份拷贝）。
+                               ⚠️ 装完 $HOME 里只多这一个目录 + rc 里那两行 —— 2026-10-21
+                               起**不再建 `~/usr` 那条入口链**。
+  $WTOOL_HOME/usr/             **装出来的东西**都在这儿（所有项目共享）：
+                               usr/bin / usr/lib / usr/share …。里面**几乎全是相对软链**，
+                               指向 wtool/<项目>/__output/…（或整机包里指向当场拷进来的那份）。
+                               删了 = 所有命令都没了 → `wtool install` 重装即可恢复。
+  $WTOOL_HOME/wtool/           **项目接入点**（L1）：wtool/<项目路径> → 工作区里那个项目目录。
+                               开发机上是**指向工作区的绝对链**；整机包/目标机上是**实体目录**。
+                               删了 = 该项目 env 一行都 source 不进来 → `wtool install <项目>`。
+  $WTOOL_HOME/var/             **账本**（registry.tsv / <项目>/journal.tsv / meta.tsv / env 块）。
+                               "该有什么"的唯一依据；删了 `check`/`uninstall` 都没法对账
+                               （install.sh 会重新建一份，但历史记录就没了）。**别删**。
+  $WTOOL_HOME/env.zsh|.bash    环境汇总（按 priority 排好地 source 各项目的 env 块）。
+                               删了会报，`wtool install` 一次就重建。**可删**。
+  $WTOOL_HOME/install.sh       安装器入口（→ wtool/install.sh → 引擎项目里的真脚本）。
+                               删了 `wtool repair` 或再跑一次 install.sh。**可删**。
+  <项目>/__output/             **产物**：build / unpack-release 的结果（②③ 类才有；
+                               ① 类源码即产物，没有这个目录）。`unpack-layer` 解出来的
+                               层也在这儿。可以删（重 build / 重 download 就有）。
+  <项目>/__release/            **打出来的包**：pack-release / pack-offline-release 的产物
+                               + 它们的 .sha256 + 分卷 + check-hash*.sh；download-release
+                               下的上游资产也在里面（`dist.json` 也在）。可删（重下/重打）。
+  <项目>/__layer/              docker 构建的**层镜像**（OCI 布局，GB 级）。可删
+                               （没有它 push-layer 推不了，重 build 才有）。
+  <项目>/__output/<target>/    ③ docker 类按发行版分开的产物（ubuntu_22.04 / 24.04 / 26.04…）。
+                               整机包里三套都在，装到目标机时由 install.sh「①c」挑本机那套。
+
+  分不清哪出了问题：`wtool status`（每个项目一行状态）→ `wtool check`（逐条说哪里不对）。
+HELPDIRS
+}
+
+# --------------------------------------------------------------------------
 # 分发
 # --------------------------------------------------------------------------
 _cmd=${1:-}
@@ -5202,10 +5268,18 @@ case $_cmd in
     -h|--help|help)
         # 打印文件头的注释块，不写死行号（否则加一行用法就错位）
         awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$self"
+        # 用户 2026-10-21：长篇说明**搬到 help 里**，裸 `wtool` 只显示表格。
+        wt_help_dirs
+        # `wtool help --verbose` 再看 install / release 那两张流程图与四段计划
+        for _ha in "$@"; do
+            case $_ha in --verbose|-v) cmd_table --verbose ;; esac
+        done
         ;;
     "")
-        # 不带参数 = 看板：能力表 + install/sudo-install/bootstrap/sudo-bootstrap 四段计划 + 两张图
-        cmd_table --verbose
+        # 不带参数 = **只有那张表**（用户 2026-10-21："wtool 命令，应该只显示表格，
+        # 后续的内容实在是太多了。应该放到 wtool help / check / status 中"）。
+        # 要全长版：`wtool help`。
+        cmd_table --brief
         ;;
     *) wt_die "未知命令: $_cmd（用 --help 查看用法）" ;;
 esac
