@@ -54,11 +54,12 @@
 #                       旁边写 <包名>.sha256，分卷时再给 check-hash.sh（不依赖 wtool）
 #   wtool pack-offline-release all [--check|--no-check|--check-only] [--os-version=]
 #                       **整机迁移包**（另一件事，D55）：把**工作区里所有可发布的
-#                       项目**（不是"这台机器装过的那些"）做成一份能搬走的 .wtool 树
-#                       （L1 实体化 / L2 留链 / 只带被 <export_*> 指定的 __output；
-#                       ② 类现场补真实二进制；③ 类带所有 target）→
+#                       项目**（不是"这台机器装过的那些"）做成一份能搬走的 .wtool 树 ——
+#                       解开来是"**还没装任何项目**"的状态（2026-10-22 用户口径）：
+#                       没有 usr/、没有 var/、没有 L1 链；`wtool/<项目>` 是实体目录。
+#                       ② 类现场补真实二进制；③ 类带所有 target →
 #                       $WTOOL_ROOT/__release/wtool-all-ubuntu<版本>.tar.gz（可分卷）。
-#                       先算集合/补产物/在临时家里装一遍，有致命项就不打包；打完再查一遍包
+#                       目标机：tar xf → ~/.wtool → install.sh → wtool bootstrap
 #   wtool publish-offline-release <项目>...|each [--tag=offline-YYYY-MM-DD] [--dry-run]
 #                       把自足包 + 校验文件传到 **offline-<日期>** 那个 release 页
 #                       （和开发机那族的 tag/release 页**分开**，ADR-0045 / D56）
@@ -273,6 +274,19 @@ with open(sys.argv[1], encoding="utf-8") as fh:
   git config --global --add safe.directory '*'
 或者给 install 加 --force 跳过版本检查"
     else
+        # ---- 整机包里的项目：**本来就没有 .git**（2026-10-22 用户口径）---------
+        # 整机包是一份"**还没装任何项目**"的 .wtool：`$WTOOL_HOME/wtool/<项目>`
+        # 是**实体目录**，没有工作区、没有版本库。目标机上 `wtool bootstrap`
+        # 必须能直接装起来 —— 所以这里**不是**错误，版本记 `-`（和开发机上
+        # `git` 读不到 HEAD 时同一种写法）。
+        # ⚠️ 判据只看"项目在不在 $WTOOL_HOME/wtool 下"：那是整机包的形状
+        #    （开发机上这里是 L1 链，`git -C` 会顺着链进去，走不到这一支）。
+        case $_dir in
+            "${WTOOL_HOME:-/nonexistent}"/wtool/*)
+                WTOOL_HEAD="-"
+                wt_info "整机包里的项目（没有 .git，也不该有）—— 版本记 -"
+                return 0 ;;
+        esac
         if [ "${WTOOL_FORCE:-0}" = 1 ]; then
             wt_warn "$_dir 不是 git 仓库（--force 继续），无法记录版本"
             WTOOL_HEAD="-"
@@ -2683,10 +2697,10 @@ cmd_pack_release() {
 # **安装器项目**是特例（D59）→ `wtool-base-tools.tar.gz`，解开是 `.wtool/` 树。
 #
 # `all` = 工作区里所有项目（离线族三类都有；用户 2026-10-13 本轮口径）。
-# ⚠️ DESIGN §2.4 / §8.2 把这个词留给了**整机迁移包**（L1 实体化 + L2 留链 + `--check`），
+# ⚠️ DESIGN §2.4 / §8.2 把这个词留给了**整机迁移包**（未安装状态的 .wtool + `--check`），
 #    那一条**还没实现** —— 落地时这个名字要二选一（整机包改名 / 逐项目加开关）。
 # --------------------------------------------------------------------------
-# `all` = **整机迁移包**（DESIGN §2.4 / §7.2 / D55：L1 实体化 + L2 留链 + `--check` +
+# `all` = **整机迁移包**（DESIGN §2.4 / §7.2 / D55：未安装 .wtool + `--check` +
 #   分卷 `wtool-all*.tar.gz`）—— 给"换台机器、那台没网"的人。
 #   ‼️ 2026-10-21 改口径（用户原话）："不是我本地安装了什么，才打包发布什么。而是一切
 #   可以发布的，在本次发布时就要发布出去。" 所以包里的**项目集合** = 工作区里所有
@@ -2730,8 +2744,9 @@ cmd_pack_offline_release() {
   断网机：unzip → cp -a wtool/. \"\$WTOOL_HOME/wtool/\" → wtool install <项目>
 
   all   **整机迁移包**（另一件事，D55）：把**工作区里所有可发布的项目**（不是
-        \"这台机器装过的那些\"）做成一份能搬走的 .wtool 树（L1 实体化 / L2 留链 /
-        只带 <export_*> 指定的 __output；② 类现场补真实二进制；③ 类带**所有** target），
+        \"这台机器装过的那些\"）做成一份能搬走的 .wtool 树 —— 解开来是**还没装
+        任何项目**的状态（无 usr/ 无 var/ 无 L1 链；wtool/<项目> 是实体目录；
+        env/.zshenv/install.sh 链都在；② 类现场补真实二进制；③ 类带**所有** target），
         打成 wtool-all-ubuntu<版本>.tar.gz（可分卷）→ 解开来顶层是 .wtool/，
         改 rc 里 export WTOOL_HOME= 指过去就能用。产物落 \$WTOOL_ROOT/__release/（--out= 可改）。
         选项：--check / --no-check（默认打完再查一遍包）、--check-only（只查已有包）、
@@ -2781,7 +2796,7 @@ cmd_pack_offline_release() {
                 # 否则会报"包不存在"（2026-10-21 实测：一上分卷这条检查就废了）。
                 _tar="$_pub/$_asset"
                 [ -f "$_tar" ] || _tar="$_scratch/pack/$_asset"
-                wt_info "── 打完再查一遍**包**（判据 1–4：L1 实体 / L2 留链 / 无禁品 / 异常报告）"
+                wt_info "── 打完再查一遍**包**（未安装状态 / 实体目录 / 无 usr·var / 三件套自洽）"
                 python3 "$PY" offline-all-check --tar "$_tar" \
                     --scratch "$_scratch/chk" --os-version "$_osver" \
                     || { wt_warn "整机包**检查不通过** —— 包留在 $_pub/ 让人看，别急着发"; return 1; }
@@ -3166,6 +3181,7 @@ cmd_status_registry() {
         [ "$_id" = ok ] || { wt_warn "清单校验失败: $1"; return 1; }
     fi
     python3 "$PY" health --home "$WTOOL_HOME" --state "$WTOOL_STATE" \
+        --root "$WTOOL_ROOT" \
         | awk -F'\t' '
         BEGIN {
             printf "%-34s %-10s %-8s %s\n", "PROJECT", "KIND", "状态", "说明"
@@ -3181,7 +3197,9 @@ cmd_status_registry() {
         END {
             if (n == 0) { print "（账本里一个项目都没有 —— 还没装过任何项目）"; exit 0 }
             printf "\n%d 个项目：正常 %d / 悬空 %d / 缺失 %d / 未安装 %d\n", n, ok, d, mi, ni
-            if (ok != n) printf "有问题的那些用 `wtool check` 看详细修法；`wtool help` 里讲了 usr/ 与 wtool/ 是什么。\n"
+            # "未安装"不是问题（整机包刚解开时全部都是未安装）—— 只有悬空/缺失才提示。
+            if (ok + ni != n) printf "有问题的那些用 `wtool check` 看详细修法；`wtool help` 里讲了 usr/ 与 wtool/ 是什么。\n"
+            if (ni == n && n > 0) printf "全部未安装：跑 `wtool bootstrap` 一次装好（离线，用包里的 __output）。\n"
         }' | sed 's/^/  /'
     return 0
 }

@@ -1393,41 +1393,45 @@ wtool download-release all                    # 上面两种都算
 
 | | `pack-offline-release each` | `pack-offline-release all` |
 |---|---|---|
-| 打的是什么 | **每个项目各一个包**（工作区里有几个项目就有几个） | **整台机器的 `$WTOOL_HOME`**（一个包） |
+| 打的是什么 | **每个项目各一个包**（工作区里有几个项目就有几个） | **一份"还没装任何项目"的 `.wtool`**（一个包；2026-10-22 用户口径） |
 | 给谁 | **已经有 `.wtool`**、只缺某个项目的断网机 | **换机器**：把开发机的 `.wtool` 整体搬到一个没有网的机器上 |
-| 形状 | 顶层 `wtool/<项目路径>/…`（`cp -a wtool/. "$WTOOL_HOME/wtool/"` 合并） | 顶层 **`.wtool/`**（`tar xf` 即得，改 rc 里 `export WTOOL_HOME=` 指过去就能用） |
-| 里面有什么 | ① 源码 / ②③`__output/`（整棵）+ 声明面 | **只放账本算出来的闭包**：L1（`wtool/<项目>`）**实体化**、L2（`usr/…`）**保持为链**、`__output` 只带被 `<export_*>` / `<generate>` 指定的那部分（D45） |
-| 装什么 | 一个项目的链 | 这台机器上**装过的所有项目**（闭包由 `$WTOOL_HOME/var/<项目>/meta.tsv` 定，不是"工作区里有什么"） |
+| 形状 | 顶层 `wtool/<项目路径>/…`（`cp -a wtool/. "$WTOOL_HOME/wtool/"` 合并） | 顶层 **`.wtool/`**（`tar xf` 即得）：`env.{zsh,bash}`（只有引擎自身 PATH + ZDOTDIR）+ `.zshenv` + `install.sh → wtool/install.sh` + `wtool/<项目>`（**实体目录**）+ `.repo/manifests/` 三件套；**没有 `usr/`、没有 `var/`、没有 L1 链** |
+| 里面有什么 | ① 源码 / ②③`__output/`（整棵）+ 声明面 | 工作区里**所有可发布项目**的目录**原样拷**（排除 `.git`/`__release`/`__layer`；`__output` 保留）—— 不再是"按账本算的闭包"，也**不再在临时家里 install 一遍** |
+| 装什么 | 一个项目的链 | **什么都不装**：目标机先 `wtool bootstrap`（判据 = 项目自带 `__output/`），装完还是一条命令 |
 | 目标机要不要先有 wtool | 要（合并进已有的 `.wtool`） | **不要**（包里就是一份 `.wtool`） |
 | 资产名 | ① `source-offline.zip` / ②③ `release-offline.zip` / 安装器 `wtool-base-tools.tar.gz` | **`wtool-all-ubuntu<版本>.tar.gz`**（发行版写在名字里：包里那份 `zsh` 是按它编的，glibc 要求不同） |
 | 发布落点 | 各项目**自己的** release 页，tag `offline-<日期>` | **`wtool-doc`** 的 release 页（DESIGN §7.2 第 6 条；仓库从 `.repo/manifests/default.xml` 里查，**不写死**） |
-| `--check` | 无 | **有**，而且默认开（先查再打、打完再查一遍包） |
+| `--check` | 无 | **有**，而且默认开（打完再查一遍包） |
 
 > ⚠️ **改名说明（2026-10-14）**：`all` 这个词以前指的是"逐项目各产一个包"。
 > 按 D55（用户 2026-10-13 定）**`all` 让给整机迁移包**，逐项目那条改叫 **`each`** ——
 > **能力一个都没少**，两条路各自都还在（`publish-offline-release` 同样：`all` = 整机包 → wtool-doc，
 > `each` = 逐项目 → 各自的 release 页）。
 
-**整机包的 `--check` 四条判据**（DESIGN §2.4 / D39 + D44 + D45；实现只有一处：
+**整机包的 `--check` 判据**（2026-10-22 新语义；实现只有一处：
 `wtool_plan.py` 的 `offline-all-check`）：
 
-1. **L1 已实体化**：包里 `$WTOOL_HOME/wtool/<项目>` 是**实体目录**（不是链、不悬空，且非空）；
-2. **L2 仍是链、且包内可解析**：`usr/…` 下仍是**相对**软链，目标在包内存在
-   （**不许**被实体化成真文件）；
-3. **没有禁品实体化进来**：`.git`、`.repo/projects`、`.repo/project-objects`、`__layer`；
-   `__output` 允许，但只允许被 `<export_*>` / `<generate>` 指定的那部分（其余出现要报告）；
-4. **异常报告、不静默**：体积异常（默认 >1G 或单文件 >200M）、以及闭包之外仍指向包外的链
-   —— 都**打印出来让人决定**（不是悄悄放过）。
+1. 顶层**只有 `.wtool/`**；
+2. **没有 `.wtool/usr/`、没有 `.wtool/var/`** —— 未安装状态必须是干净的；
+3. `wtool/<项目>` 是**实体目录**（不是 L1 链、不悬空、非空、有 `wtool.xml`）；
+4. `.wtool/.zshenv` 在；`env.zsh`/`env.bash` 在，且**一个项目块都没有**（0 个项目已装），
+   并且带引擎自身的 PATH / `ZDOTDIR`；
+5. 入口链 `install.sh → wtool/install.sh → <引擎>/scripts/install.sh` 在**包内**解析得到；
+6. manifest 三件套自洽（`default.xml` 实体 + `.sha256` 对得上 + `.commitid` 非空）；
+7. **没有禁品**：`.git`、`.repo/projects`、`.repo/project-objects`、`__layer`、
+   `__release`、`dist.json`；
+8. ②③ 类项目的 `__output/` 在（否则目标机 `wtool bootstrap` 装不出东西）；
+9. 野文件 / 异常体积**报告不静默**（命名像事故产物的、源文件 >20 MB 的 → 致命）。
 
 另外查：包顶层**只有 `.wtool/`**、**没有 `dist.json`**（离线族，D51）、
 manifest 三件套**自洽**（`.sha256` 与包内 `default.xml` 逐字对得上 —— 目标机
 `install.sh` 对"包里来的"三件套是**只校验、不覆盖**，对不上就报错停手）。
 
 **打包在哪打**（`--os-version=`）：包里那份 ③ 类产物是按发行版编的，
-`__output/usr` 只是一条"选本机那套"的软链。所以整机包**按发行版分三份**，
-在**对应发行版的容器里**打（`--os-version=<22.04|24.04|26.04>`，不给就跟本机走）——
-它会把 `__output/usr/…` 解析成 `__output/ubuntu_<版本>/usr/…` 再拷进包，盖在**声明的那个路径**上，
-这样 L2 那条相对链在包里照样解析得到。
+`__output/usr` 只是一条"选本机那套"的软链。整机包**带上全部 target**
+（`__output/ubuntu_22.04|24.04|26.04/…`），打包器把 `__output/usr` 重新指到
+`--os-version` 那一套；目标机的 `install.sh`「①c」再按它自己的 `/etc/os-release` 切。
+所以**三份包内容一致**，`--os-version` 只影响资产名和那条别名链的起始指向。
 
 **整机包的可选项**：`--check` / `--no-check`（默认**先查再打**）、`--check-only`（只查不打；
 包在就查包、不在就查活的工作区）、`--out=DIR`（默认 `$WTOOL_ROOT/__release/`）、
@@ -1454,8 +1458,8 @@ wtool install shell/zsh                          # ⑤ 重新装
 第 ② 步**必须手工 `rm -rf`**：`wtool uninstall` 只逆放它自己建的链接与账本，**不删**
 `.wtool/wtool/<项目>` —— 那是从包里**合并**进来的，不在账本里；不删就会新旧文件混杂。
 
-> ⚠️ **`all` 和 `each` 是两个意思**（2026-10-14 落地，D55）：`all` = **整机迁移包**
-> （L1 实体化 + L2 留链 + `--check` + 分卷 `wtool-all-ubuntu<版本>.tar.gz`，发到 wtool-doc），
+> ⚠️ **`all` 和 `each` 是两个意思**（2026-10-14 落地，D55；2026-10-22 改成"未安装状态的 .wtool"）：
+> `all` = **整机迁移包**（原样拷项目 + `--check` + 分卷 `wtool-all-ubuntu<版本>.tar.gz`，发到 wtool-doc），
 > `each` = 工作区里每个项目各产一个自足包（**这条就是 `all` 以前的意思**）。
 > 两者的对照表、判据、打包在哪打，见上一节「`all` vs `each`」。
 

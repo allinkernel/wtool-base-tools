@@ -349,31 +349,56 @@ fi
 # ==========================================================================
 # 职责①：装安装器项目本体 + 两条入口链
 #
-# `wtool install <安装器项目>` 会建 L1（`$WTOOL_HOME/wtool/<项目>` → 本目录，
-# 开发机=绝对链 / bundle=本来就是实体）、写 env 块、重算 env.{zsh,bash}。
+# 两种完全不同的起点（判据 = `$ws/.repo/projects` 在不在，和职责③同一个）：
+#   · **满血工作区**（开发机）：`wtool install <安装器项目>` 建 L1 绝对链、
+#     写 env 块、重算 env.{zsh,bash}；
+#   · **整机包**（`pack-offline-release all` 解出来的 .wtool）：`$WTOOL_HOME/wtool/`
+#     **就是**工作区根，项目本来就是实体目录，入口链和 env 都**随包而来** ——
+#     这一步只**校验**，一个项目都不装（用户口径 2026-10-22："不装任何项目"）。
+#     装项目是 `wtool bootstrap` 的事。
 # 这一步的输出**绝不吞**：吞掉的话 install 拒绝时用户看到的是一片安静（踩过）。
 # ==========================================================================
-say "① 装安装器项目本体：$proj_rel"
+_bundle=0
+if [ -d "$ws/.repo/projects" ] && [ -d "$ws/.repo/project-objects" ]; then
+    _bundle=0
+else
+    _bundle=1
+fi
+if [ "$_bundle" = 1 ]; then
+    say "① 整机包里的 .wtool（没有满血工作区）—— 只校验入口链，**不装任何项目**"
+else
+    say "① 装安装器项目本体：$proj_rel"
+fi
 if [ "$DRY_RUN" = 1 ]; then
-    say "  [dry-run] wtool install $proj（L1：$WTOOL_HOME_DIR/wtool/$proj_rel）"
-    say "  [dry-run] 两条入口链：$WTOOL_HOME_DIR/install.sh → wtool/install.sh → $proj_rel/scripts/install.sh"
+    if [ "$_bundle" = 1 ]; then
+        say "  [dry-run] 校验 $WTOOL_HOME_DIR/install.sh → wtool/install.sh → $proj_rel/scripts/install.sh"
+    else
+        say "  [dry-run] wtool install $proj（L1：$WTOOL_HOME_DIR/wtool/$proj_rel）"
+        say "  [dry-run] 两条入口链：$WTOOL_HOME_DIR/install.sh → wtool/install.sh → $proj_rel/scripts/install.sh"
+    fi
 else
     [ -x "$proj/wtool.sh" ] || die "① 失败：这里不是安装器项目（找不到可执行的 wtool.sh）: $proj"
-    # --force 是有意的：安装器常常来自一个开发副本（工作区挂载进来、或有未提交
-    # 改动）—— 那种情况下"版本记录不准"，但不该因此拦住"让 wtool 能用"。
-    if ! WTOOL_HOME="$WTOOL_HOME_DIR" WTOOL_STATE="$WTOOL_HOME_DIR/var" \
-         WTOOL_PREFIX="$WTOOL_HOME_DIR/usr" WTOOL_MANAGED_HOME="$HOME_DIR" \
-         "$proj/wtool.sh" install "$proj" --force; then
-        die "① 失败：wtool install $proj 没成功（原因就在上面那几行）—— 这一步不过，后面几步全是空的"
+    if [ "$_bundle" = 0 ]; then
+        # --force 是有意的：安装器常常来自一个开发副本（工作区挂载进来、或有未提交
+        # 改动）—— 那种情况下"版本记录不准"，但不该因此拦住"让 wtool 能用"。
+        if ! WTOOL_HOME="$WTOOL_HOME_DIR" WTOOL_STATE="$WTOOL_HOME_DIR/var" \
+             WTOOL_PREFIX="$WTOOL_HOME_DIR/usr" WTOOL_MANAGED_HOME="$HOME_DIR" \
+             "$proj/wtool.sh" install "$proj" --force; then
+            die "① 失败：wtool install $proj 没成功（原因就在上面那几行）—— 这一步不过，后面几步全是空的"
+        fi
     fi
     [ -x "$WTOOL_HOME_DIR/wtool/$proj_rel/wtool.sh" ] \
-        || die "① 失败：L1 不在（$WTOOL_HOME_DIR/wtool/$proj_rel/wtool.sh 不可执行）"
+        || die "① 失败：$WTOOL_HOME_DIR/wtool/$proj_rel/wtool.sh 不可执行（整机包里它该是实体目录；开发机上它该是 L1 链）"
     link_rel "$WTOOL_HOME_DIR/wtool/install.sh" "$proj_rel/scripts/install.sh"
     link_rel "$WTOOL_HOME_DIR/install.sh" "wtool/install.sh"
     _real=$(readlink -f -- "$WTOOL_HOME_DIR/install.sh" 2>/dev/null || true)
     [ "$_real" = "$here/install.sh" ] \
         || die "① 失败：$WTOOL_HOME_DIR/install.sh 解析到「$_real」，期望「$here/install.sh」"
-    say "  ✔ 入口链通了：$WTOOL_HOME_DIR/install.sh → $here/install.sh"
+    if [ "$_bundle" = 1 ]; then
+        say "  ✔ 入口链通了（整机包：项目都在 $WTOOL_HOME_DIR/wtool/ 下，等 wtool bootstrap）"
+    else
+        say "  ✔ 入口链通了：$WTOOL_HOME_DIR/install.sh → $here/install.sh"
+    fi
 fi
 
 # ==========================================================================
@@ -506,6 +531,11 @@ say "② 账本（$WTOOL_HOME_DIR/var）"
 _rec_dir=$WTOOL_HOME_DIR/var/installer
 if [ "$DRY_RUN" = 1 ]; then
     say "  [dry-run] 记这次动作：$WTOOL_HOME_DIR/var/（registry.tsv 由引擎写，installer/ 记入口链与时间线）"
+elif [ ! -d "$WTOOL_HOME_DIR/var" ] && [ "$_bundle" = 1 ]; then
+    # ‼️ 整机包解开时**没有 var/**（一个项目都没装），这不是错误（用户口径
+    # 2026-10-22："未安装状态是合法的"）。账本要等第一个项目 `wtool install`
+    # 才由引擎建出来；这里**不许**替它建一个空壳（那会让 check 以为装过东西）。
+    say "  · 还没有 var/（一个项目都没装）—— 正常。wtool bootstrap 装第一个项目时会建。"
 else
     mkdir -p -- "$_rec_dir" || die "② 失败：建不了 $_rec_dir（$WTOOL_HOME_DIR 写不进去？）"
     _now=$(date +%Y-%m-%dT%H:%M:%S%z)
@@ -628,26 +658,51 @@ else
 fi
 
 # ==========================================================================
-# 职责④：env.{zsh,bash} —— **先**加载安装器项目自己
+# 职责④：env.{zsh,bash} —— **引擎自身那段**必须在
 #
-# 它们是引擎在 ① 里按 (priority, 项目路径) 现算出来的汇总（ADR-0045 §1.2 / D48）：
-# 每个项目的 env 块按 priority 升序 source，安装器项目 priority=5（最早）——
-# 所以 `wtool` 命令、`$WTOOL_HOME/usr/bin` 一定先于别的项目就位。
+# 它们的第一块**不依赖任何项目**（2026-10-22 用户口径：整机包解开时 0 个项目已装，
+# `wtool` 也得能用）。第一块做两件事：`$WTOOL_HOME/usr/bin` +
+# `$WTOOL_HOME/wtool/<引擎>/bin` 进 PATH、导出 ZDOTDIR（子进程 zsh 读 `.zshenv`）。
+# `wtool bootstrap` 之后，引擎会按账本把各项目的块**追加**在后面。
 # ==========================================================================
-say "④ env.{zsh,bash}（先加载安装器项目自己，保证 wtool 可用）"
+say "④ env.{zsh,bash}（引擎自身那段：wtool 命令 + ZDOTDIR）"
 if [ "$DRY_RUN" = 1 ]; then
-    say "  [dry-run] 校验 $WTOOL_HOME_DIR/env.{zsh,bash} 在，且第一个块是 $proj_rel"
+    say "  [dry-run] 校验 $WTOOL_HOME_DIR/env.{zsh,bash} 在，且带引擎自身的 PATH / ZDOTDIR"
 else
+    # ‼️ 2026-10-22：**这一份安装器要自己会生成它**（不只是校验）。
+    #    整机包里的 env 是"_0 个项目"那一版；用户可能先删了它、或者从老包升上来。
+    #    内容由规划器算（和 `wtool install` / 打包器**同一段代码**）：
+    #    引擎自身那段 + 账本里已有的项目块（没装过项目时自然只有引擎那段）。
+    for _sh in zsh bash; do
+        _envf=$WTOOL_HOME_DIR/env.$_sh
+        _want=$(python3 "$proj/lib/wtool_plan.py" render-env-file \
+                    --home "$WTOOL_HOME_DIR" --state "$WTOOL_HOME_DIR/var" \
+                    --shell "$_sh" --engine "$proj_rel" 2>/dev/null || true)
+        [ -n "$_want" ] || die "④ 失败：算不出 env.$_sh 的内容（规划器没跑起来：$proj/lib/wtool_plan.py）"
+        if [ ! -f "$_envf" ] || [ "$(cat -- "$_envf" 2>/dev/null || true)" != "$_want" ]; then
+            printf '%s' "$_want" > "$_envf" || die "④ 失败：写不了 $_envf"
+            say "  ✔ 生成 $_envf（引擎自身那段 + 账本里已有的项目块）"
+        fi
+    done
     [ -f "$WTOOL_HOME_DIR/env.zsh" ] \
         || die "④ 失败：$WTOOL_HOME_DIR/env.zsh 没建出来（引擎的 env 汇总那一步没走到）"
     [ -f "$WTOOL_HOME_DIR/env.bash" ] \
         || die "④ 失败：$WTOOL_HOME_DIR/env.bash 没建出来（同上；两个 shell 都得有，不然没 zsh 的机器上用不了）"
-    _first=$(awk '/^# --- wtool:/{sub(/^# --- wtool:/,""); sub(/ \(priority.*/,""); print; exit}' \
-             "$WTOOL_HOME_DIR/env.zsh" 2>/dev/null || true)
-    case $_first in
-        "$proj_rel") say "  ✔ 第一个 env 块就是安装器项目自己（priority 最小 = 最先加载）" ;;
-        "")          warn "  env.zsh 里一个 env 块都没有 —— 安装器项目的 env 没进去（看它的 wtool.xml）" ;;
-        *)           warn "  第一个 env 块是「$_first」，不是安装器项目「$proj_rel」—— 如果 wtool 命令找不到，先看这两个的 priority" ;;
+    _base_ok=1
+    for _sh in zsh bash; do
+        grep -q 'ZDOTDIR' "$WTOOL_HOME_DIR/env.$_sh" || _base_ok=0
+        grep -q "wtool/$proj_rel/bin" "$WTOOL_HOME_DIR/env.$_sh" || _base_ok=0
+    done
+    if [ "$_base_ok" = 1 ]; then
+        say "  ✔ 两份 env 都带引擎自身的 PATH（$WTOOL_HOME_DIR/usr/bin + wtool/$proj_rel/bin）与 ZDOTDIR"
+    else
+        warn "  env.{zsh,bash} 里缺引擎自身的 PATH / ZDOTDIR —— 这两份不是这一版引擎生成的？"
+        warn "  修法：删掉 $WTOOL_HOME_DIR/env.{zsh,bash} 再跑一次 install.sh（或先跑一次 wtool install）"
+    fi
+    _nblk=$(grep -c '^# --- wtool:' "$WTOOL_HOME_DIR/env.zsh" 2>/dev/null || true)
+    case ${_nblk:-0} in
+        0) say "  · env.zsh 里一个项目块都没有 —— **正常**：一个项目都还没装（wtool bootstrap 会补上）" ;;
+        *) say "  · env.zsh 里有 $_nblk 个项目 env 块（按 priority 升序）" ;;
     esac
 fi
 
@@ -692,7 +747,12 @@ else
             say "  $_sh：这台机器上没有，跳过"
             continue
         fi
-        _log=$_rec_dir/selfcheck.$_sh.log
+        # 自检日志落在 `var/installer/`（安装器的账本目录）。整机包刚解开时
+        # **var/ 还不存在**（一个项目都没装，那是正常的）—— 那就落到临时目录，
+        # 绝不能因为"日志写不进去"把自检判成失败（2026-10-22 实测：rc=2，
+        # 报错是 `cannot create .../var/installer/selfcheck.zsh.log`）。
+        if [ -d "$_rec_dir" ]; then _log=$_rec_dir/selfcheck.$_sh.log
+        else _log=${TMPDIR:-/tmp}/wtool-selfcheck.$$.$_sh.log; fi
         # ‼️ 判据是"**这个** WTOOL_HOME 里的 wtool"，不只是"PATH 上有 wtool" ——
         #    机器上装过两份时，光看 `command -v` 会被**另一份**蒙过去（实测：
         #    跑测试那个 shell 的 PATH 里本来就有别的 wtool，这一步就成了假绿）。
@@ -809,34 +869,31 @@ rc_create() {   # <rc 文件> <shell>   —— 只在文件**不存在**时调�
     say "  ✔ 新建 $_rc_f（写入那两行）"
 }
 
-# `~/.zshenv` 里那段 module_path/fpath —— **专门为"zsh 当登录 shell"** 的情形。
+# `$WTOOL_HOME/.zshenv` 里那段 module_path/fpath —— **不写 `~/.zshenv`**。
 #
 # 为什么必须有：zsh 的 `module_path`/`fpath` 是**编译时前缀**（构建容器里的
 # `/root/.wtool/usr/…`），换机器就加载不到动态模块（`zsh/zle`、`zsh/parameter`…），
 # 而 `MODULE_PATH` **不允许从环境导入**。`.zshenv` 在**任何 rc、任何模块加载之前**
 # 执行，是唯一能修它的地方（2026-10-21 VM 实测：`zsh: failed to load module 'zsh/zle'`）。
-# 从 bash 敲 `zsh` 的情形由项目 `env.*` 导出的 ZDOTDIR 走 `$WTOOL_HOME/.zshenv`，两条路都覆盖。
-zsh_module_path_write() {
-    _zs=$HOME_DIR/.zshenv
-    if [ -f "$_zs" ] && grep -qF '# >>> wtool: zsh module_path >>>' "$_zs" 2>/dev/null; then
-        say "  ✔ $_zs 里已经有 wtool 的 module_path 段（跳过）"
+#
+# ‼️ 2026-10-22 用户口径：**不污染宿主机** —— 这份文件放在 `.wtool/` 里
+#    （`$WTOOL_HOME/.zshenv`），靠 `env.*` 导出的 `ZDOTDIR=$WTOOL_HOME` 让 zsh 读到它；
+#    读完它把 `ZDOTDIR` 还原成 `$HOME`，所以随后的 `~/.zshrc` 照旧生效。
+#    内容由引擎的规划器给（`render-zshenv`，和打包器、`shell/zsh` 的 install.sh 同源）。
+# environment 里已经有一份**内容相同**的就不动（幂等）。
+wtool_zshenv_ensure() {
+    _zs=$WTOOL_HOME_DIR/.zshenv
+    _want=$(python3 "$proj/lib/wtool_plan.py" render-zshenv 2>/dev/null || true)
+    if [ -z "$_want" ]; then
+        warn "  · 算不出 .zshenv 的内容（规划器没跑起来）—— 跳过；zsh 的动态模块可能加载不到"
         return 0
     fi
-    if [ -s "$_zs" ] && [ -n "$(tail -c 1 -- "$_zs" 2>/dev/null || true)" ]; then
-        printf '\n' >> "$_zs"
+    if [ -f "$_zs" ] && [ "$(cat -- "$_zs")" = "$_want" ]; then
+        say "  ✔ $_zs 已是最新（module_path/fpath，读完还原 ZDOTDIR）"
+        return 0
     fi
-    cat >> "$_zs" <<EOF || die "⑥ 失败：写不了 $_zs"
-# >>> wtool: zsh module_path >>>
-# 由 wtool 的 install.sh 写（幂等，重装不会重复）。删掉这段 → zsh 会去
-# 构建容器里的老前缀找动态模块，症状是
-# zsh: failed to load module 'zsh/zle' / 'zsh/parameter': ... Permission denied
-if [ -n "\${ZSH_VERSION:-}" ] && [ -d "$WTOOL_HOME_DIR/usr/lib/zsh" ]; then
-    module_path=("$WTOOL_HOME_DIR/usr/lib/zsh/\$ZSH_VERSION" \$module_path)
-    fpath=("$WTOOL_HOME_DIR/usr/share/zsh/\$ZSH_VERSION/functions" "$WTOOL_HOME_DIR/usr/share/zsh/site-functions" \$fpath)
-fi
-# <<< wtool: zsh module_path <<<
-EOF
-    say "  ✔ 已写 $_zs（zsh 的 module_path 段）"
+    printf '%s' "$_want" > "$_zs" || die "⑥ 失败：写不了 $_zs"
+    say "  ✔ 已写 $_zs（module_path/fpath；**不碰** ~/.zshenv）"
 }
 
 # portable 模式：**生成两份 rc 文件**（用户手动 source），一个字节都不碰 \$HOME 里的 rc。
@@ -875,6 +932,12 @@ _write_portable_rc() {   # <shell:bash|zsh>
     say "  ✔ 生成 $_pr_out"
 }
 
+# `$WTOOL_HOME/.zshenv`（module_path/fpath）**两种落点模式都要有**：portable 模式
+# 下面那段 rc 逻辑不会跑，但它照样得让 zsh 加载得到动态模块。
+if [ "$DRY_RUN" != 1 ]; then
+    wtool_zshenv_ensure
+fi
+
 if [ "$RC_MODE" = file ]; then
     say "⑥ portable 模式：生成 wtool-bashrc / wtool-zshrc（**不改** ~/.bashrc / ~/.zshrc）"
     _write_portable_rc bash
@@ -906,16 +969,17 @@ rc_file_of() {   # <shell> → 打印 rc 路径
 # 缺的 rc 先建出来（建一个本来不存在的文件不算"改你的东西"，不需要问）；
 # 已存在的仍走下面的 case（ask/write/print）。
 # 2026-10-21 VM 实测：这段原来被我放在 `else`（"rc 缺两行"那支）里，
-# 而 VM 上 `.bashrc`/`.zshrc` 都已有两行 → `_rc_targets` 为空 → 从没执行过 →
-# `~/.zshenv` 没被创建。**必须在分支之前**，与 rc 有没有那两行无关。
+# 而 VM 上 `.bashrc`/`.zshrc` 都已有两行 → `_rc_targets` 为空 → 从没执行过。
+# **必须在分支之前**，与 rc 有没有那两行无关。
 if [ "$DRY_RUN" != 1 ]; then
     for _sh in zsh bash; do
         _rc_f=$(rc_file_of "$_sh")
         [ -e "$_rc_f" ] || rc_create "$_rc_f" "$_sh"
     done
-    # zsh 当登录 shell / 从没 source 过 wtool env 的 shell 里敲 zsh 时，
-    # 都走不到 env.* —— 这条单独补在 ~/.zshenv（幂等，靠固定标记判重）。
-    zsh_module_path_write
+    # ‼️ 2026-10-22：**不写 `~/.zshenv`**（用户："它应该放到 .wtool/env.zsh 下，
+    #    你要想办法做到，不能污染宿主机环境"）。module_path/fpath 只在
+    #    `$WTOOL_HOME/.zshenv` 里，由 env.* 导出的 ZDOTDIR 引导 zsh 去读 ——
+    #    那份文件在 rc 分支**之前**已经确保过了。
 fi
 
 _rc_targets=""
@@ -1011,11 +1075,12 @@ cat <<TIP
   重新开一个终端（或 exec \$SHELL）之后：
 $([ -n "$_rc" ] && printf '      # %s 里那两行就会自动生效\n' "$_rc")
 
-  然后**两步**：先系统层，再用户层（分开是有意的，失败原因完全不同）：
+  然后**两条路**（分开是有意的，失败原因完全不同）：
 
       wtool                # 看项目表：每个项目支持什么、走到哪一步了
+      wtool bootstrap      # 用户层：一口气装好全部项目（不要 sudo、不联网；
+                           #   整机包里直接用它带的那份 __output/）
       wtool sudo-bootstrap # 系统层：apt 包 + /etc 下的文件（**可能要 sudo、要联网**）
-      wtool bootstrap      # 用户层：文件、软链、shell 集成（不要 sudo、不联网）
 
   wtool bootstrap 不会替你做这些决定，需要时才自己跑：
       wtool build    <项目>    自己编（小时级；声明要容器而本机没有 docker 时会直接拒绝）

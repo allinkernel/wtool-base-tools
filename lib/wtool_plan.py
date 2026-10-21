@@ -37,6 +37,10 @@ import xml.etree.ElementTree as ET
 ENGINE_VERSION = "1.0.0"
 SCHEMA_SUPPORTED = (1,)
 DEFAULT_PRIORITY = 100
+# 引擎住在哪个项目里（工作区相对路径）。今天叫 wtool-base-tools（2026-10-13 由
+# `bootstrap` 改名）。**不要散落写死**：`wtool` 命令的 PATH 靠它算，改名时只改这里
+# （打包器和 `wt_env_sync` 也会从现场算出来传进来）。
+DEFAULT_ENGINE_REL = "wtool-base-tools"
 # <build kind=...>：构建方式（ADR-025）。local = 本地直接编、产物天然跨发行版；
 # docker = 每个发行版一个容器、分层构建。默认 local（不写就是本地编）。
 BUILD_KINDS = ("local", "docker")
@@ -3321,8 +3325,8 @@ ENV_CHECK_LINES = [
 
 ENV_AGG_HEADER = """# 由 wtool 生成 —— 不要手改，改了下次 install/uninstall 会被覆盖。
 #
-# 每个项目的环境变量按 (priority, 项目路径) 升序 source 在下面。
-# 要改内容请去改各自项目里的 env 文件（见每段开头的 # >>> wtool:<项目> 注释）。
+# 开头那段是**引擎自身**的（不依赖任何项目：一个项目都没装时，它就是全部内容）。
+# 之后才是各项目的环境变量，按 (priority, 项目路径) 升序 source 在下面。
 #
 # rc 里只有两行（`export WTOOL_HOME=…` + `source ${WTOOL_HOME}/env.{zsh,bash}`）——
 # 想彻底去掉 wtool 对环境的影响，删掉那两行即可。
@@ -3330,6 +3334,83 @@ ENV_AGG_HEADER = """# 由 wtool 生成 —— 不要手改，改了下次 instal
 # 这个文件**不是**日志、也不是账本：它是从账本
 # （$WTOOL_HOME/var/<项目>/env.<shell>）现算出来的。删了它 wtool check 会报，
 # 重新 install/uninstall 一次就回来了。
+"""
+
+# `$WTOOL_HOME/env.{zsh,bash}` 的**第一块**：引擎自身（2026-10-22，用户口径）。
+#
+#     整机包解开来是一份"**还没装任何项目**"的 .wtool —— 这时候 `wtool` 也得能用，
+#     `wtool bootstrap` 要能把 53 个项目装起来。所以 env 里不能只有"项目的块"：
+#     引擎自己的 PATH 必须**不依赖任何项目**地写在这里。
+#
+# 只做两件事：
+#   ① `wtool` 命令可用 = `$WTOOL_HOME/usr/bin` + 引擎项目的 `bin/` 进 PATH
+#      （前者是 ② 类工具的落点，后者是 `wtool` 这个 wrapper 本身）；
+#   ② `export ZDOTDIR=$WTOOL_HOME` —— 从 bash 敲 `zsh` 时，zsh 会读
+#      `$WTOOL_HOME/.zshenv`（`module_path`/`fpath` 在那里用 `$WTOOL_HOME` 现算）。
+#      那份文件读完会把 ZDOTDIR 还原成 `$HOME`，所以随后的 `~/.zshrc` 照旧生效。
+#
+# ⚠️ **这里不放任何项目的东西**。项目块在账本里（`var/<项目>/env.<shell>`），
+#    装一个才多一段 —— 0 个项目时这一份就是完整的 env 文件。
+# ⚠️ `%s` 是引擎项目的工作区相对路径（今天叫 `wtool-base-tools`）。名字不写死：
+#    引擎装在哪个项目里，由调用方（`wt_env_sync` / 打包器）现算后传进来。
+ENGINE_ENV_BLOCK = """# --- wtool 引擎自身（不依赖任何项目；0 个项目已装时，这里就是全部内容）---
+# ① `wtool` 命令：$WTOOL_HOME/usr/bin（② 类工具的落点）+ 引擎项目的 bin/（wrapper）
+case ":$PATH:" in
+    *":$WTOOL_HOME/usr/bin:"*) ;;
+    *) PATH="$WTOOL_HOME/usr/bin:$PATH" ;;
+esac
+case ":$PATH:" in
+    *":$WTOOL_HOME/wtool/%s/bin:"*) ;;
+    *) PATH="$WTOOL_HOME/wtool/%s/bin:$PATH" ;;
+esac
+export PATH
+# ② 从 bash 敲 zsh：ZDOTDIR 指到 $WTOOL_HOME → zsh 读 $WTOOL_HOME/.zshenv
+#    （module_path/fpath 在那儿用 $WTOOL_HOME 现算；那份文件读完把 ZDOTDIR 还原成
+#     $HOME，所以你的 ~/.zshrc 照旧生效）。已经设过 ZDOTDIR 的人保持原样。
+export ZDOTDIR="${ZDOTDIR:-$WTOOL_HOME}"
+"""
+
+# `env.zsh` 的**收尾块**（只在 zsh、且确实有项目块时追加）：提示符归属。
+#
+# 用户口径（2026-10-22）："zsh 启动后，是我要的 ohmyzsh 的提示符"。而
+# `tools/musl-bins/starship`（priority 60）的 `init zsh` 会直接改写 `PROMPT`，
+# 排在 oh-my-zsh（priority 10）后面就把 `ZSH_THEME` 的主题盖掉了（VM 实测）。
+# 解决方式不是翻加载顺序（那会把 fzf 的 ^R、补全顺序一起翻掉）：
+#   · oh-my-zsh 的 env 把主题算出来的 PROMPT 存进 `WTOOL_OMZ_PROMPT`；
+#   · 这里在**所有**项目块之后把它贴回去。
+# 没装 oh-my-zsh → 变量不存在 → 整段 no-op（一个字都不改用户的提示符）。
+ENV_PROMPT_FINALIZER = """# --- wtool 收尾：提示符归属（用户口径：装了 oh-my-zsh 就要它的主题）---
+# 有些项目的 shell 集成在 init 时直接改写 PROMPT/RPROMPT（典型是 starship），
+# 它们排在 oh-my-zsh 后面就会把 ZSH_THEME 的主题盖掉。omz 的项目 env 已经把
+# 主题算出来的那份存进 WTOOL_OMZ_PROMPT —— 这里在**所有项目加载完之后**贴回去。
+if [ -n "${WTOOL_OMZ_PROMPT:-}" ]; then
+    PROMPT="$WTOOL_OMZ_PROMPT"
+    RPROMPT="${WTOOL_OMZ_RPROMPT:-}"
+fi
+"""
+
+# `$WTOOL_HOME/.zshenv` 的全文（2026-10-22：**不再写 `~/.zshenv`**）。
+#
+# 为什么放在 `.wtool/` 里、而不放用户家目录根上：
+#   · 用户明确不要污染宿主机（`~/.zshenv` 是**整台机器**所有 zsh 都会读的文件）；
+#   · 这份文件是**随 `.wtool` 一起搬**的：路径一律用 `${WTOOL_HOME}` 现算，
+#     不写死任何机器的绝对路径；
+#   · 谁读它：`env.*` 导出的 `ZDOTDIR=$WTOOL_HOME`（见上面那块）。
+#     读完立刻把 `ZDOTDIR` 还原成 `$HOME` —— 保证随后仍然读**用户自己的** `~/.zshrc`。
+#
+# 内容要和 `shell/zsh/scripts/install.sh` ⑤ 写的那份**逐字一致**（那份是项目自己的
+# 职责；引擎这份管"还没 bootstrap 时"和"整机包里"）。
+ZSHENV_TEXT = """# 由 wtool 生成 —— **别手改**，重装会覆盖。
+# 读法：ZDOTDIR 指向这里时 zsh 会自动读它（在任何 rc、任何模块加载之前）。
+# 路径一律用 ${WTOOL_HOME} 现算（**不许写死某台机器的绝对路径** —— 这份文件
+# 会被打进整机包，装到别人的机器上；写死就会去不存在的目录找 .so）。
+if [ -n "${ZSH_VERSION:-}" ] && [ -d "${WTOOL_HOME}/usr/lib/zsh" ]; then
+    module_path=("${WTOOL_HOME}/usr/lib/zsh/$ZSH_VERSION" $module_path)
+    fpath=("${WTOOL_HOME}/usr/share/zsh/$ZSH_VERSION/functions" "${WTOOL_HOME}/usr/share/zsh/site-functions" $fpath)
+fi
+# 读完立刻把 ZDOTDIR 还原成 HOME —— 这样随后仍然读你的 ~/.zshrc
+ZDOTDIR="$HOME"
+export ZDOTDIR
 """
 
 # rc 里那两行的判据（幂等用）。允许行尾注释、允许 `~`。
@@ -3516,26 +3597,36 @@ def collect_env_blocks(state, shell, exclude=""):
     return found
 
 
-def render_env_file(home, state, shell, exclude=""):
-    """算出 `$WTOOL_HOME/env.<shell>` 的新内容（None = 不该存在，要删）。
+def render_env_file(home, state, shell, exclude="", engine=""):
+    """算出 `$WTOOL_HOME/env.<shell>` 的新内容。
+
+    ‼️ 2026-10-22 起**永远不返回 None**：文件的第一块是**引擎自身**的 PATH/ZDOTDIR
+    （`ENGINE_ENV_BLOCK`），它不依赖任何项目 —— 整机包刚解开、一个项目都没装时，
+    这份文件必须已经能让 `wtool` 跑起来（`wtool` / `wtool status` / `wtool bootstrap`）。
 
     结构（两个 shell **只有文件后缀不同**，正文一模一样）：
 
         ① `ENV_CHECK_LINES`（校验片段，逐字等价）
-        ② 按 (priority, 项目路径) 升序 source 各项目的 env 块 —— 用
+        ② `ENGINE_ENV_BLOCK`（引擎自己的 PATH + ZDOTDIR；**0 个项目时只有它**）
+        ③ 按 (priority, 项目路径) 升序 source 各项目的 env 块 —— 用
            `${WTOOL_HOME}` 相对写法（`.wtool` 搬位置时一个字都不用改）
     """
     home = os.path.abspath(home)
+    engine = (engine or DEFAULT_ENGINE_REL).strip("/")
+    if not engine:
+        engine = DEFAULT_ENGINE_REL
     blocks = collect_env_blocks(state, shell, exclude=exclude)
-    # 这个 shell 一个项目的块都没有，但**只要还有项目装着**，两个文件就都要在
-    # （D42：`install.sh` 的职责④是"建 env.{zsh,bash}"）。理由是最难查的半装状态：
-    # 公司机器上没有 zsh 时，用户照着文档写 `source …/env.bash`，文件不存在
-    # → `source: No such file`，或者（更坏）被 rc 里的 `-f` 判据静默跳过，
-    # 敲 `wtool` 却是 command not found。没有块的那个文件里**只有校验片段**，
-    # 照样能一眼看出"该在你的 rc 里写哪两行"。
-    if not blocks and not _installed_ids(state, exclude, home):
+    # 什么时候**不该有**这个文件：一个项目都没装、而且这台机器不是"install.sh
+    # 种下来的"（没有 `$WTOOL_HOME/install.sh` 那条入口链）。
+    #   · 配对契约：`wtool install` → `wtool uninstall` 之后 $HOME 要回到装之前
+    #     （pairing_test 的断言，也是"撤干净"的含义）；
+    #   · 但整机包 / 跑过 install.sh 的机器：**0 个项目也是合法状态**，env 要在
+    #     （引擎自身的 PATH 是 `wtool` 能跑起来的前提，用户口径 2026-10-22）。
+    # 判据用"入口链在不在"—— 它是 install.sh 造的、`uninstall` 不收的东西。
+    _seeded = os.path.lexists(os.path.join(home, "install.sh"))
+    if not blocks and not _installed_ids(state, exclude, home) and not _seeded:
         return None
-    parts = [ENV_AGG_HEADER]
+    parts = [ENV_AGG_HEADER, "", ENGINE_ENV_BLOCK % (engine, engine)]
     for _prio, pid, text in blocks:
         src = os.path.join(home, STATE_VAR_SUBDIR, pid, "env.%s" % shell)
         rel = os.path.relpath(src, home)
@@ -3561,20 +3652,23 @@ def render_env_file(home, state, shell, exclude=""):
         parts.append('[ -r "$WTOOL_PROJECT_DIR/env.%s" ] || . "${WTOOL_HOME}/%s"'
                      % (shell, rel))
         parts.append("# <<< wtool:%s <<<" % pid)
+    if shell == "zsh" and blocks:
+        parts.append("")
+        parts.append(ENV_PROMPT_FINALIZER)
     return "\n".join(ENV_CHECK_LINES + parts).rstrip("\n") + "\n"
 
 
-def render_env(home, state, shell, exclude="", keep_rc=False):
+def render_env(home, state, shell, exclude="", keep_rc=False, engine=""):
     """算出两个文件的新内容：用户的 rc，和 `$WTOOL_HOME/env.<shell>`。
 
     返回 (rc_path, rc_text|None, agg_path, agg_text|None)
-    None 表示这个文件不该存在（要删掉）。
+    rc_text=None 表示这个文件不该存在（要删掉）；env 汇总**永远有内容**（引擎块）。
     """
     home = os.path.abspath(home)
     rc_path = os.path.join(_managed_home() or home, ".%src" % shell)
     agg_path = os.path.join(home, "env.%s" % shell)
 
-    agg_text = render_env_file(home, state, shell, exclude=exclude)
+    agg_text = render_env_file(home, state, shell, exclude=exclude, engine=engine)
     old = read_text(rc_path)
     if keep_rc:
         # `wtool move` 那条路：这个项目并没有消失，只是换了名字 ——
@@ -3582,7 +3676,12 @@ def render_env(home, state, shell, exclude="", keep_rc=False):
         # 当成真的，顺手把那两行剥掉，实测踩过）。
         rc_text = old
     else:
-        rc_text = render_rc(home, shell, old, want_lines=agg_text is not None)
+        # 用户 rc 里那两行的去留跟着"还有没有项目装着"（不是跟着 env 文件在不在）：
+        # `uninstall` 撤掉最后一个项目时要**剥干净**（配对契约）；装过东西时不动。
+        # ‼️ 2026-10-22 从 `agg_text is not None` 改过来：env 现在是**永远有**的
+        #    （引擎自身那段），再拿它当判据就永远剥不掉了（pairing_test 实测）。
+        rc_text = render_rc(home, shell, old,
+                            want_lines=bool(_installed_ids(state, exclude, home)))
     return rc_path, rc_text, agg_path, agg_text
 
 
@@ -3596,10 +3695,12 @@ def plan_env(args, scratch):
     rows = []
     exclude = getattr(args, "exclude", "") or ""
     keep_rc = bool(getattr(args, "keep_rc", False))
+    engine = getattr(args, "engine", "") or DEFAULT_ENGINE_REL
     for shell in ("zsh", "bash"):
         rc_path, rc_text, agg_path, agg_text = render_env(args.home, args.state,
                                                           shell, exclude=exclude,
-                                                          keep_rc=keep_rc)
+                                                          keep_rc=keep_rc,
+                                                          engine=engine)
 
         if rc_text is None:
             if os.path.isfile(rc_path):
@@ -5036,256 +5137,168 @@ def offline_all_set(args):
 
 
 def offline_all_plan(args):
-    """整机迁移包的**清单**（ADR-0045 §2.4 / D38 / D39 / D44 / D45 + 2026-10-21）。
+    """整机迁移包的清单 —— 包 = **一个"还没装任何项目"的 .wtool**（2026-10-22 用户口径）。
 
-    ⚠️ **读的是"干净临时家目录"的账本**，不是真机的账本（用户 2026-10-21 口径：
-    整机包 = 工作区里所有可发布项目的完整集合，与"本机装了什么"无关）。
-    构造那份家的活儿归 `wt_pack_offline_all`：它在 scratch 里建一个临时
-    `$WTOOL_HOME`、把 `offline-all-set` 列出的项目**全部 install 一遍**，
-    再拿那份账本喂给这里。`--set` 是那条口径的**断言**：
-    账本里的项目必须与工作区算出来的集合**逐个相同**，多一个少一个都算错。
+    形状（`tar xf` 解开就是它）：
 
-    写进 scratch 的（都是给 shell 读的一张表，shell 负责真的拷文件）：
-      all.tsv          资产名 / 形状 / 发行版 / 账本项目数
-      all.projects.tsv `项目id \\t kind \\t 活的项目目录`
-      all.files.tsv    `项目id \\t 包内相对路径 \\t 源绝对路径 \\t f|l|s`（L1 实体化的料）
-      all.links.tsv    `包内相对路径 \\t 链目标 \\t dir|file`（**L2 保持为链**）
-      all.verbatim.tsv `包内相对路径 \\t 源绝对路径`（env 汇总 / 账本 / manifest 三件套）
-      all.warn.tsv     异常与提醒（**报告，不静默**）
-      all.error.tsv    致命项（非空 → shell 不打包）
+        .wtool/
+          env.zsh / env.bash          ← **只有引擎自身的 PATH + ZDOTDIR**（0 个项目）
+          .zshenv                     ← module_path/fpath（用 ${WTOOL_HOME} 现算）
+          install.sh → wtool/install.sh
+          wtool/
+            .repo/manifests/{default.xml,.sha256,.commitid}
+            <项目 1>/ …               ← **原样拷**（源码 + __output + scripts/ + env.*）
+            <项目 2>/ …
+            …
+    **没有** `usr/`、**没有** `var/`、**没有** L1 链（`wtool/<id>` 是实体目录）。
+    目标机上 `wtool` 列出的全是「未安装」；`wtool bootstrap` 才把它们装起来
+    （离线，用包里每项目自带的 `__output/`）。
+
+    做法（用户原话）："不要再在临时家里把 53 个项目 install 一遍，改成按 set.tsv
+    把项目内容**原样拷**进 build 树（排除 .git/__release/__layer；__output 保留）"。
+
+    写进 scratch 的（shell 照它干活）：
+      all.tsv           资产名 / 形状 / 发行版 / 项目数 / 文件数
+      all.projects.tsv  `项目id \t kind \t 活的项目目录 \t 文件数 \t 字节数`
+      all.verbatim.tsv  `包内相对路径 \t 源绝对路径`（manifest 的 default.xml）
+      all.installer.tsv `包内相对路径 \t 链目标 \t -`（两条入口链）
+      all.trio.tsv      `相对路径 \t 内容`（.sha256 / .commitid：按包里那份重算）
+      all.warn.tsv      异常与提醒（**报告，不静默**）
+      all.error.tsv     致命项（非空 → shell 不打包）
     """
-    home = os.path.abspath(args.home)
     root = os.path.abspath(args.root) if args.root else ""
     scratch = args.scratch
     os.makedirs(scratch, exist_ok=True)
     osver = (args.os_version or "").strip()
+    engine = (getattr(args, "engine", "") or DEFAULT_ENGINE_REL).strip("/") \
+        or DEFAULT_ENGINE_REL
     warns = []
     errors = []
 
-    if not os.path.isdir(home):
-        errors.append("$WTOOL_HOME 不存在: %s" % home)
-    projects = ledger_projects(home)
-    if not projects:
-        errors.append("账本里一个项目都没有（%s/var）—— 临时家里一个项目都没装上？" % home)
-
-    # 断言：账本 == 工作区算出来的「所有可发布项目」（`offline-all-set` 那张表）。
-    # 少一个 = 包里会漏（用户点名"不许因为本机没装就漏掉"）；多一个 = 包里混进了
-    # 不该发布的（kind=none / 类型不支持 / 工作区里根本没有）。
+    # ---- 项目集合：**只认 set.tsv**（工作区里所有可发布项目，与本机装没装无关）--
     setp = getattr(args, "set_tsv", "") or ""
-    if setp:
-        want_pids = [r[0] for r in _read_tsv(setp) if r and r[0]]
-        have_pids = [pr["pid"] for pr in projects]
-        miss = sorted(set(want_pids) - set(have_pids))
-        extra = sorted(set(have_pids) - set(want_pids))
-        if miss:
-            errors.append("临时账本里少了 %d 个可发布项目（包里会漏！）: %s"
-                          % (len(miss), ", ".join(miss)))
-        if extra:
-            errors.append("临时账本里多了 %d 个不在可发布集合里的项目: %s"
-                          % (len(extra), ", ".join(extra)))
-        if not miss and not extra:
-            warns.append("项目集合断言通过：账本 %d 个 == 工作区可发布 %d 个"
-                         % (len(have_pids), len(want_pids)))
-
-    # `<publish kind="none"/>` 的项目**不进整机包**（用户 2026-10-20 口径：
-    # dsh-projects/ 下那些只有开发机上需要的项目不参与打包发布）。
-    # ‼️ 连**账本**（var/<项目>）一起排除：包里留着它的安装记录、却没有
-    #    `wtool/<项目>` 的文件，目标机上 `check` 会报"声明与磁盘对不上"。
-    kept = []
-    skipped = []
-    for pr in projects:
-        if pr["live"] and is_no_release(pr["live"]):
-            skipped.append(pr)
-            warns.append("%s：声明了 <publish kind=\"none\"/>（不参与发布）—— "
-                         "整机包里**不含**它（账本那一条也一起排除）" % pr["pid"])
-        else:
-            kept.append(pr)
-    projects = kept
-    _skipped_var = {os.path.join(home, "var", pr["pid"]) for pr in skipped}
-
-    files_rows = []          # pid, dest_rel, src_abs, kind
-    links_rows = []          # dest_rel(under home), target, type
-    project_rows = []
-    for pr in projects:
-        pid, live = pr["pid"], pr["live"]
-        kind = _kind_of_project(live) if live else "-"
-        project_rows.append((pid, kind or DEFAULT_PROJECT_KIND, live or "-"))
-        if not live:
-            errors.append("%s：账本里的 project_root 指不到东西（%s）"
-                          % (pid, _kv(read_text(os.path.join(pr["var"], "meta.tsv"))).get("project_root", "-")))
-            continue
-        ent = ledger_entries(home, pid)
-        if not ent["l1"]:
-            warns.append("%s：账本里没有 L1 链的记录（journal.tsv）—— 包里它会只靠文件存在，"
-                         "目标机上 `uninstall` 可能撤不干净" % pid)
-        for _dest, target, _t in ent["l1"]:
-            if target and not is_under(target, home) and not os.path.isdir(target):
-                errors.append("%s：L1 链指向的项目目录不存在（%s）" % (pid, target))
-        closure, cw = project_closure(live, osver)
-        for w in cw:
-            warns.append("%s：%s" % (pid, w))
-        if not closure:
-            errors.append("%s：闭包里一个文件都没有（包里它是空的，目标机上装不出东西）" % pid)
-        for dest_rel, src_abs, k in closure:
-            files_rows.append((pid, dest_rel, src_abs, k))
-            _forbid_check(pid, dest_rel, errors)
-
-    # ---- L2：**保持为链**，但目标必须在包内解析得到（判据 2）-------------------
-    _bundle_paths = set()
-    for pid, dest_rel, _s, _k in files_rows:
-        _bundle_paths.add(os.path.join(DIR_WTOOL, pid, dest_rel))
-    # ③ docker 的闭包按 target 收（`__output/ubuntu_24.04/usr/…`），而 L2 链指的是
-    # 别名 `__output/usr/…` —— 它**在包内**经别名链解析得到，不是悬空。
-    # 所以这几种前缀也算"闭包内"（判据仍是"解得到"，不是放宽）。
-    _alias_prefix = set()
-    for _pid, _dest, _src, _k in files_rows:
-        if _k == "s" and _dest.endswith("/usr"):
-            _alias_prefix.add(os.path.join(DIR_WTOOL, _pid, _dest).replace(os.sep, "/"))
-    for pr in projects:
-        pid = pr["pid"]
-        for dest, target, _t in ledger_entries(home, pid)["l2"]:
-            rel = os.path.relpath(dest, home)
-            links_rows.append((rel, target, "dir" if os.path.isdir(dest) else "file"))
-            if os.path.isabs(target):
-                warns.append("%s：L2 链 %s 是**绝对**链（%s）—— 搬过去就是断链。"
-                             "正常的 L2 一律是相对链（ADR-0045 / D7）" % (pid, rel, target))
-                continue
-            inside = os.path.normpath(os.path.join(os.path.dirname(rel), target))
-            if inside in _bundle_paths or _any_under(_bundle_paths, inside):
-                continue
-            if any(inside == a or inside.startswith(a + "/") for a in _alias_prefix):
-                continue                       # 经 `__output/usr` 别名链解析得到
-            warns.append("%s：L2 链 %s 的目标 %s 不在这次算出的闭包里 —— "
-                         "包里它会**悬空**（报告出来，别静默："
-                         "多半是某个 <export_*> 指到了没进包的东西）" % (pid, rel, target))
-
-    # ---- L2b：**项目脚本装出来的东西**（不在 journal 里，但目标机上要用）------
-    # 例：`tools/android_repack/scripts/install.sh` 在 `$WTOOL_HOME/usr/bin/` 里建
-    # `wpack` 那条链。它不是引擎建的（journal 里没有它），闭包也不会收 —— 少了它
-    # 目标机上就是"装完了却 command not found"（2026-10-21 逐项目功能验证时抓到）。
-    # 判据：`usr/**` 下**不在账本 L2 里**的软链，且解析得到**闭包内**的项目文件
-    # → 收进包，改写成**相对**链（脚本建的那条是绝对路径，搬走就断）。
-    _known_l2 = set()
-    for pr in projects:
-        for dest, _t, _ty in ledger_entries(home, pr["pid"])["l2"]:
-            _known_l2.add(os.path.normpath(dest))
-    _live_of = {pr["pid"]: pr["live"] for pr in projects if pr["live"]}
-    usr_root = os.path.join(home, DIR_USR)
-    if os.path.isdir(usr_root):
-        for dirpath, dirnames, filenames in os.walk(usr_root):
-            for name in list(dirnames) + list(filenames):
-                p = os.path.join(dirpath, name)
-                if not os.path.islink(p):
-                    continue
-                if os.path.normpath(p) in _known_l2:
-                    continue                       # 引擎建的那条，上面收过了
-                real = os.path.realpath(p)
-                _hit = ("", "")
-                for _pid, _lv in _live_of.items():
-                    if _lv and (real == _lv or real.startswith(_lv.rstrip("/") + "/")):
-                        _hit = (_pid, os.path.relpath(real, _lv).replace(os.sep, "/"))
-                        break
-                rel = os.path.relpath(p, home)
-                if not _hit[0]:
-                    warns.append("usr 下有一条链不是引擎建的、也解析不到任何项目里 —— "
-                                 "不进包: %s" % rel)
-                    continue
-                arc = os.path.join(DIR_WTOOL, _hit[0], _hit[1]).replace(os.sep, "/")
-                if arc not in _bundle_paths and not _any_under(_bundle_paths, arc):
-                    warns.append("%s：项目脚本装的 %s 指向 %s，而它**不在闭包里** —— "
-                                 "包里会悬空" % (_hit[0], rel, arc))
-                    continue
-                _relink = os.path.relpath(arc, os.path.dirname(rel))
-                links_rows.append((rel, _relink, "dir" if os.path.isdir(real) else "file"))
-                warns.append("%s：项目脚本装的命令也进包了：%s → %s（改写成相对链）"
-                             % (_hit[0], rel, _relink))
-
-    # ---- L1 是**链**（开发机的正常形态）；包里的实体化由 shell 做 --------------
-    for pr in projects:
-        if not pr["live"]:
-            continue
-        link = os.path.join(home, DIR_WTOOL, pr["pid"])
-        if not os.path.islink(link):
-            warns.append("%s：%s 在**这台机器上**就不是链（开发机该是链，一切皆链 —— §1.7）；"
-                         "包按实体化处理，不影响结果" % (pr["pid"], link))
-        else:
-            tgt = os.readlink(link)
-            if not os.path.isabs(tgt):
-                warns.append("%s：L1 链是相对链（%s）—— 开发机上该是**绝对**链指向工作区"
-                             % (pr["pid"], tgt))
-
-    # ---- 原样搬：env 汇总 / 账本 / manifest 三件套 / 安装器入口链 -------------
-    verbatim = []
-    for name in ("env.zsh", "env.bash"):
-        p = os.path.join(home, name)
-        if os.path.isfile(p):
-            verbatim.append((name, p))
-        else:
-            errors.append("$WTOOL_HOME/%s 不在 —— 目标机上 source 不出 wtool 命令" % name)
-    # `$WTOOL_HOME/.zshenv` **必须进包**（2026-10-21）：
-    # zsh 的 module_path/fpath 是编译时前缀、MODULE_PATH 又不允许从环境导入，
-    # 只能靠 `.zshenv` 在"任何 rc、任何模块加载之前"改。而整机包是一份**已装好的**
-    # .wtool —— 目标机不会重跑 shell/zsh 的 install.sh，所以这份文件不会自己出现；
-    # 少了它，从 bash 敲 `zsh`（env.* 导出了 ZDOTDIR=$WTOOL_HOME）会去读一个
-    # 不存在的文件，然后还是去 /root/.wtool/usr/… 找 .so（VM 实测的
-    # "zsh: failed to load module 'zsh/zle' ... Permission denied"）。
-    _zshenv = os.path.join(home, ".zshenv")
-    if os.path.isfile(_zshenv):
-        verbatim.append((".zshenv", _zshenv))
-    # 不在也不报：这个函数在"往临时家里装项目"之前就跑，那时 .zshenv 还没生成；
-    # 真正的兜底在 `wt_pack_offline_all` 的 ⑨（tar 之前从 $WTOOL_HOME 补一份）。
-    var = os.path.join(home, "var")
-    # 账本进包的判据 = **闭包**（D38），不是"整棵 var 原样搬"。
-    #   · `var/<pid>/**` 只有 <pid> 在闭包里才进包；
-    #   · var 顶层的散文件（`registry.tsv`）进包；
-    #   · `var/installer/**` 进包（安装器自己的账，`check` 要照它验入口链）。
-    # ‼️ 2026-10-20 实测：源机上那些「只发布过、从没 install 过」的项目
-    #    （`var/<pid>/publish.tsv`，dev 机上 40 多个 musl-bins 工具）原样跟着进包，
-    #    而目标机上没有对应的 `wtool/<pid>` → `wtool check` 当场报一屏
-    #    "state 里还留着 publish.tsv，但磁盘上没有这个项目了"，rc=1。
-    #    那不是目标机的问题，是**包里多带了不该带的账**。
-    _closure_ids = set(pr["pid"] for pr in projects)
-    if os.path.isdir(var):
-        for dirpath, dirnames, filenames in os.walk(var):
-            rel = os.path.relpath(dirpath, var)
-            relp = "" if rel == "." else rel.replace(os.sep, "/")
-            # 不参与发布的项目：**账本那一条也不进包**（见上面 skipped 那段）
-            if any(dirpath == s or dirpath.startswith(s + os.sep) for s in _skipped_var):
-                continue
-            if relp:
-                _keep = (relp in _closure_ids or relp == "installer"
-                         or any(c.startswith(relp + "/") for c in _closure_ids))
-                if not _keep:
-                    dirnames[:] = []          # 不在闭包里：这一支整个不往下走
-                    continue
-            for f in filenames:
-                p = os.path.join(dirpath, f)
-                verbatim.append((os.path.relpath(p, home), p))
-    man = os.path.join(home, DIR_WTOOL, REPO_MANIFESTS)
-    # 三件套里的 `default.xml` 原样搬**内容**（开发机上它是指向工作区的绝对链）；
-    # `.sha256` / `.commitid` **不照抄** —— 见下面那段（包里那份必须自洽）。
-    p_xml = os.path.join(man, "default.xml")
-    if os.path.isfile(p_xml):
-        verbatim.append((os.path.join(DIR_WTOOL, REPO_MANIFESTS, "default.xml"), p_xml))
+    projects = []
+    if not setp or not os.path.isfile(setp):
+        errors.append("缺少项目集合（`offline-all-set` 算的 set.tsv）—— 没有它不知道拷谁")
     else:
-        errors.append("manifest 三件套缺 default.xml（目标机上 `check` / `install.sh` 都要它）")
+        for row in _read_tsv(setp):
+            if not row or not row[0]:
+                continue
+            pid = row[0]
+            kind = row[1] if len(row) > 1 else "-"
+            live = row[2] if len(row) > 2 else ""
+            live = os.path.abspath(live) if live else ""
+            if not is_safe_rel(pid):
+                errors.append("%s：项目身份非法（得是工作区相对路径）" % pid)
+                continue
+            if not live or not os.path.isdir(live):
+                errors.append("%s：项目目录不在磁盘上（%s）" % (pid, live or "-"))
+                continue
+            projects.append((pid, kind, live))
+    if not projects and not errors:
+        errors.append("项目集合是空的 —— 这不是一个能打整机包的集合")
 
-    # ---- manifest 三件套：包里那份必须**自洽**（否则目标机 install.sh 当场停手）--
-    # DESIGN §1.8 ③：满血工作区是"绝对链 + 现场算"；bundle 是"随包而来，**只校验、
-    # 不覆盖**，sha256 对不上就报错停手"。所以包里这三个文件必须互相对得上 ——
-    # 实测 2026-10-14：真机上 live 的 `.sha256` / `.commitid` 是**上一次 install 时**
-    # 算的，之后清单仓又提交过一次（加 shell/zsh），于是 live 那份已经陈旧；
-    # 照抄进包 = 目标机 install.sh 直接 die。→ **按包里那份 default.xml 重算**，
-    # 并把"live 陈旧"这件事报出来（报告不静默）。
+    # ---- 逐个项目：数文件 / 找事故产物 / 看产物在不在 -----------------------
+    project_rows = []
+    nfiles = 0
+    nbytes = 0
+    big = []
+    _WILD_MARKS = ("t_publish_repo_of", ".wtool-bak.", ".orig", ".rej", ".swp")
+    for pid, kind, live in projects:
+        nf = 0
+        nb = 0
+        for rel, src, is_link in _bundle_walk(live):
+            nf += 1
+            try:
+                sz = 0 if is_link else os.path.getsize(src)
+            except OSError:
+                sz = 0
+            nb += sz
+            base = os.path.basename(rel)
+            if any(m in rel for m in _WILD_MARKS) or base.endswith("~") \
+                    or base in ("musl.tar", "musl.tar.gz"):
+                errors.append("%s：包里会带上**野文件**（不是项目声明的东西）: %s/%s"
+                              % (pid, pid, rel))
+            if sz > 20 * 1024 * 1024 and not rel.startswith(DIR_OUT + "/"):
+                errors.append("%s：源文件大得不像话（>20 MB，多半是打包机上的事故产物："
+                              "%s/%s（%.1f MB）" % (pid, pid, rel, sz / 1048576.0))
+            big.append((sz, "%s/%s" % (pid, rel)))
+        nfiles += nf
+        nbytes += nb
+        project_rows.append((pid, kind, live, str(nf), str(nb)))
+        # 有 build.sh 却没有 __output：目标机上 bootstrap 会**跳过**它（"要先产出"），
+        # 那就不是"全部装好"了。这是打包前必须拦住的一条。
+        if os.path.isfile(os.path.join(live, "scripts", "build.sh")):
+            out = os.path.join(live, DIR_OUT)
+            if not os.path.isdir(out) or not os.listdir(out):
+                errors.append("%s：有 scripts/build.sh，但 __output/ 是空的 —— "
+                              "目标机上 bootstrap 会跳过它（先 build / download+unpack）"
+                              % pid)
+        # ②③ 类：产物就是它们的全部意义
+        if kind in ("muslbin", "docker") and not os.path.isdir(os.path.join(live, DIR_OUT)):
+            errors.append("%s：kind=%s 却没有 __output/ —— 目标机上装不出东西"
+                          % (pid, kind))
+
+    # ---- 入口链 / 引擎脚本 ------------------------------------------------
+    installer = [("install.sh", "wtool/install.sh")]
+    if root and os.path.isfile(os.path.join(root, engine, "scripts", "install.sh")):
+        installer.append(("wtool/install.sh",
+                          "%s/scripts/install.sh" % engine))
+    else:
+        errors.append("找不到引擎的安装脚本（%s/%s/scripts/install.sh）—— 入口链会断"
+                      % (root or "?", engine))
+    # ---- 共享文件：清单里写成 `../…` 的那种（`<generate cmd>` 会用到）---------
+    # 实测（2026-10-22）：`tools/musl-bins/direnv` 的 `<generate cmd="sh ../scripts/
+    # gen-direnv-hook.sh …">` 用的是**父目录**里的共享脚本。整机包只拷"项目目录"，
+    # 目标机上 `../scripts/` 就没了 → `wtool bootstrap` 在这一步当场失败。
+    # 规矩：包里的相对布局和工作区**一致**，所以清单里引用到的上级路径也一起进包
+    # （只收被引用的那一个，不整棵搬父目录）。
+    extras = []
+    if root:
+        _upat = re.compile(r"\.\./[A-Za-z0-9_.@%+~/-]+")
+        _seen_x = set()
+        _proj_dirs = [os.path.abspath(l) for _p, _k, l in projects]
+        for pid, _kind, live in projects:
+            _mtxt = read_text(os.path.join(live, "wtool.xml")) or ""
+            for m in _upat.finditer(_mtxt):
+                tok = m.group(0)
+                tgt = os.path.normpath(os.path.join(live, tok))
+                if not os.path.lexists(tgt):
+                    warns.append("%s：清单里引用了 %s，但它在磁盘上不存在 —— "
+                                 "目标机上那一步会失败" % (pid, tok))
+                    continue
+                rel = os.path.relpath(tgt, root).replace(os.sep, "/")
+                if rel.startswith("../"):
+                    errors.append("%s：引用的 %s 跑到工作区外了（%s）—— 不能进包"
+                                  % (pid, tok, rel))
+                    continue
+                if any(rel == d or rel.startswith(d + "/") for d in
+                       [os.path.relpath(x, root).replace(os.sep, "/") for x in _proj_dirs]):
+                    continue                      # 引用的是另一个项目（它自己会进包）
+                if rel in _seen_x:
+                    continue
+                _seen_x.add(rel)
+                extras.append((rel, tgt))
+        if extras:
+            warns.append("清单里引用到的**共享路径**也进包（相对布局不变）: %s"
+                         % "、".join(r for r, _s in extras))
+
+    # ---- manifest 三件套：包里那份必须**自洽** ---------------------------
+    verbatim = []
     trio = []
-    if os.path.isfile(p_xml):
+    man = os.path.join(root, ".repo", "manifests") if root else ""
+    p_xml = os.path.join(man, "default.xml") if man else ""
+    if not p_xml or not os.path.isfile(p_xml):
+        errors.append("工作区里没有 .repo/manifests/default.xml —— 整机包必须有 manifest")
+    else:
+        verbatim.append((os.path.join(DIR_WTOOL, REPO_MANIFESTS, "default.xml"), p_xml))
         got = _sha256_file(p_xml)
         _w = (read_text(os.path.join(man, "default.xml.sha256")) or "").split()
         want = _w[0] if _w else ""
         if want and want != got:
-            warns.append("**live 的 manifest 三件套是陈旧的**：default.xml.sha256 记的是 %s…，"
-                         "而 default.xml 实际是 %s… —— 包里按包里那份**重算**"
-                         "（不重算的话，目标机上 install.sh「只校验、不覆盖」会当场报错停手）"
+            warns.append("**live 的 manifest 三件套是陈旧的**：default.xml.sha256 记的是 "
+                         "%s…，而 default.xml 实际是 %s… —— 包里按包里那份**重算**"
+                         "（不重算的话，目标机上 install.sh「只校验、不覆盖」会当场停手）"
                          % (want[:12], got[:12]))
         live_cid = (read_text(os.path.join(man, "default.xml.commitid")) or "").strip()
         cid = ""
@@ -5301,50 +5314,64 @@ def offline_all_plan(args):
             cid = live_cid
         if cid and live_cid and cid != live_cid:
             warns.append("**live 的 .commitid 也陈旧**：记的是 %s…，清单仓 HEAD 是 %s… —— "
-                         "包里写 HEAD（那一版清单才真的对应这个 commit）"
-                         % (live_cid[:12], cid[:12]))
+                         "包里写 HEAD" % (live_cid[:12], cid[:12]))
         if cid:
             trio.append(("default.xml.sha256", "%s  default.xml" % got))
             trio.append(("default.xml.commitid", cid))
         else:
-            errors.append("算不出 manifest 的 commitid（清单仓读不到 HEAD，"
-                          "包里的 .commitid 也没内容）")
-    if os.path.islink(p_xml):
-        warns.append("manifest 的 default.xml 在**这台机器上**是绝对链（指向工作区）—— "
-                     "包里必须换成实体（引擎会拷内容），否则目标机上直接悬空")
-
-    # ---- 报告：$WTOOL_HOME 里"不该进包"的东西（**列出来，让人看得见**）-------
-    # 判据是"在不在上面三张表里"（= 在不在闭包里），不看内容。
-    _keep = {d for d, _p in verbatim} | {d for d, _t, _k in links_rows} \
-        | {os.path.join(DIR_WTOOL, p) for p, _k, _l in project_rows} \
-        | {d for d, _t in installer_links(home)}
-    residue = _home_residue(home, _keep)
-    for r in residue:
-        warns.append("不进包（构造保证：只收闭包）: %s" % r)
+            errors.append("算不出 manifest 的 commitid（清单仓读不到 HEAD）")
+        if os.path.islink(p_xml):
+            warns.append("manifest 的 default.xml 在这台机器上是绝对链（指向工作区）—— "
+                         "包里必须换成实体（引擎会拷内容）")
 
     asset = bundle_asset_for(osver)
     with open(os.path.join(scratch, "all.tsv"), "w", encoding="utf-8") as fh:
-        for k, v in (("asset", asset), ("shape", "dotwtool"), ("prefix", ".wtool/"),
-                     ("osver", osver or "-"), ("home", home),
-                     ("check", bundle_check_name(osver)),
+        for k, v in (("asset", asset), ("shape", "uninstalled"),
+                     ("prefix", ".wtool/"), ("osver", osver or "-"),
+                     ("engine", engine),
                      ("projects", str(len(projects))),
-                     ("files", str(len(files_rows))),
-                     ("links", str(len(links_rows))),
-                     ("root", root or "-"),
-                     ("target_link", installer_links(home)[0][1] if installer_links(home) else "")):
+                     ("files", str(nfiles)),
+                     ("bytes", str(nbytes)),
+                     ("root", root or "-")):
             fh.write("%s\t%s\n" % (k, v))
     _write_tsv(os.path.join(scratch, "all.projects.tsv"), project_rows)
-    _write_tsv(os.path.join(scratch, "all.files.tsv"), files_rows)
-    _write_tsv(os.path.join(scratch, "all.links.tsv"), links_rows)
+    _write_tsv(os.path.join(scratch, "all.extra.tsv"), extras)
     _write_tsv(os.path.join(scratch, "all.verbatim.tsv"), verbatim)
-    _write_tsv(os.path.join(scratch, "all.installer.tsv"), installer_links(home))
-    # 三件套里**要重算**的两件（内容由 planner 定，shell 只负责落盘）
+    _write_tsv(os.path.join(scratch, "all.installer.tsv"), installer)
     _write_tsv(os.path.join(scratch, "all.trio.tsv"), trio)
     _write_tsv(os.path.join(scratch, "all.warn.tsv"), [(w,) for w in warns])
     _write_tsv(os.path.join(scratch, "all.error.tsv"), [(e,) for e in errors])
-    return {"asset": asset, "osver": osver, "home": home, "projects": project_rows,
-            "files": files_rows, "links": links_rows, "verbatim": verbatim,
-            "trio": trio, "warns": warns, "errors": errors}
+    big.sort(reverse=True)
+    for sz, rel in big[:5]:
+        if sz > 1024 * 1024:
+            print("  最大文件: %8.2f MB  %s" % (sz / 1048576.0, rel))
+    return {"asset": asset, "osver": osver, "projects": project_rows,
+            "installer": installer, "verbatim": verbatim, "trio": trio,
+            "extras": extras,
+            "warns": warns, "errors": errors, "files": nfiles, "bytes": nbytes}
+
+
+# 整机包里**绝不收**的目录名（用户点名）：VCS 内部状态 / 打包产物 / 容器层。
+BUNDLE_EXCLUDE_DIRS = (".git", "__release", "__layer")
+
+
+def _bundle_walk(live):
+    """项目目录里**要进包**的条目：`[(相对路径, 绝对路径, 是不是软链)]`。
+
+    判据 = **原样拷**，只排除三样（用户原话）：`.git` / `__release` / `__layer`。
+    `__output` **保留**（这是"离线也能 bootstrap"的关键）。
+    ⚠️ 不跟软链走：链本身进包（tar 会原样存下来），链目标是什么不管。
+    """
+    for dirpath, dirnames, filenames in os.walk(live):
+        dirnames[:] = sorted(d for d in dirnames if d not in BUNDLE_EXCLUDE_DIRS)
+        for d in dirnames:
+            p = os.path.join(dirpath, d)
+            if os.path.islink(p):
+                yield (os.path.relpath(p, live).replace(os.sep, "/"), p, True)
+        for f in sorted(filenames):
+            p = os.path.join(dirpath, f)
+            yield (os.path.relpath(p, live).replace(os.sep, "/"), p,
+                   os.path.islink(p))
 
 
 def _any_under(paths, target):
@@ -5403,17 +5430,24 @@ def _tree_size(root):
 
 
 def offline_all_check(args):
-    """**整机包的 `--check`**（DESIGN §2.4 那四条判据 + D39 / D44 / D45）。
+    """整机包的 `--check` —— 2026-10-22 新语义：包 = **一个还没装任何项目的 .wtool**。
 
-    查的是**打好的包**（`--tar`）或**已铺开的树**（`--tree`），不是"我觉得应该没问题"：
+    判据（用户逐条点名的）：
 
-      1 L1 已**实体化**：`wtool/<项目>` 是实体目录、不是链、不悬空；
-      2 L2 **仍是链**：`usr/…` 下是**相对**链，且**在包内**解析得到；
-      3 没有禁品实体化进来：`.git` / `.repo/projects` / `.repo/project-objects` /
-        `__layer`；`__output` 允许，但只允许被 `<export_*>` 指定的那部分；
-      4 异常**报告、不静默**：异常体积/路径、以及闭包之外仍指向包外的链。
+      1 顶层只有 `.wtool/`（`tar xf` 即得 `.wtool` 目录）；
+      2 **没有** `.wtool/usr/`、**没有** `.wtool/var/` —— 未安装状态是干净的；
+      3 `wtool/<项目>` 是**实体目录**：不是 L1 链、不悬空、里面有 `wtool.xml`；
+      4 `.wtool/.zshenv` 在；`env.zsh`/`env.bash` 在，而且**一个项目块都没有**
+        （0 个项目已装 = 只有引擎自身那段 PATH + ZDOTDIR）；
+      5 入口链：`install.sh → wtool/install.sh → <引擎>/scripts/install.sh`，
+        **包内**解析得到（目标机上跑 `install.sh` 靠它）；
+      6 manifest 三件套自洽（default.xml 实体 + `.sha256` 对得上 + `.commitid` 非空）；
+      7 禁品：`.git` / `__release` / `__layer` / `.repo/projects` /
+        `.repo/project-objects` / `dist.json`；
+      8 ②③ 类项目的 `__output/` 在（否则目标机上 bootstrap 装不出东西）；
+      9 野文件 / 异常体积（判据同旧版：报告不静默，命中即致命）。
 
-    退出码：0 全过；1 有致命项（判据 1–3）；2 只有提醒。
+    退出码：0 全过；1 有致命项。
     """
     scratch = args.scratch
     os.makedirs(scratch, exist_ok=True)
@@ -5447,121 +5481,142 @@ def offline_all_check(args):
         return _check_report(args, tree, fatal, notes, {}, 1)
 
     home = os.path.join(tree, ".wtool")
-    wtool_dir = os.path.join(home, DIR_WTOOL)
-    usr_dir = os.path.join(home, DIR_USR)
+    wdir = os.path.join(home, DIR_WTOOL)
 
-    # ---- 0) 离线包不放 dist.json（D51；这条是"有没有串族"的哨兵）-----------
-    for dirpath, _dn, filenames in os.walk(home):
-        if "dist.json" in filenames:
-            fatal.append("包里出现 dist.json（%s）—— 离线族**不放** dist.json（D51）"
-                         % os.path.relpath(os.path.join(dirpath, "dist.json"), home))
-
-    # ---- 1) L1 已实体化 ----------------------------------------------------
-    projects = ledger_projects(home)
-    if not projects:
-        fatal.append("包里的账本（.wtool/var/）读不出项目 —— 目标机上 check/uninstall 都没有依据")
-    for pr in projects:
-        pid = pr["pid"]
-        p = os.path.join(wtool_dir, pid)
-        if os.path.islink(p):
-            fatal.append("L1 还是链（判据 1）: wtool/%s → %s" % (pid, os.readlink(p)))
-        elif not os.path.isdir(p):
-            fatal.append("L1 不是实体目录（判据 1）: wtool/%s" % pid)
-        elif not os.listdir(p):
-            fatal.append("L1 是空目录（判据 1）: wtool/%s" % pid)
+    # ---- 1) 未安装状态：**没有** usr/、**没有** var/ -----------------------
+    for name in (USR_SUBDIR, STATE_VAR_SUBDIR):
+        p = os.path.join(home, name)
+        if os.path.lexists(p):
+            what = "软链 → %s" % os.readlink(p) if os.path.islink(p) else "目录"
+            fatal.append("包里不该有 `.wtool/%s`（%s）—— 整机包是一份**还没装**的 .wtool，"
+                         "装出来的东西由目标机的 `wtool bootstrap` 现做" % (name, what))
         else:
-            n = sum(len(f) for _d, _s, f in os.walk(p))
-            notes.append("L1 实体: wtool/%-34s %4d 个文件" % (pid, n))
+            notes.append("✔ 没有 .wtool/%s（未安装状态，用户口径）" % name)
 
-    # ---- 2) L2 仍是链 + 包内可解析 -----------------------------------------
-    n_l2 = 0
-    for dirpath, dirnames, filenames in os.walk(usr_dir):
-        for name in list(dirnames) + list(filenames):
-            p = os.path.join(dirpath, name)
-            if name in dirnames and not os.path.islink(p):
-                continue                      # usr/bin 这种共享实体目录（D7）
-            if not os.path.islink(p):
-                continue
-            n_l2 += 1
-            rel = os.path.relpath(p, home)
-            tgt = os.readlink(p)
-            if os.path.isabs(tgt):
-                fatal.append("L2 是绝对链（判据 2）: %s → %s" % (rel, tgt))
-            elif not os.path.exists(p):
-                fatal.append("L2 在**包内**解析不到（判据 2）: %s → %s" % (rel, tgt))
-            if name in dirnames:
-                dirnames.remove(name)         # 链本身不是目录，不跟进去
-    if n_l2 == 0:
-        notes.append("usr/ 下一条 L2 链都没有（这台机器没装 ②③ 类项目？）")
+    # ---- 2) 项目：**实体目录** + 有 wtool.xml ------------------------------
+    projects = []
+    for dirpath, dirnames, filenames in os.walk(wdir):
+        rel = os.path.relpath(dirpath, wdir)
+        if rel.split(os.sep)[0] == ".repo":
+            dirnames[:] = []
+            continue
+        if "wtool.xml" in filenames:
+            projects.append(dirpath)
+            dirnames[:] = []                 # 一个项目一棵树，不再往下找嵌套清单
+    if not projects:
+        fatal.append("包里一个项目都没有（`wtool/` 下没有 wtool.xml）")
+    for pdir in sorted(projects):
+        pid = os.path.relpath(pdir, wdir).replace(os.sep, "/")
+        if os.path.islink(pdir):
+            fatal.append("`wtool/%s` 还是条链（→ %s）—— 必须是**实体目录**"
+                         % (pid, os.readlink(pdir)))
+            continue
+        n = 0
+        for _d, _s, fns in os.walk(pdir):
+            n += len(fns)
+        if n == 0:
+            fatal.append("`wtool/%s` 是空的" % pid)
+            continue
+        kind = _kind_of_project(pdir) or "-"
+        if kind in ("muslbin", "docker"):
+            out = os.path.join(pdir, DIR_OUT)
+            if not os.path.isdir(out) or not os.listdir(out):
+                fatal.append("`wtool/%s`（kind=%s）的 `__output/` 是空的 —— "
+                             "目标机上装不出东西" % (pid, kind))
+        notes.append("项目实体: wtool/%-34s %-8s %4d 个文件" % (pid, kind, n))
 
-    # ---- 3) 禁品 + `__output` 只带被导出的那部分 ---------------------------
+    # ---- 3) 禁品 -----------------------------------------------------------
     for dirpath, dirnames, filenames in os.walk(home):
         for name in list(dirnames):
             p = os.path.join(dirpath, name)
             rel = os.path.relpath(p, home)
-            if name == ".git":
-                fatal.append("禁品实体化进来了（判据 3）: %s" % rel)
-            if name == DIR_LAYER:
-                fatal.append("禁品实体化进来了（判据 3）: %s" % rel)
+            if name in (".git", DIR_LAYER, "__release"):
+                fatal.append("禁品在包里（判据 7）: %s" % rel)
             if name == "projects" and os.path.dirname(rel) == os.path.join(DIR_WTOOL, ".repo"):
-                fatal.append("禁品实体化进来了（判据 3）: %s" % rel)
+                fatal.append("禁品在包里（判据 7）: %s" % rel)
             if name == "project-objects":
-                fatal.append("禁品实体化进来了（判据 3）: %s" % rel)
-    # `__output` 下必须只有被 <export_*> / <generate> 指定的那部分
-    for pr in projects:
-        pid = pr["pid"]
-        pdir = os.path.join(wtool_dir, pid)
-        if not os.path.isdir(pdir):
-            continue
-        outdir = os.path.join(pdir, DIR_OUT)
-        if not os.path.isdir(outdir):
-            continue
-        allowed = set()
-        exports, generates, _e = _export_sources(pdir)
-        for rel in exports:
-            allowed.add(rel)
-        for rel in generates:
-            allowed.add(rel)
-        # ③ docker：`__output/ubuntu_<ver>/**` **每一套都在允许清单里**
-        # （2026-10-21 新口径：整机包带**所有 target**，目标机装机时再挑）。
-        # 不加上这一段的话，22/26 那两套会被当成"没被 <export_*> 指定"报出来。
-        try:
-            _targets = [t for t, _img in docker_targets(pdir)]
-        except ValueError:
-            _targets = []
-        # 包里**不带** `build/targets.tsv`（目标机不构建）→ 那就看磁盘上有哪几套。
-        # 整机包按 2026-10-21 口径把**所有 target** 都带上了，都是合法的。
-        if os.path.isdir(outdir):
-            for _d in os.listdir(outdir):
-                if _d.startswith("ubuntu_") and os.path.isdir(os.path.join(outdir, _d)):
-                    _targets.append(_d)
-        for t in sorted(set(_targets)):
-            allowed.add(DIR_OUT + "/" + t)
-        for dirpath, _dn, filenames in os.walk(outdir):
-            for f in filenames:
-                p = os.path.join(dirpath, f)
-                rel = os.path.relpath(p, pdir).replace(os.sep, "/")
-                if not any(rel == a or rel.startswith(a.rstrip("/") + "/") for a in allowed):
-                    notes.append("__output 里出现了没被 <export_*>/<generate> 指定"
-                                 "的东西（判据 3，报告不静默）: %s/%s" % (pid, rel))
+                fatal.append("禁品在包里（判据 7）: %s" % rel)
+        if "dist.json" in filenames:
+            fatal.append("包里出现 dist.json（%s）—— 离线族**不放** dist.json（D51）"
+                         % os.path.relpath(dirpath, home))
 
-    # ---- 4) manifest 三件套 / 体积 / 包外的链 ------------------------------
-    man = os.path.join(wtool_dir, REPO_MANIFESTS)
+    # ---- 4) env / .zshenv --------------------------------------------------
+    zs = os.path.join(home, ".zshenv")
+    if not os.path.isfile(zs):
+        fatal.append("`.wtool/.zshenv` 不在 —— 目标机上 zsh 加载不到动态模块"
+                     "（module_path/fpath 只能在那儿改）")
+    else:
+        ztxt = read_text_rel(home, ".zshenv")
+        if "module_path" not in ztxt or "ZDOTDIR" not in ztxt:
+            fatal.append("`.wtool/.zshenv` 里没有 module_path / 还原 ZDOTDIR 的那段")
+        else:
+            notes.append("✔ .wtool/.zshenv 在（module_path/fpath + 还原 ZDOTDIR）")
+    for shell in ("zsh", "bash"):
+        f = os.path.join(home, "env.%s" % shell)
+        if not os.path.isfile(f):
+            fatal.append("$WTOOL_HOME/env.%s 不在包里 —— 目标机上 source 不出 wtool" % shell)
+            continue
+        txt = read_text_rel(home, "env.%s" % shell)
+        nblk = txt.count("# --- wtool:")
+        if nblk:
+            fatal.append("`env.%s` 里有 %d 个项目 env 块 —— 整机包是**0 个项目已装**，"
+                         "只该有引擎自身那段" % (shell, nblk))
+        if "ZDOTDIR" not in txt:
+            fatal.append("`env.%s` 里没有导出 ZDOTDIR（从 bash 敲 zsh 会加载不到模块）"
+                         % shell)
+        if "wtool/" not in txt or "bin" not in txt:
+            fatal.append("`env.%s` 里没有引擎自身的 PATH（`wtool` 命令会找不到）" % shell)
+        if nblk == 0:
+            notes.append("✔ env.%s：只有引擎自身那段（0 个项目块）" % shell)
+
+    # ---- 5) 入口链（包内解析得到）-----------------------------------------
+    l1 = os.path.join(home, "install.sh")
+    if not os.path.islink(l1):
+        fatal.append("`.wtool/install.sh` 不是软链（入口链断了）")
+    elif os.readlink(l1) != "wtool/install.sh":
+        fatal.append("`.wtool/install.sh` 指向 %s（该是 wtool/install.sh）" % os.readlink(l1))
+    l2 = os.path.join(wdir, "install.sh")
+    if not os.path.islink(l2):
+        fatal.append("`.wtool/wtool/install.sh` 不是软链（入口链断了）")
+    else:
+        tgt = os.readlink(l2)
+        real = os.path.realpath(l2)
+        if os.path.isabs(tgt):
+            fatal.append("`.wtool/wtool/install.sh` 是绝对链（%s）—— 搬走就断" % tgt)
+        elif not os.path.isfile(real):
+            fatal.append("`.wtool/wtool/install.sh` 在**包内**解析不到（→ %s）" % tgt)
+        else:
+            inside = os.path.realpath(home) + os.sep
+            if not (real + os.sep).startswith(inside):
+                fatal.append("`.wtool/wtool/install.sh` 解析到了包外（→ %s）" % real)
+            elif not real.endswith("/scripts/install.sh"):
+                fatal.append("`.wtool/wtool/install.sh` 解析到的不是 <引擎>/scripts/install.sh"
+                             "（→ %s）" % tgt)
+            else:
+                notes.append("✔ 入口链：install.sh → wtool/install.sh → %s"
+                             % os.path.relpath(real, home))
+
+    # ---- 6) manifest 三件套自洽 -------------------------------------------
+    man = os.path.join(wdir, REPO_MANIFESTS)
     dx = os.path.join(man, "default.xml")
     if not os.path.isfile(dx) or os.path.islink(dx):
         fatal.append("manifest 三件套不对: wtool/.repo/manifests/default.xml 必须是**实体文件**")
     else:
         want = read_text(os.path.join(man, "default.xml.sha256"))
         got = _sha256_file(dx)
-        if want and want.split()[0] != got:
-            fatal.append("default.xml.sha256 对不上（判据：install.sh 只校验不覆盖）: "
-                         "文件里 %s，实际 %s" % (want.split()[0], got))
+        if not want or want.split()[0] != got:
+            fatal.append("default.xml.sha256 对不上（install.sh 只校验不覆盖）: "
+                         "文件里 %s，实际 %s"
+                         % ((want.split()[0] if want else "(空)"), got))
         else:
-            notes.append("manifest 三件套: default.xml %s…（sha256 一致）" % got[:12])
-    for name in ("env.zsh", "env.bash"):
-        if not os.path.isfile(os.path.join(home, name)):
-            fatal.append("$WTOOL_HOME/%s 不在包里 —— 目标机上 source 不出 wtool" % name)
+            cid = (read_text(os.path.join(man, "default.xml.commitid")) or "").strip()
+            if not cid:
+                fatal.append("default.xml.commitid 是空的")
+            else:
+                notes.append("✔ manifest 三件套自洽（sha256 %s… / commitid %s…）"
+                             % (got[:12], cid[:12]))
 
+    # ---- 7) 野文件 / 异常体积 --------------------------------------------
     total = _tree_size(home)
     biggest = []
     for dirpath, _dn, filenames in os.walk(home):
@@ -5572,29 +5627,6 @@ def offline_all_check(args):
             except OSError:
                 pass
     biggest.sort(reverse=True)
-    # ---- 野文件 / 误入物（2026-10-21 用户实测：10-14 的包里带了
-    #      `wtool/wtool-base-tools/t_publish_repo_of() {,+30p` —— 打包机上的
-    #      重定向事故产物，108 KB、内容是旧的 wtool_fs.sh）。判据两条：
-    #      ① 名字里带明显不是项目文件的记号（`t_publish_repo_of` / `.wtool-bak.`）；
-    #      ② **源文件**（不在 `var/`、不在 `*/__output/` 下）超过 20 MB ——
-    #         源码仓库里不该有这么大的东西，多半是事故产物或误提交的二进制。
-    #      两条都是**致命**：包一旦发出去，就再也收不回来。
-    # ③ 文本里烧死**打包机绝对路径**（2026-10-21 VM 实测：`starship init bash` 把
-    #    staging 家的路径写进生成物）→ 搬过去就是"每次开 shell 报 not found"。
-    _TEXT_EXT = (".bash", ".zsh", ".sh", ".fish", ".txt", ".tsv")
-    for size, rel in biggest:
-        if not rel.endswith(_TEXT_EXT) or "__output" not in rel.split("/"):
-            continue
-        if size > 2 * 1024 * 1024:
-            continue
-        try:
-            _txt = read_text_rel(home, rel)
-        except OSError:
-            continue
-        for _bad in ("/tmp/wtool-offline",):
-            if _bad in _txt:
-                fatal.append("生成物里烧死了**打包机路径**（%s）: %s —— 搬过去会 not found"
-                             % (_bad, rel))
     _WILD_MARKS = ("t_publish_repo_of", ".wtool-bak.", ".orig", ".rej", ".swp")
     for size, rel in biggest:
         parts = rel.split("/")
@@ -5602,7 +5634,7 @@ def offline_all_check(args):
         if any(m in rel for m in _WILD_MARKS) or base.endswith("~") \
                 or base in ("musl.tar", "musl.tar.gz"):
             fatal.append("包里有**野文件**（不是项目声明的东西）: %s" % rel)
-        if "var" in parts[:-1] or "__output" in parts[:-1]:
+        if "__output" in parts[:-1]:
             continue
         if size > 20 * 1024 * 1024:
             fatal.append("源文件大得不像话（>20 MB，多半是打包机上的事故产物 / "
@@ -5617,25 +5649,7 @@ def offline_all_check(args):
         if size > args.max_file:
             notes.append("⚠️ 单个文件异常大: %.1f MB  %s" % (size / 1048576.0, rel))
 
-    out_of_pkg = []
-    for dirpath, dirnames, filenames in os.walk(home):
-        for name in list(dirnames) + list(filenames):
-            p = os.path.join(dirpath, name)
-            if not os.path.islink(p):
-                continue
-            tgt = os.readlink(p)
-            if os.path.isabs(tgt) and not os.path.exists(p):
-                out_of_pkg.append((os.path.relpath(p, home), tgt))
-                if name in dirnames:
-                    dirnames.remove(name)
-    if out_of_pkg:
-        for rel, tgt in out_of_pkg[:20]:
-            notes.append("⚠️ 仍指向包外的**悬空**链（不影响运行，报告出来）: %s → %s" % (rel, tgt))
-        if len(out_of_pkg) > 20:
-            notes.append("   …还有 %d 条" % (len(out_of_pkg) - 20))
-
-    stats = {"projects": len(projects), "l2": n_l2, "bytes": total,
-             "files": len(biggest)}
+    stats = {"projects": len(projects), "bytes": total, "files": len(biggest)}
     return _check_report(args, tree, fatal, notes, stats, 0 if not fatal else 1)
 
 
@@ -5649,9 +5663,10 @@ def _check_report(args, tree, fatal, notes, stats, rc):
     if fatal:
         print("整机包检查: **不通过**（%d 条致命）" % len(fatal), file=sys.stderr)
     else:
+        # 2026-10-22：包是"未安装"状态，**没有 L2 链** —— 汇总里不再说 L2。
         print("整机包检查: 通过%s" % (
-            "" if not stats else "（%d 个项目 / %d 条 L2 链 / %.1f MB / %d 个文件）"
-            % (stats["projects"], stats["l2"], stats["bytes"] / 1048576.0, stats["files"])))
+            "" if not stats else "（%d 个项目 / %.1f MB / %d 个文件）"
+            % (stats["projects"], stats["bytes"] / 1048576.0, stats["files"])))
     return rc
 
 
@@ -6697,21 +6712,28 @@ HEALTH_NOTINST = "未安装"
 HEALTH_ORDER = (HEALTH_OK, HEALTH_DANGLE, HEALTH_MISSING, HEALTH_NOTINST)
 
 
-def project_health(home, state_dir):
-    """逐个**账本项目**判健康，返回 `[{pid, status, kind, live, detail}]`。
+def project_health(home, state_dir, root=""):
+    """逐个**项目**判健康，返回 `[{pid, status, kind, live, detail}]`。
 
-    ‼️ 为什么必须是**账本**当宇宙（2026-10-21 用户实测的真 bug）：
+    ‼️ 为什么必须是**账本 + 工作区**两个来源的并集（2026-10-21 用户实测的真 bug，
+    2026-10-22 又补了"工作区里有、账本里没有"）：
     `wtool status` 按**登记表**逐条查"落点在不在"→ 报一串"缺失"；
     `wtool check` 按**工作区**扫（`scan_projects`）→ 那些"项目目录已被删掉"的项目
     它**根本看不见**，于是打"一切对得上（声明 / 日志 / 磁盘）"。
     同一个状态两个结论 —— 用户看不懂。判据现在只留这一处，两边都调它。
+
+    ‼️ 2026-10-22 加 `root`：整机包解开后是"**一个项目都没装**"的 .wtool，
+    账本（`var/`）根本不存在 —— 只看账本的话 `wtool status` 会说"一个项目都没有"，
+    而磁盘上明明有 53 个项目等着 `wtool bootstrap`。用户口径：
+        "解包后 wtool 列出全部项目且状态「未安装」；wtool status 显示 N 个项目：未安装 N"
+    所以宇宙 = 账本里的项目 **∪** 工作区里扫描到的项目（后者 - 前者 = 未安装）。
 
     每个项目一个状态：
       正常  : L1 在且解析得到（**实体目录** = 整机包；或指向存在的目录 = 开发机），
               账本里的 L2 链 / `<generate>` 产物都在
       悬空  : L1 是链但**目标不存在**、L1 干脆不在，或某条 L2 链悬空
       缺失  : L1 还好，但 L2 链 / `<generate>` 产物不见了
-      未安装: 登记表里有它，但账本里没有它（只装了一半 / 手工拷过）
+      未安装: 工作区里有它，但账本里没有它（还没 `wtool install` / `bootstrap`）
     """
     home = os.path.abspath(home)
     state = os.path.abspath(state_dir)
@@ -6766,6 +6788,17 @@ def project_health(home, state_dir):
         seen.add(pid)
         out.append({"pid": pid, "status": HEALTH_NOTINST, "kind": "-", "live": "-",
                     "detail": "登记表里有它，但账本（var/%s）里没有" % pid})
+    # 工作区里有、账本里没有 → **未安装**（整机包刚解开时就是全部 53 个项目）。
+    # ⚠️ 只在给了 `--root` 时才扫：纯 Python 单测没有工作区，不该凭空多出一堆行。
+    if root and os.path.isdir(root):
+        for _prio, pid, path, _pub in scan_projects(root):
+            if pid in seen:
+                continue
+            seen.add(pid)
+            out.append({"pid": pid, "status": HEALTH_NOTINST,
+                        "kind": _kind_of_project(os.path.abspath(path)) or "-",
+                        "live": os.path.abspath(path),
+                        "detail": "还没装（wtool bootstrap / wtool install）"})
     out.sort(key=lambda r: (HEALTH_ORDER.index(r["status"]), r["pid"]))
     return out
 
@@ -6787,6 +6820,8 @@ def do_check(args):
     #    开发机上这条判据照旧（那里"一切皆链"是真的规矩）。
     _mf = os.path.join(home, WTOOL_SUBDIR, ".repo", "manifests", "default.xml")
     bundle_mode = os.path.isfile(_mf) and not os.path.islink(_mf)
+    # "这台 .wtool 是 install.sh 种下来的"（整机包 / 跑过安装器）—— 见下面 rc 残渣那条
+    _seeded = os.path.lexists(os.path.join(home, "install.sh"))
 
     def bad(pid, msg):
         problems.append((pid, msg))
@@ -6800,8 +6835,11 @@ def do_check(args):
     if args.project:
         _want_abs = os.path.abspath(os.path.join(root, args.project))
         _want_pid = project_id_of(_want_abs, root)
-    for h in project_health(home, state):
-        if h["status"] == HEALTH_OK:
+    for h in project_health(home, state, root=root):
+        # ‼️ "**未安装**"不是问题（2026-10-22 用户口径）：整机包刚解开时 53 个项目
+        #    全是未安装，`wtool check` 必须 rc=0 —— 装没装是 `wtool`/`status`/
+        #    `bootstrap` 的事，check 只管"装了的那些对不对得上"。
+        if h["status"] in (HEALTH_OK, HEALTH_NOTINST):
             continue
         if _want_pid and h["pid"] != _want_pid:
             continue
@@ -6832,7 +6870,32 @@ def do_check(args):
     #    `wtool/` 与 `usr/` **不能**当判据：`wtool uninstall all` 之后它们照样在
     #    （空目录），拿它们判会把"刚卸干净"误报成"账本丢了"（实测踩过：
     #    export_test 场景 3 "uninstall 之后 check 干净" 当场红）。
-    if not os.path.isdir(state):
+    # ‼️ 2026-10-22：**整机包解开时 var/ 本来就不存在，那不是错误**（用户口径：
+    #    "未安装状态是合法的"）。新判据：`var/` 不在 **且 `usr/` 在**（说明这台
+    #    机器上确实装过东西）才报"账本丢了"；一个项目都没装的 .wtool 静默通过。
+    #    env.zsh / install.sh / manifest 三件套不再当证据 —— 它们现在**随包而来**，
+    #    一个项目都没装的时候也在，拿它们判会把刚解开的包当场报成红的。
+    _usr_dir = os.path.join(home, USR_SUBDIR)
+    # "装过东西"的第二个证据：`wtool/<项目>` 是**L1 链**（开发机的形状 ——
+    # 整机包里它是实体目录，所以这条不会把刚解开的包误报成"账本丢了"）。
+    _has_l1_link = False
+    for _dp, _dns, _fns in os.walk(os.path.join(home, WTOOL_SUBDIR)):
+        for _d in list(_dns):
+            _p = os.path.join(_dp, _d)
+            if os.path.islink(_p) and os.path.isfile(os.path.join(_p, "wtool.xml")):
+                _has_l1_link = True
+                break
+        if _has_l1_link:
+            break
+    # `usr/` 里**还有东西**才算"装过"：`wtool uninstall` 之后 `usr/bin` 这些共享目录
+    # 会留下来（空壳），拿"目录在不在"判会把"刚卸干净"误报成"账本丢了"（实测）。
+    _usr_has_content = False
+    if os.path.isdir(_usr_dir):
+        for _dp, _dns, _fns in os.walk(_usr_dir):
+            if _fns or any(os.path.islink(os.path.join(_dp, _d)) for _d in _dns):
+                _usr_has_content = True
+                break
+    if not os.path.isdir(state) and (_usr_has_content or _has_l1_link):
         traces = [p for p in (os.path.join(home, "env.zsh"),
                               os.path.join(home, "env.bash"),
                               os.path.join(home, "install.sh"),
@@ -6840,12 +6903,11 @@ def do_check(args):
                               os.path.join(home, WTOOL_SUBDIR, ".repo", "manifests",
                                            "default.xml"))
                   if os.path.lexists(p)]
-        if traces:
-            bad("-", "账本目录不见了：%s（就是 $WTOOL_HOME/var）—— 它是 check / "
-                     "uninstall 的**唯一依据**，删了之后\"该有什么\"就无从查起"
-                     "（这里看到 wtool 装过的东西还在：%s）。"
-                     "重建：在 $WTOOL_HOME 里再跑一次 install.sh"
-                     % (state, "、".join(traces)))
+        bad("-", "账本目录不见了：%s（就是 $WTOOL_HOME/var）—— 它是 check / "
+                 "uninstall 的**唯一依据**，删了之后\"该有什么\"就无从查起"
+                 "（`%s` 还在，说明这台机器上装过东西：%s）。"
+                 "重建：在 $WTOOL_HOME 里再跑一次 install.sh"
+                 % (state, USR_SUBDIR, "、".join(traces) or "usr/"))
 
     # ---- 全局：安装器自己那两笔账（`$WTOOL_HOME/var/installer/`，§1.8 ①②）----
     # `install.sh` 把两条入口链记在这儿（links.tsv）。**有记录才查**：只跑过
@@ -6907,7 +6969,13 @@ def do_check(args):
         #    （原来这里按 `blocks`/`installed` 去要那两行，实测会把
         #     "刚装完、用户还没来得及加"的机器报成红的 —— 连 `wtool move`
         #     之后的正常机器也一起报。）
-        if has_lines and not installed:
+        # ‼️ 2026-10-22：**"install.sh 种下来的 .wtool"不报这一条**。整机包解开
+        #    + 跑完 install.sh 的状态就是"rc 里有两行、一个项目都没装" —— 那是
+        #    **预期**，不是残渣（用户要 `wtool check` 在未安装状态下 rc=0）。
+        #    判据 = `$WTOOL_HOME/install.sh` 那条入口链在不在（install.sh 造的、
+        #    uninstall 不收的）。没有它就还是老规矩：项目卸光了、rc 里还留着那两行
+        #    = 残渣，要报。
+        if has_lines and not installed and not _seeded:
             bad("-", "%s 里有 wtool 那两行，但一个项目都没装（残渣？）" % rc)
         if legacy:
             bad("-", "%s 里还有 wtool 的旧块（# >>> wtool >>> / per-project 块）；"
@@ -7383,6 +7451,19 @@ def build_parser():
     pe.add_argument("--scratch", required=True)
     # 正在卸载的那个项目要从"还剩谁"里扣掉：它的 state 目录这会儿还在
     pe.add_argument("--exclude", default="")
+    # 引擎项目的工作区相对路径（`wtool` 那条命令的 PATH 靠它）。不传就用默认名。
+    pe.add_argument("--engine", default="")
+
+    # render-env-file：只把 `$WTOOL_HOME/env.<shell>` 的**文本**打到 stdout（引擎的
+    # 打包器用它把"0 个项目"版本的 env 写进整机包；Python 只算不写）。
+    ref = sub.add_parser("render-env-file")
+    ref.add_argument("--home", required=True)
+    ref.add_argument("--state", required=True)
+    ref.add_argument("--shell", required=True, choices=("zsh", "bash"))
+    ref.add_argument("--engine", default="")
+
+    # render-zshenv：`$WTOOL_HOME/.zshenv` 的文本（模块路径；不写用户家目录）。
+    sub.add_parser("render-zshenv")
 
     pk = sub.add_parser("pack-plan")
     pk.add_argument("project")
@@ -7430,13 +7511,16 @@ def build_parser():
     # offline-all-plan：**整机迁移包**的清单（ADR-0045 §2.4 / D38 / D44 / D45）。
     # 只算不写（除 scratch）：账本 → 闭包 → 三张表，shell 照着拷文件、打 tar。
     oap = sub.add_parser("offline-all-plan")
-    oap.add_argument("--home", required=True)
+    # 2026-10-22：不再读账本（包是"未安装"状态）—— `--home` 只为主机兼容留着，可省。
+    oap.add_argument("--home", default="")
     oap.add_argument("--root", default="")
     oap.add_argument("--scratch", required=True)
     # 按发行版挑 `__output/usr` 那套产物（空 = 跟软链走）。在容器里打包就传容器那个版本。
     oap.add_argument("--os-version", default="")
     # `offline-all-set` 算出来的项目集合：**断言**临时账本与它逐个相同
     oap.add_argument("--set", dest="set_tsv", default="")
+    # 引擎项目的工作区相对路径（入口链的第三跳 + env 里的 PATH 都要它）
+    oap.add_argument("--engine", default="")
 
     # offline-all-digest：整机包的确定性指纹（文件清单 + 每个文件内容的 sha256）
     oad = sub.add_parser("offline-all-digest")
@@ -7478,6 +7562,8 @@ def build_parser():
     hp = sub.add_parser("health")
     hp.add_argument("--home", required=True)
     hp.add_argument("--state", default="")
+    # 工作区根：给了才把"工作区里有、账本里没有"的项目也列出来（= 未安装）
+    hp.add_argument("--root", default="")
 
     stt = sub.add_parser("status")
     stt.add_argument("--root", required=True)
@@ -7638,6 +7724,13 @@ def main(argv):
             rows = plan_env(args, args.scratch)
             _write_plan(args.scratch, rows)
             print("actions   : %d" % len(rows))
+        elif args.cmd == "render-env-file":
+            sys.stdout.write(render_env_file(args.home, args.state, args.shell,
+                                             engine=args.engine))
+            return 0
+        elif args.cmd == "render-zshenv":
+            sys.stdout.write(ZSHENV_TEXT)
+            return 0
         elif args.cmd == "pack-plan":
             res = pack_plan(args)
             print("source    : %d 个文件" % len(res["source"]))
@@ -7718,9 +7811,10 @@ def main(argv):
                 print("wtool: error: %s" % e, file=sys.stderr)
             print("asset     : %s" % res["asset"])
             print("projects  : %d 个" % len(res["projects"]))
-            print("files     : %d 个（L1 实体化的料）" % len(res["files"]))
-            print("links     : %d 条（L2 保持为链）" % len(res["links"]))
-            print("verbatim  : %d 个（env/账本/manifest 三件套）" % len(res["verbatim"]))
+            print("files     : %d 个（原样拷；无 usr/ 无 var/ 无 L1 链）" % res["files"])
+            print("bytes     : %.1f MB" % (res["bytes"] / 1048576.0))
+            print("installer : %d 条入口链" % len(res["installer"]))
+            print("verbatim  : %d 个（manifest 的 default.xml）" % len(res["verbatim"]))
             return 1 if res["errors"] else 0
         elif args.cmd == "offline-all-check":
             return offline_all_check(args)
@@ -7736,7 +7830,9 @@ def main(argv):
         elif args.cmd == "download-doc":
             download_doc(args)
         elif args.cmd == "health":
-            rows = project_health(args.home, args.state or os.path.join(args.home, "var"))
+            rows = project_health(args.home,
+                                  args.state or os.path.join(args.home, "var"),
+                                  root=getattr(args, "root", "") or "")
             for r in rows:
                 print("\t".join([r["pid"], r["status"], r["kind"], r["detail"]]))
             return 0

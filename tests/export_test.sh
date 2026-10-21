@@ -81,7 +81,12 @@ newhome
 mkdir -p "$WTOOL_ROOT"
 P=$(mkproj "tools/demo")
 mkdir -p "$P/__output/usr/bin" "$P/__output/usr/share/man" "$P/scripts"
-printf 'fzfbin\n' > "$P/__output/usr/bin/fzf"
+# 假的 fzf 必须是**可执行**的、而且**有稳定输出**：清单里有
+# <generate cmd="fzf --zsh">，引擎会真的跑它并检查"生成物非空"。
+# 以前这里是个普通文本文件 → `fzf: Permission denied`；改成 exit 0 又会撞
+# "生成物是空的"（引擎有意拒绝空产物）。输出固定一行 = 两次 install 逐字相同。
+printf '#!/bin/sh\necho "export FZF_ZSH=1"\n' > "$P/__output/usr/bin/fzf"
+chmod +x "$P/__output/usr/bin/fzf"
 printf 'rgbin\n'  > "$P/__output/rg-dbg"
 printf 'manpage\n' > "$P/__output/usr/share/man/fzf.1"
 printf '#!/bin/sh\necho "export GEN_X=1"\n' > "$P/scripts/gen-x.bash"
