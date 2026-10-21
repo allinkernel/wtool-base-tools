@@ -279,6 +279,18 @@ chk ".commitid 没被覆盖" "$(cat -- "$M/default.xml.commitid")" "$LIVE_CID"
 has "★回归：bundle 的项目目录还在（L1 位置上就是实体，绝不能被备份走）" \
     "$B/wtool/wtool-base-tools/wtool.sh"
 hasnt "  也没有 .wtool-bak.* 残渣" "$(ls -d "$B/wtool"/wtool-base-tools.wtool-bak.* 2>/dev/null | head -1 || echo /nonexistent)"
+# ‼️ 2026-10-22 用户原话："我执行 ~/.wtool/install.sh，**它会自动帮我写好
+#    .bashrc 和 .zshrc**"。整机包/种子模式 = **不问、直接追加**（非交互也一样）；
+#    只追加在末尾、幂等、不覆盖原有内容；**不创建 ~/.zshenv**。
+chk "★bundle：非交互也**直接写** ~/.bashrc 那两行（用户口径，不问）" \
+    "$(tail -2 "$F/home/.bashrc" | tr '\n' '|')" \
+    "export WTOOL_HOME=~/.wtool|source \${WTOOL_HOME}/env.bash|"
+chk "★bundle：~/.zshrc 那两行也直接写了" \
+    "$(tail -2 "$F/home/.zshrc" | tr '\n' '|')" \
+    "export WTOOL_HOME=~/.wtool|source \${WTOOL_HOME}/env.zsh|"
+grep -q '^# 用户自己的 bashrc$' "$F/home/.bashrc" \
+    && ok "  原有内容没被覆盖（只在末尾追加）" || bad "  原有内容被覆盖了"
+hasnt "★bundle：**没有**创建 ~/.zshenv（不污染宿主机）" "$F/home/.zshenv"
 chk "入口链在 bundle 里也归一成两跳" "$(readlink -- "$B/install.sh")" "wtool/install.sh"
 chk "  （第二跳）" "$(readlink -- "$B/wtool/install.sh")" "wtool-base-tools/scripts/install.sh"
 

@@ -88,6 +88,9 @@ DRY_RUN=0
 #          改成在用户目录下生成 `wtool-bashrc` / `wtool-zshrc`，让用户手动 source。
 #   home / file / none 强制那一种。write / print / ask 是旧名（兼容，别再用）。
 RC_MODE=auto
+# 用户**显式**说过 rc 怎么办吗（--rc-mode / --write-rc / --no-rc）。
+# 显式的一律优先；只有"没说过"的才允许下面按"整机包模式"自动改成 write。
+RC_MODE_EXPLICIT=0
 PORTABLE=auto                                        # auto | 1（强制 portable）| 0（强制 home）
 PREFIX_DIR=""
 WTOOL_HOME_ARG=""
@@ -105,10 +108,11 @@ while [ $# -gt 0 ]; do
         --portable) PORTABLE=1 ;;
         --rc-mode)  RC_MODE=${2:-auto}
                     [ -n "$RC_MODE" ] || die "--rc-mode 要跟 auto|home|file|none"
+                    RC_MODE_EXPLICIT=1
                     shift ;;
-        --rc-mode=*) RC_MODE=${1#--rc-mode=} ;;
-        --write-rc) RC_MODE=write ;;
-        --no-rc)    RC_MODE=none ;;
+        --rc-mode=*) RC_MODE=${1#--rc-mode=}; RC_MODE_EXPLICIT=1 ;;
+        --write-rc) RC_MODE=write; RC_MODE_EXPLICIT=1 ;;
+        --no-rc)    RC_MODE=none;  RC_MODE_EXPLICIT=1 ;;
         -h|--help)
             # 打印文件头那段注释（不写死行号，改一行注释不会错位）
             awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$self"
@@ -363,6 +367,15 @@ if [ -d "$ws/.repo/projects" ] && [ -d "$ws/.repo/project-objects" ]; then
     _bundle=0
 else
     _bundle=1
+fi
+# ‼️ 2026-10-22（用户原话）："我执行 ~/.wtool/install.sh，**它会自动帮我写好
+#    .bashrc 和 .zshrc**"。所以**整机包/种子 .wtool 模式**下：
+#      rc 里没有那两行 → **直接写，不再问**（只往末尾追加、幂等、不覆盖原有内容）；
+#      rc 文件不存在 → 仍然直接建（上面那一步）。
+#    开发机（满血工作区）保持老规矩：默认只打印、问过才写。
+#    用户显式给了 --rc-mode / --write-rc / --no-rc 的，一律听命令行。
+if [ "$_bundle" = 1 ] && [ "$RC_MODE" = ask ] && [ "$RC_MODE_EXPLICIT" = 0 ]; then
+    RC_MODE=write
 fi
 if [ "$_bundle" = 1 ]; then
     say "① 整机包里的 .wtool（没有满血工作区）—— 只校验入口链，**不装任何项目**"
@@ -955,7 +968,10 @@ TIP
 fi
 
 if [ "$RC_MODE" != "file" ] && [ "$RC_MODE" != "none" ]; then
-say "⑥ rc 两行（默认只打印，问过你才代写）"
+case $RC_MODE in
+    write) say "⑥ rc 两行（整机包模式：没有那两行就**直接写**，只追加、幂等、不覆盖）" ;;
+    *)     say "⑥ rc 两行（默认只打印，问过你才代写）" ;;
+esac
 
 
 # 这个 shell 的 rc 文件（只认存在的；没建过的 rc 绝不代建）
@@ -993,7 +1009,18 @@ done
 if [ -z "$_rc_targets" ]; then
     say "  ✔ 该有的 rc 里都已经有那两行了（或者你还没建 rc 文件）—— 不用改任何东西"
 else
-    cat <<TIP
+    # 先定"写不写"，再决定打印什么 —— 整机包模式下**直接写**，就不该先说一句
+    # "还差一步"（用户会以为还要自己动手）。
+    _do_write=0
+    _why_write=""
+    case $RC_MODE in
+        write) _do_write=1
+               if [ "$_bundle" = 1 ]; then _why_write="整机包模式：直接写（用户口径）"
+               else _why_write="--write-rc：按你的命令行授权直接写"; fi ;;
+        print) _do_write=0 ;;
+        ask)
+            if [ -t 0 ] && [ -t 1 ]; then
+                cat <<TIP
 
   还差一步：把**这两行**加到你的 rc **最后**（你用的是哪个 shell 就加哪个）：
 
@@ -1001,18 +1028,11 @@ else
       source \${WTOOL_HOME}/env.zsh        # bash 用户写 env.bash
 
 TIP
-    for _sh in zsh bash; do
-        _rc_f=$(rc_file_of "$_sh")
-        [ -f "$_rc_f" ] || continue
-        say "      $_rc_f ：source \${WTOOL_HOME}/env.$_sh"
-    done
-
-    _do_write=0
-    case $RC_MODE in
-        write) _do_write=1; say "  --write-rc：按你的命令行授权直接写" ;;
-        print) _do_write=0; say "  --no-rc：只打印，不碰你的 rc" ;;
-        ask)
-            if [ -t 0 ] && [ -t 1 ]; then
+                for _sh in zsh bash; do
+                    _rc_f=$(rc_file_of "$_sh")
+                    [ -f "$_rc_f" ] || continue
+                    say "      $_rc_f ：source \${WTOOL_HOME}/env.$_sh"
+                done
                 printf 'wtool-install: 要我把上面那两行写进%s 吗？[y/N] ' "$_rc_targets"
                 _ans=""
                 read -r _ans || _ans=""
@@ -1021,6 +1041,19 @@ TIP
                     *)               _do_write=0 ;;
                 esac
             else
+                cat <<TIP
+
+  还差一步：把**这两行**加到你的 rc **最后**（你用的是哪个 shell 就加哪个）：
+
+      export WTOOL_HOME=$_rc_home_line
+      source \${WTOOL_HOME}/env.zsh        # bash 用户写 env.bash
+
+TIP
+                for _sh in zsh bash; do
+                    _rc_f=$(rc_file_of "$_sh")
+                    [ -f "$_rc_f" ] || continue
+                    say "      $_rc_f ：source \${WTOOL_HOME}/env.$_sh"
+                done
                 say "  没有终端可以问（非交互）—— 只打印，一个字节都不动你的 rc"
             fi ;;
     esac
@@ -1029,12 +1062,13 @@ TIP
         if [ "$DRY_RUN" = 1 ]; then
             say "  [dry-run] 会写进：$_rc_targets"
         else
+            [ -n "$_why_write" ] && say "  $_why_write"
             for _sh in zsh bash; do
                 _rc_f=$(rc_file_of "$_sh")
                 [ -f "$_rc_f" ] || continue
                 rc_write "$_rc_f" "$_sh"
             done
-            say "  ✔ 写好了。新开一个终端（或 exec \$SHELL）就生效。"
+            say "  ✔ 写好了（只追加在末尾，原有内容一个字没动）。新开一个终端（或 exec \$SHELL）就生效。"
         fi
     else
         say "  （wtool **不会**替你改 rc —— 上面那两行自己贴一下就行）"

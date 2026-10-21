@@ -896,7 +896,7 @@ $WTOOL_HOME/install.sh
 | ③ | 建 **manifest 三件套** | 见下面「manifest 三件套」 |
 | ④ | 建 `env.{zsh,bash}`，**先**加载安装器项目自己 | 两个文件都得在；按 `(priority, 项目路径)` 排序，安装器项目 `priority=5`（最早）→ `wtool` 命令与 `$WTOOL_HOME/usr/bin` 先就位 |
 | ⑤ | **自检**：起一个新的 zsh/bash 子进程，`source env.<shell>` + `wtool check` | 子进程退出码 0。**只摘 `WTOOL_*` 变量 + 摘掉 PATH 里的 wtool 目录**（不是 `env -i` 清空一切：实测容器里宿主挂进来的 python3 靠 `LD_LIBRARY_PATH` 找 libexpat，一清就死在引擎之前）。判据是"**这个** `WTOOL_HOME` 里的 `wtool`"，不只是"PATH 上有 wtool"（装过两份时会假绿）。失败退出码：3=`source` 失败 / 4=找不到（或不是这个 home 里的）`wtool` / 5=`$WTOOL_HOME/usr/bin` 不在 PATH / 6=`wtool check` 报问题 |
-| ⑥ | **问过用户才**改 rc；**借用机器上改成"生成两份 rc 文件"** | 自己的机器（home 模式）：rc 最后两行 = `export WTOOL_HOME=…` + `source ${WTOOL_HOME}/env.{zsh,bash}`。默认**只打印**；只有**交互确认**（有终端才问，回答 `y`）或 `--write-rc` 才代写；**非交互不问、不写、也不挂住**（幂等）。<br>**portable 模式**（2026-10-21，ADR-0046）：**一个字节都不碰** `~/.bashrc`/`.zshrc`，生成 `<上级目录>/wtool-bashrc` 与 `wtool-zshrc`（`WTOOL_HOME` + PATH + 库路径 + `source env.<shell>`，末尾按"第一次出现"去重 → 重复 source 不叠加），打印"手动 `source` 这一份" |
+| ⑥ | 改 rc；**借用机器上改成"生成两份 rc 文件"** | 自己的机器（home 模式）：rc 最后两行 = `export WTOOL_HOME=…` + `source ${WTOOL_HOME}/env.{zsh,bash}`。<br>**整机包 / 种子 `.wtool`**（没有 `.repo/projects`，2026-10-22 用户原话"它会自动帮我写好 .bashrc 和 .zshrc"）：**直接写、不问** —— 只往末尾追加、幂等、不覆盖原内容；rc 不存在就直接建；**不创建 `~/.zshenv`**。<br>**开发机（满血工作区）**：默认**只打印**，交互确认（答 `y`）或 `--write-rc` 才代写；非交互不写也不挂住。<br>显式 `--rc-mode` / `--write-rc` / `--no-rc` 一律优先（任何模式）。<br>**portable 模式**（2026-10-21，ADR-0046）：**一个字节都不碰** `~/.bashrc`/`.zshrc`，生成 `<上级目录>/wtool-bashrc` 与 `wtool-zshrc`（`WTOOL_HOME` + PATH + 库路径 + `source env.<shell>`，末尾按"第一次出现"去重 → 重复 source 不叠加），打印"手动 `source` 这一份" |
 
 用法：
 
