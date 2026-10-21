@@ -2285,6 +2285,23 @@ PYGEN
 
     # ---- ⑨ 无脑 tar（不挑文件、不需要忽略清单）-----------------------------
     mkdir -p -- "$_oa_out"
+
+    # `$WTOOL_HOME/.zshenv` **必须进包**（2026-10-21，VM 实测的发布级 bug）：
+    # zsh 的 module_path/fpath 是编译时前缀、而 MODULE_PATH **不允许从环境导入**，
+    # 唯一能修的位置是 `.zshenv`（在任何 rc、任何模块加载之前跑）。整机包是一份
+    # **已装好的** .wtool —— 目标机不会重跑 shell/zsh 的 install.sh，所以这份文件
+    # 不会自己出现；缺了它，从 bash 敲 zsh 就会去 `/root/.wtool/usr/…` 找 .so，
+    # 报 `zsh: failed to load module 'zsh/zle' … Permission denied`。
+    # 内容是可移植的（用 `${WTOOL_HOME}` 现算），直接搬；没有就 warn（老工作区）。
+    if [ ! -f "$_oa_build/.wtool/.zshenv" ]; then
+        if [ -f "$WTOOL_HOME/.zshenv" ]; then
+            cp -Lp -- "$WTOOL_HOME/.zshenv" "$_oa_build/.wtool/.zshenv" \
+                || wt_die "拷不进包: $WTOOL_HOME/.zshenv"
+        else
+            wt_warn "$WTOOL_HOME/.zshenv 不在 —— 包里那份 zsh 在目标机上可能加载不到动态模块"
+        fi
+    fi
+
     rm -f -- "$_oa_out/$_oa_asset" "$_oa_out/$_oa_asset.sha256" \
              "$_oa_out/$_oa_check" "$_oa_out/$_oa_asset".part-* 2>/dev/null || true
     ( cd -- "$_oa_build" && find . -mindepth 1 | sed 's|^\./||' ) \

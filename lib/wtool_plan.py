@@ -5232,9 +5232,8 @@ def offline_all_plan(args):
     _zshenv = os.path.join(home, ".zshenv")
     if os.path.isfile(_zshenv):
         verbatim.append((".zshenv", _zshenv))
-    else:
-        warns.append("$WTOOL_HOME/.zshenv 不在 —— 包里那份 zsh 在目标机上可能"
-                        "加载不到动态模块（先装一次 shell/zsh 再打包）")
+    # 不在也不报：这个函数在"往临时家里装项目"之前就跑，那时 .zshenv 还没生成；
+    # 真正的兜底在 `wt_pack_offline_all` 的 ⑨（tar 之前从 $WTOOL_HOME 补一份）。
     var = os.path.join(home, "var")
     # 账本进包的判据 = **闭包**（D38），不是"整棵 var 原样搬"。
     #   · `var/<pid>/**` 只有 <pid> 在闭包里才进包；
