@@ -790,6 +790,55 @@ rc_write() {   # <rc 文件> <shell>
     say "  ✔ 已写进 $_rw_f（最后两行）"
 }
 
+# 2026-10-21（用户 VM 实测）：home 模式**缺 rc 就新建**。
+#
+# 旧逻辑只往「已存在」的 rc 追加 —— 那台机器原本没有 `~/.zshrc`，于是装完
+# 什么都没留下，用户只好自己手写两行；手写之后才第一次触发 direnv / zsh 那两个坑，
+# 看起来就像"install.sh 没干活"。规矩应当是：
+#   · 改**已有**文件 = 动别人的东西 → 问过才写（上面的 rc_write）；
+#   · 建**本来没有**的文件 = 不破坏任何东西 → 直接建，并在输出里说清楚。
+rc_create() {   # <rc 文件> <shell>   —— 只在文件**不存在**时调用
+    _rc_f=$1; _rc_sh=$2
+    mkdir -p -- "$(dirname -- "$_rc_f")" 2>/dev/null || true
+    {
+        printf '# ~/.%src\n' "$_rc_sh"
+        printf '# 由 wtool 的 install.sh 创建（这台机器上原来没有这个文件）。\n'
+        printf 'export WTOOL_HOME=%s\n' "$_rc_home_line"
+        printf 'source ${WTOOL_HOME}/env.%s\n' "$_rc_sh"
+    } > "$_rc_f" || die "⑥ 失败：建不了 $_rc_f"
+    say "  ✔ 新建 $_rc_f（写入那两行）"
+}
+
+# `~/.zshenv` 里那段 module_path/fpath —— **专门为"zsh 当登录 shell"** 的情形。
+#
+# 为什么必须有：zsh 的 `module_path`/`fpath` 是**编译时前缀**（构建容器里的
+# `/root/.wtool/usr/…`），换机器就加载不到动态模块（`zsh/zle`、`zsh/parameter`…），
+# 而 `MODULE_PATH` **不允许从环境导入**。`.zshenv` 在**任何 rc、任何模块加载之前**
+# 执行，是唯一能修它的地方（2026-10-21 VM 实测：`zsh: failed to load module 'zsh/zle'`）。
+# 从 bash 敲 `zsh` 的情形由项目 `env.*` 导出的 ZDOTDIR 走 `$WTOOL_HOME/.zshenv`，两条路都覆盖。
+zsh_module_path_write() {
+    _zs=$HOME_DIR/.zshenv
+    if [ -f "$_zs" ] && grep -qF '# >>> wtool: zsh module_path >>>' "$_zs" 2>/dev/null; then
+        say "  ✔ $_zs 里已经有 wtool 的 module_path 段（跳过）"
+        return 0
+    fi
+    if [ -s "$_zs" ] && [ -n "$(tail -c 1 -- "$_zs" 2>/dev/null || true)" ]; then
+        printf '\n' >> "$_zs"
+    fi
+    cat >> "$_zs" <<EOF || die "⑥ 失败：写不了 $_zs"
+# >>> wtool: zsh module_path >>>
+# 由 wtool 的 install.sh 写（幂等，重装不会重复）。删掉这段 → zsh 会去
+# 构建容器里的老前缀找动态模块，症状是
+# zsh: failed to load module 'zsh/zle' / 'zsh/parameter': ... Permission denied
+if [ -n "\${ZSH_VERSION:-}" ] && [ -d "$WTOOL_HOME_DIR/usr/lib/zsh" ]; then
+    module_path=("$WTOOL_HOME_DIR/usr/lib/zsh/\$ZSH_VERSION" \$module_path)
+    fpath=("$WTOOL_HOME_DIR/usr/share/zsh/\$ZSH_VERSION/functions" "$WTOOL_HOME_DIR/usr/share/zsh/site-functions" \$fpath)
+fi
+# <<< wtool: zsh module_path <<<
+EOF
+    say "  ✔ 已写 $_zs（zsh 的 module_path 段）"
+}
+
 # portable 模式：**生成两份 rc 文件**（用户手动 source），一个字节都不碰 \$HOME 里的 rc。
 # 内容按用户 2026-10-21 给的样子：WTOOL_HOME + PATH（含引擎 bin）+ 库路径 + source env。
 # 幂等：重复 source 不叠加 PATH / LD_LIBRARY_PATH（下面两个 case 守卫）。
@@ -878,6 +927,17 @@ TIP
         [ -f "$_rc_f" ] || continue
         say "      $_rc_f ：source \${WTOOL_HOME}/env.$_sh"
     done
+
+    # 缺的 rc 先建出来（建一个本来不存在的文件不算"改你的东西"，不需要问）；
+    # 已存在的仍走下面的 case（ask/write/print）。
+    if [ "$DRY_RUN" != 1 ]; then
+        for _sh in zsh bash; do
+            _rc_f=$(rc_file_of "$_sh")
+            [ -e "$_rc_f" ] || rc_create "$_rc_f" "$_sh"
+        done
+        # zsh 当登录 shell 时不会经过 env.*，所以这条单独补在 ~/.zshenv（幂等）
+        zsh_module_path_write
+    fi
 
     _do_write=0
     case $RC_MODE in
