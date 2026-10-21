@@ -5222,6 +5222,19 @@ def offline_all_plan(args):
             verbatim.append((name, p))
         else:
             errors.append("$WTOOL_HOME/%s 不在 —— 目标机上 source 不出 wtool 命令" % name)
+    # `$WTOOL_HOME/.zshenv` **必须进包**（2026-10-21）：
+    # zsh 的 module_path/fpath 是编译时前缀、MODULE_PATH 又不允许从环境导入，
+    # 只能靠 `.zshenv` 在"任何 rc、任何模块加载之前"改。而整机包是一份**已装好的**
+    # .wtool —— 目标机不会重跑 shell/zsh 的 install.sh，所以这份文件不会自己出现；
+    # 少了它，从 bash 敲 `zsh`（env.* 导出了 ZDOTDIR=$WTOOL_HOME）会去读一个
+    # 不存在的文件，然后还是去 /root/.wtool/usr/… 找 .so（VM 实测的
+    # "zsh: failed to load module 'zsh/zle' ... Permission denied"）。
+    _zshenv = os.path.join(home, ".zshenv")
+    if os.path.isfile(_zshenv):
+        verbatim.append((".zshenv", _zshenv))
+    else:
+        warns.append("$WTOOL_HOME/.zshenv 不在 —— 包里那份 zsh 在目标机上可能"
+                        "加载不到动态模块（先装一次 shell/zsh 再打包）")
     var = os.path.join(home, "var")
     # 账本进包的判据 = **闭包**（D38），不是"整棵 var 原样搬"。
     #   · `var/<pid>/**` 只有 <pid> 在闭包里才进包；
