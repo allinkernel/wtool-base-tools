@@ -100,6 +100,11 @@
 #   tests/container_acceptance.sh  人工总验收：把它喂给容器里的 container-raw.sh（见文件头）
 #   tests/e2e_repo_sync_test.sh  repo sync 全流程（用本地裸仓，较慢）
 set -eu
+# 跑测试的人可能刚从真工作区里出来，环境里带着陈旧的 WTOOL_*（`~/.wtool` 装过就有）。
+# 摘干净再跑：不摘的话，某些夹具里"模拟项目 install.sh"的脚本会照着旧
+# `$WTOOL_PREFIX` 往**真** `~/.wtool/usr/bin` 里建链（2026-10-22 实测过一次）。
+# 各组自己还会再摘一遍（单独跑那组时也安全）。
+for _v in $(env | sed -n 's/^\(WTOOL[A-Za-z_]*\)=.*/\1/p' || true); do unset "$_v"; done
 here=$(cd -- "$(dirname -- "$0")" && pwd)
 
 printf '########## 1/13 pairing（install/uninstall）##########\n'

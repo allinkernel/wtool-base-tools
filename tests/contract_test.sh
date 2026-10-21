@@ -13,6 +13,13 @@
 #   9. kill-self-forever：要逐字确认；删 wtool 的、不删别人的
 set -eu
 
+# ‼️ 先把跑测试那个 shell 里**陈旧的** WTOOL_* 摘掉。
+#    不摘的后果（2026-10-22 实测）：夹具里有几个"模拟项目自己的 install.sh"，
+#    它们会照着 `$WTOOL_PREFIX` 往 `$WTOOL_PREFIX/bin/` 里建链 —— 而那个旧值
+#    指向**真** `~/.wtool/usr`，于是 5 条测试链漏进了真 HOME（指向 /tmp 的临时夹具）。
+#    摘干净之后（或 `env -i` 跑）这个目录一个字节都不会动。
+for _v in $(env | sed -n 's/^\(WTOOL[A-Za-z_]*\)=.*/\1/p' || true); do unset "$_v"; done
+
 here=$(cd -- "$(dirname -- "$0")" && pwd)
 boot=$(dirname -- "$here")
 WT="$boot/wtool.sh"
