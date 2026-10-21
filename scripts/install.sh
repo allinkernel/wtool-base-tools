@@ -949,7 +949,7 @@ if [ "$RC_MODE" = file ]; then
 
       source $_pr_dir/wtool-bashrc        # zsh 用户：source $_pr_dir/wtool-zshrc
 
-  之后 `wtool` 命令、`$WTOOL_HOME/usr/bin` 都在 PATH 上了；想验证：`wtool check`
+  之后 wtool 命令、$WTOOL_HOME/usr/bin 都在 PATH 上了；想验证：wtool check
 
 TIP
 fi
