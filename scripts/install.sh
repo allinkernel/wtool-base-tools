@@ -903,6 +903,21 @@ rc_file_of() {   # <shell> → 打印 rc 路径
     esac
 }
 
+# 缺的 rc 先建出来（建一个本来不存在的文件不算"改你的东西"，不需要问）；
+# 已存在的仍走下面的 case（ask/write/print）。
+# 2026-10-21 VM 实测：这段原来被我放在 `else`（"rc 缺两行"那支）里，
+# 而 VM 上 `.bashrc`/`.zshrc` 都已有两行 → `_rc_targets` 为空 → 从没执行过 →
+# `~/.zshenv` 没被创建。**必须在分支之前**，与 rc 有没有那两行无关。
+if [ "$DRY_RUN" != 1 ]; then
+    for _sh in zsh bash; do
+        _rc_f=$(rc_file_of "$_sh")
+        [ -e "$_rc_f" ] || rc_create "$_rc_f" "$_sh"
+    done
+    # zsh 当登录 shell / 从没 source 过 wtool env 的 shell 里敲 zsh 时，
+    # 都走不到 env.* —— 这条单独补在 ~/.zshenv（幂等，靠固定标记判重）。
+    zsh_module_path_write
+fi
+
 _rc_targets=""
 for _sh in zsh bash; do
     _rc_f=$(rc_file_of "$_sh")
@@ -927,17 +942,6 @@ TIP
         [ -f "$_rc_f" ] || continue
         say "      $_rc_f ：source \${WTOOL_HOME}/env.$_sh"
     done
-
-    # 缺的 rc 先建出来（建一个本来不存在的文件不算"改你的东西"，不需要问）；
-    # 已存在的仍走下面的 case（ask/write/print）。
-    if [ "$DRY_RUN" != 1 ]; then
-        for _sh in zsh bash; do
-            _rc_f=$(rc_file_of "$_sh")
-            [ -e "$_rc_f" ] || rc_create "$_rc_f" "$_sh"
-        done
-        # zsh 当登录 shell 时不会经过 env.*，所以这条单独补在 ~/.zshenv（幂等）
-        zsh_module_path_write
-    fi
 
     _do_write=0
     case $RC_MODE in
