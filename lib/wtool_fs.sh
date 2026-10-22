@@ -2146,7 +2146,13 @@ wt_pack_offline_all() {
 
     rm -f -- "$_oa_out/$_oa_asset" "$_oa_out/$_oa_asset.sha256" \
              "$_oa_out/$_oa_check" "$_oa_out/$_oa_asset".part-* 2>/dev/null || true
+    # **无条件排除 Python 构建垃圾**（2026-10-22 实测）：
+    # 打包期间只要有人在工作树里跑过一次 python（哪怕只是 import 一下），就会冒出
+    # `__pycache__/xxx.cpython-312.pyc`；它是 gitignore 里的 untracked 文件，却会被
+    # "无脑 find + tar" 收进包 → **同一个 HEAD 连打两遍 sha 不同**（26.04 第一轮就是这么失败的）。
+    # 判据：包里不许出现 `__pycache__` / `*.py[cod]`；这条 grep 和 check 里的禁品断言是成对的。
     ( cd -- "$_oa_build" && find . -mindepth 1 | sed 's|^\./||' ) \
+        | grep -vE '(^|/)__pycache__(/|$)|\.py[cod]$' \
         | LC_ALL=C sort > "$_oa_scratch/all.tar.list"
     # ⚠️ **不加 --prefix**：清单里的路径本来就带 `.wtool/` 这一层。
     wt_tar_create "$_oa_out/$_oa_asset" "$_oa_build" "$_oa_scratch/all.tar.list"

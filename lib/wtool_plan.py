@@ -5532,10 +5532,19 @@ def offline_all_check(args):
             rel = os.path.relpath(p, home)
             if name in (".git", DIR_LAYER, "__release"):
                 fatal.append("禁品在包里（判据 7）: %s" % rel)
+            # Python 构建垃圾：打包期间工作树里跑过一次 python 就会冒出来，
+            # 是 gitignore 的 untracked 文件 → 会把"同一 HEAD 打两遍 sha 相同"破掉
+            # （2026-10-22 实测：26.04 第一轮多出一个 gerrit_query.cpython-312.pyc）。
+            if name == "__pycache__":
+                fatal.append("禁品在包里（判据 7，Python 缓存）: %s" % rel)
             if name == "projects" and os.path.dirname(rel) == os.path.join(DIR_WTOOL, ".repo"):
                 fatal.append("禁品在包里（判据 7）: %s" % rel)
             if name == "project-objects":
                 fatal.append("禁品在包里（判据 7）: %s" % rel)
+        for _f in filenames:
+            if _f.endswith((".pyc", ".pyo", ".pyd")):
+                fatal.append("禁品在包里（判据 7，Python 缓存）: %s"
+                             % os.path.relpath(os.path.join(dirpath, _f), home))
         if "dist.json" in filenames:
             fatal.append("包里出现 dist.json（%s）—— 离线族**不放** dist.json（D51）"
                          % os.path.relpath(dirpath, home))
