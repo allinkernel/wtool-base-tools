@@ -51,7 +51,7 @@ fi
 #    `datetime` 这些 .so 的（宿主那份是 `/usr/lib/x86_64-linux-gnu/zsh/5.9/zsh/`），
 #    容器里那个路径不存在 → `zle` / `bindkey` / `add-zsh-hook` 全成
 #    "command not found"（实测：`zle -l` 报 cannot open shared object file）。
-#    **hook 类的 shell 集成恰恰靠它们**（zoxide/navi 绑键、atuin/direnv 挂钩子），
+#    **hook 类的 shell 集成恰恰靠它们**（zoxide/navi 绑键、direnv 挂钩子），
 #    不补这条软链，验出来的就不是用户机器上的那个行为。照上面 CA 证书同一招。
 if [ -d /h/usr/lib/x86_64-linux-gnu/zsh ] && [ ! -e /usr/lib/x86_64-linux-gnu/zsh ]; then
     mkdir -p /usr/lib/x86_64-linux-gnu
@@ -60,7 +60,7 @@ fi
 # ‼️ 还有 **zsh 的函数目录**：`add-zsh-hook` 是 autoload 出来的（不是模块），
 #    它住在 `/usr/share/zsh/functions/Misc/`。容器里没有 zsh，于是
 #    `add-zsh-hook: function definition file not found` —— 症状是"钩子函数定义了但
-#    没挂上去"（atuin / direnv / starship 都走它），只看函数名会以为一切正常。
+#    没挂上去"（direnv / starship 都走它），只看函数名会以为一切正常。
 if [ -d /h/usr/share/zsh ] && [ ! -e /usr/share/zsh ]; then
     ln -sfn /h/usr/share/zsh /usr/share/zsh
 fi
@@ -100,7 +100,7 @@ printf '# 用户自己的 zshrc\nsetopt auto_cd\n' > "$HOME/.zshrc"
 echo
 echo "=== 1. 从真工作区拷 ② 类项目（A 档 + 第 ⑦.3 块的 hook 类 / B 档）==="
 # 默认七个；`WTOOL_ACC_BIG=1` 时带上 qsv（56 MB，最慢的一节，见下面 E 段）
-PROJS="bat procs fzf zoxide direnv atuin starship navi rclone watchexec"
+PROJS="bat procs fzf zoxide direnv starship navi rclone watchexec"
 if [ "${WTOOL_ACC_BIG:-0}" = 1 ]; then PROJS="$PROJS qsv"; fi
 for p in $PROJS; do
     # 缺一个就**当场说清缺谁**再停：静默少拷一个的后果是后面某节"工具不存在"，
@@ -219,7 +219,7 @@ $WT uninstall "$FZ" >/dev/null
     && { echo "    ❌ L2 链没撤掉"; exit 1; } || echo "    ✅ L2 链撤掉了"
 
 echo
-echo "########## D. hook 类（第 ⑦.3 块）：zoxide / direnv / atuin / starship / navi ##########"
+echo "########## D. hook 类（第 ⑦.3 块）：zoxide / direnv / starship / navi ##########"
 # 判据是"source 完 env 之后，**这个 shell 里**那个函数真的注册了"：
 #   · zsh 用 `zsh -f -i`（**-i 是关键**：zoxide/direnv 的 init 输出把注册包在
 #     交互式判断里，非交互的 `zsh -c` 一个定义都不会有 —— 不是生成物坏了，
@@ -289,10 +289,6 @@ BEOF
 hook_one zoxide "zoxide " "__zoxide_z" "__zoxide_z"
 # ⚠️ direnv 的 `--version` **只打版本号**（`2.38.2`），不带命令名 —— 拿 "direnv " 去比会冤枉好的
 hook_one direnv "2.38.2" "_direnv_hook" "_direnv_hook"
-# atuin：zsh 侧那个钩子叫 `_atuin_preexec`（单下划线），bash 侧是 `__atuin_preexec`
-#        （双下划线，靠 bash-preexec 挂进 `preexec_functions`）—— **两边名字不一样**，
-#        所以 hook_one 才要四个参数（实测出来的，不是猜的）
-hook_one atuin "atuin " "_atuin_preexec" "__atuin_preexec"
 # starship：zsh 侧 `prompt_starship_precmd`，bash 侧 `starship_precmd`（也差一个前缀）。
 #        ⚠️ 它的 `init bash` 输出只是**一行 eval**（`eval -- "$(starship init bash
 #        --print-full-init)"`），所以那个绝对路径是**安装时**写进去的 —— 正好也验了

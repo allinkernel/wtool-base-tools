@@ -36,7 +36,7 @@ echo "发行版 : $DISTS"
 # 三个容器同时 install 时，各自的 `<generate>` 会往**同一个**工作区 `__output/`
 # 写临时文件（`__output/x.wtool-new.<容器里的 pid>`，pid 常常撞），于是同一个
 # 文件被两个容器同时写 → 账本里记的 sha256 每次都不一样（2026-10-21 实测：
-# starship/atuin/fzf 三条 generate 的 hash 三次三个值）。要"两次打包逐字节相同"，
+# starship/zoxide/fzf 三条 generate 的 hash 三次三个值）。要"两次打包逐字节相同"，
 # 就在串行里比 —— 并行跑出来的包**不是**可复现的基准。
 SEQ=${SEQ:-0}
 pids=""
