@@ -3391,7 +3391,9 @@ cmd_doctor() {
     elif [ -e "$_uk" ]; then
         wt_warn "~/usr       : 存在但不是软链（应该是 → $WTOOL_PREFIX）"
     else
-        wt_info "~/usr       : 还没有（装第一个项目时由引擎建）"
+          # 2026-10-21 起**不再创建** `~/usr`（ADR-0046）：装完只多 `.wtool/` 与 rc 两行。
+          # 原来这里写"装第一个项目时由引擎建"—— 那句话现在是错的，会让人去找一条永远不会出现的链。
+          wt_info "~/usr       : 不创建（装完只多 .wtool/ 与 rc 两行；ADR-0046）"
     fi
     # 日志目录（ADR-0045 §1.9）：**本机**、不迁移、永远读最新那个
     _dl_latest=$(wt_log_dir_latest)
